@@ -43,8 +43,10 @@ H1_2_ACTUATOR_M107_24_2 = BuiltinPositionActuatorCfg(
     ".*_hip_roll.*",
     "torso_joint",
   ),
-  stiffness=98.7,
-  damping=6.3,
+  # stiffness=98.7,  # original mjlab value
+  # damping=6.3,     # original mjlab value (kd/kp=0.064, overdamped)
+  stiffness=200.0,   # matches unitree_rl_gym / h1v2-Isaac consensus
+  damping=2.5,       # matches unitree_rl_gym / h1v2-Isaac consensus
   effort_limit=200.0,
   armature=0.025,
 )
@@ -52,8 +54,10 @@ H1_2_ACTUATOR_M107_24_1 = BuiltinPositionActuatorCfg(
   target_names_expr=(
     ".*_knee.*",
   ),
-  stiffness=157.7,
-  damping=10.1,
+  # stiffness=157.7,  # original mjlab value
+  # damping=10.1,     # original mjlab value
+  stiffness=300.0,    # matches unitree_rl_gym / h1v2-Isaac consensus
+  damping=4.0,        # matches unitree_rl_gym / h1v2-Isaac consensus
   effort_limit=300.0,
   armature=0.04,
 )
@@ -64,8 +68,10 @@ H1_2_ACTUATOR_GO2HV_1 = BuiltinPositionActuatorCfg(
     ".*_shoulder_pitch.*",
     ".*_shoulder_roll.*",
   ),
-  stiffness=19.7,
-  damping=1.3,
+  # stiffness=19.7,  # original mjlab value
+  # damping=1.3,     # original mjlab value
+  stiffness=40.0,    # matches unitree_rl_gym / h1v2-Isaac consensus
+  damping=2.0,       # matches unitree_rl_gym / h1v2-Isaac consensus
   effort_limit=40.0,
   armature=0.005,
 )
