@@ -4,7 +4,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=/data/work/%u/ramlab_ws/slurm_logs/%j.out
 #SBATCH --error=/data/work/%u/ramlab_ws/slurm_logs/%j.err
 
@@ -32,7 +32,7 @@ nvidia-smi dmon -s u -d 1 > gpu_util.log &
 
 python scripts/train.py Unitree-H1_2-Flat \
     --env.scene.num-envs ${NUM_ENVS:-16384} \
-    --agent.max-iterations ${MAX_ITER:-5001}
+    --agent.max-iterations ${MAX_ITER:-6001}
 
 # Auto-sync after training
 wandb sync --sync-all
