@@ -28,11 +28,12 @@ export WANDB_MODE=offline
 
 cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 
-nvidia-smi dmon -s u -d 1 > gpu_util.log &
+# Create a gpu usage log
+#nvidia-smi dmon -s u -d 1 > gpu_util.log &
 
 python scripts/train.py Unitree-H1_2-Flat \
     --env.scene.num-envs ${NUM_ENVS:-16384} \
-    --agent.max-iterations ${MAX_ITER:-6001}
+    --agent.max-iterations ${MAX_ITER:-8001}
 
 # Auto-sync after training
 wandb sync --sync-all

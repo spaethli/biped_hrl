@@ -61,6 +61,9 @@ private:
 
     std::thread policy_thread;
     bool policy_thread_running = false;
+
+    // [SAFETY FILTER] — remove this line when reverting
+    int hold_counter_{0};
 };
 
 REGISTER_FSM(State_RLBase)

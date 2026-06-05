@@ -4,6 +4,14 @@
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include <unordered_map>
 
+// [SAFETY FILTER] set to 0 to revert to unfiltered policy output
+#define SAFETY_FILTER 0
+#if SAFETY_FILTER
+#  include "h1_2_limits.h"
+#  include <cmath>
+#  include <algorithm>
+#endif
+
 namespace isaaclab
 {
 // Keyboard velocity commands — copied from deploy/robots/g1/src/State_RLBase.cpp.
@@ -17,8 +25,9 @@ REGISTER_OBSERVATION(keyboard_velocity_commands)
     std::string key = FSMState::keyboard->key();
     static auto cfg = env->cfg["commands"]["base_velocity"]["ranges"];
 
+    // Here you can change the input velocity of the keyboard
     static std::unordered_map<std::string, std::vector<float>> key_commands = {
-        {"w", { 1.0f,  0.0f,  0.0f}},
+        {"w", { 1.0f,  0.0f,  0.0f}}, 
         {"s", {-1.0f,  0.0f,  0.0f}},
         {"a", { 0.0f,  1.0f,  0.0f}},
         {"d", { 0.0f, -1.0f,  0.0f}},
@@ -60,7 +69,49 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
 void State_RLBase::run()
 {
     auto action = env->action_manager->processed_actions();
-    for(int i(0); i < env->robot->data.joint_ids_map.size(); i++) {
-        lowcmd->msg_.motor_cmd()[env->robot->data.joint_ids_map[i]].q() = action[i];
+
+#if SAFETY_FILTER
+    static constexpr float kTiltLimit  = 0.44f; // ~25 deg
+    static constexpr int   kRampCycles = 50;    // 100 ms at 500 Hz
+
+    // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
+    const auto& q = env->robot->data.root_quat_w;
+    float pitch = std::asin(std::clamp(2.0f*(q.w()*q.y() - q.z()*q.x()), -1.0f, 1.0f));
+    float roll  = std::atan2(2.0f*(q.w()*q.x() + q.y()*q.z()), 1.0f - 2.0f*(q.x()*q.x() + q.y()*q.y()));
+    bool tilt_safety = (std::abs(pitch) > kTiltLimit || std::abs(roll) > kTiltLimit);
+    if (tilt_safety)
+        spdlog::warn("[Safety] Tilt: pitch={:.2f} roll={:.2f} rad", pitch, roll);
+
+    // Joint limit check — any policy-controlled joint out of range triggers whole-robot hold
+    bool joint_hold = false;
+    for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
+        int jid = (int)env->robot->data.joint_ids_map[i];
+        float q_meas = env->robot->data.joint_pos[i];
+        if (q_meas < h1_2_joint_limits[jid].min || q_meas > h1_2_joint_limits[jid].max) {
+            joint_hold = true;
+            spdlog::warn("[Safety] Hold: joint {} q={:.3f} out of [{:.3f}, {:.3f}]",
+                jid, q_meas, h1_2_joint_limits[jid].min, h1_2_joint_limits[jid].max);
+            break;
+        }
     }
+
+    // Ramp hold counter up/down over kRampCycles ticks to avoid torque spikes
+    bool hold_active = joint_hold || tilt_safety;
+    if (hold_active) hold_counter_ = std::min(hold_counter_ + 1, kRampCycles);
+    else             hold_counter_ = std::max(hold_counter_ - 1, 0);
+    float alpha = static_cast<float>(hold_counter_) / kRampCycles;
+
+    for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
+        int jid = (int)env->robot->data.joint_ids_map[i];
+        float q_meas = env->robot->data.joint_pos[i];
+        // alpha=0: pure policy output  |  alpha=1: hold at current measured position
+        float q_cmd = (1.0f - alpha) * action[i] + alpha * q_meas;
+        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
+    }
+#else
+    // Original unfiltered policy output
+    for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {
+        lowcmd->msg_.motor_cmd()[(int)env->robot->data.joint_ids_map[i]].q() = action[i];
+    }
+#endif
 }

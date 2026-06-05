@@ -1,6 +1,7 @@
 *.egg-info
 .idea
 outputs
+COLCON_IGNORE
 logs
 wandb
 MUJOCO_LOG.TXT
