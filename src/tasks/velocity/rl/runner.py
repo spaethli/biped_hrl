@@ -15,6 +15,9 @@ class VelocityOnPolicyRunner(MjlabOnPolicyRunner):
 
   def save(self, path: str, infos=None):
     super().save(path, infos)
+    self._export_policy_onnx(path)
+
+  def _export_policy_onnx(self, path: str) -> None:
     policy_path = path.split("model")[0]
     filename = "policy.onnx"
     self.export_policy_to_onnx(policy_path, filename)

@@ -44,6 +44,21 @@ def foot_contact_forces(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tenso
   return torch.sign(forces_flat) * torch.log1p(torch.abs(forces_flat))
 
 
+def hrl_goal(env: ManagerBasedRlEnv, dim: int = 3) -> torch.Tensor:
+  """High-level goal observation for HRL (A1).
+
+  Reads the goal buffer the hierarchical runner writes to ``env.hrl_goal`` when the
+  high level fires. The goal lives in the planar base-velocity subspace
+  ``(vx, vy, yaw_rate)``; ``dim`` is configurable via the runner cfg (``goal_dim``).
+  Returns zeros if the buffer is not yet initialised (e.g. during model construction
+  before the runner sets it), so the obs group resolves cleanly.
+  """
+  goal = getattr(env, "hrl_goal", None)
+  if goal is None:
+    return torch.zeros(env.num_envs, dim, device=env.device)
+  return goal
+
+
 def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Tensor:
     global_phase = (env.episode_length_buf * env.step_dt) % period / period
     phase = torch.zeros(env.num_envs, 2, device=env.device)
