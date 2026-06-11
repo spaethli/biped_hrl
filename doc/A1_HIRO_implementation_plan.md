@@ -1,10 +1,180 @@
 # A1 — HIRO (Hybrid PPO + TD3) Implementation Plan
 
-> **Status:** Design doc for review. No code written yet.
+> **Status:** Milestones 1 & 2 DONE (scaffolding + oracle-HL LL validated & stable).
+> **Milestone 3 — `hl=ppo` IMPLEMENTED & TESTED: naive on-policy ppo FAILS to track
+> (4 runs; credit-assignment + co-training instability). Decision pending: one more
+> ppo lever vs proceed to M4 (TD3, the designed fix).** See §0 "M3 experiment results".
 > **Scope:** Architecture A1 of the thesis (structural hierarchy). Hybrid design:
 > on-policy PPO low level + off-policy TD3 high level with HIRO goal-relabeling
 > correction. Relabeling is a runtime toggle (enables a clean ablation).
 > **Framework:** stays in `unitree_rl_mjlab` + `mjlab` + `rsl_rl`. No Isaac Lab.
+
+---
+
+## 0. CURRENT STATE & WHERE TO RESUME (updated 2026-06-10)
+
+**Milestones 1 & 2 are DONE. The oracle-HL low level is validated and stable. Next
+is Milestone 3 (`hl=ppo`).** The implementation diverged from the original plan
+(§1–§13 below) in several important ways. **This section is authoritative where it
+conflicts with the older sections.**
+
+### What's built and working
+- Task `Unitree-H1_2-Flat-A1` registered (`config/h1_2_a1/{__init__,env_cfgs,rl_cfg}.py`).
+- `HierarchicalRunner` (`rl/hrl/hrl_runner.py`) **inherits `VelocityOnPolicyRunner`**
+  (so it gets the ONNX export). Drives the co-train loop, A0 warm-start, save/load.
+- `HighLevel` ABC + `OracleHighLevel` (`rl/hrl/high_level.py`). Interface:
+  `act(env,obs,state)→V*`, `begin_window`, `accumulate(task_rew)`, `end_window`,
+  `update`, `state_dict/load_state_dict`, `train_mode/eval_mode`.
+- Declarative goal space `rl/hrl/goal_space.py` (**replaces** the planned `goal_env.py`),
+  now with `GoalSpace.scale(env)` (per-dim delta scale; velocity tracks the twist
+  curriculum) for the learned-HL HIRO map `V* = state + scale*g`.
+- `HighLevelPpo` (`rl/hrl/high_level.py`, M3) — a 2nd `rsl_rl.PPO` at the HL timescale,
+  slotted into the existing `HighLevel` interface (no co-train-loop changes beyond
+  threading `extras` into `end_window` for truncation bootstrap). Smoke-tested: trains,
+  warm-starts, saves `hl` state, resumes, exports ONNX.
+
+### Key deviations from the original plan (read these)
+1. **Warm-start is the LOAD-BEARING fix** (plan §12.3 said train from scratch — WRONG
+   in practice). On-policy PPO can't discover walking from scratch in feasible time.
+   The LL is warm-started from a converged **A0 actor** via a *gap-aware* partial
+   state-dict copy: the `command` term sits **mid-vector (cols 6:9), not last**, so
+   the copy drops A0's command cols and shifts the rest (A1 `[0:6]←A0[0:6]`,
+   `[6:89]←A0[9:92]`, goal cols fresh). Critic aligns cleanly (keeps command). This
+   is THE enabler: iter-0 ep_len jumps to hundreds; A1 even **out-tracks** A0.
+   `--agent.warm-start-path <A0 model.pt>`. Diagnostic it worked: high iter-0 ep_len.
+2. **Goal space is declarative & configurable; evolved 3→7→3 dims.** `goal_components`
+   list is the single source of truth (set in `rl_cfg.py`; the env derives its goal
+   obs dim from it via `__init__.py`). `goal_dim` is always derived, never hardcoded.
+   History: started velocity-only (3), expanded to **velocity+orientation+height (7)**
+   to inject survival signal, then ran a **velocity-only (3)** ablation.
+   **Velocity-only ablation result (CONFIRMED, full 10k, 1 seed each; default 7-dim
+   run `2026-06-09_16-22-40` vs velocity-only `2026-06-10_08-13-49`+resume, same
+   warm-start/envs/entropy — only goal_components differs):**
+   - Survival IDENTICAL: both ep_len ~1000, falls ~0 → orient/height NOT needed for
+     survival (warm-start+bootstrap carry it).
+   - **Default (7-dim) tracks BETTER**, esp. yaw: @10k err_yaw 0.47 vs 0.62 (~33%),
+     err_xy 0.325 vs 0.365 (~12%); and the default policy is calmer (action std 0.87
+     vs 1.30). Gaps consistent over iters 5k–10k (yaw & std gaps robust; the err_xy
+     gap is within plausible 1-seed noise).
+   - Interpretation: orientation+height act as **stabilizing regularizers** — they
+     anchor the torso upright/at height (even though proj-gravity is yaw-invariant),
+     which lowers std and makes velocity (esp. the hard yaw axis) easier to track.
+   - **DECISION: keep the default 7-dim goal space.** Velocity-only is a clean
+     negative result for the writeup ("richer base-pose goal isn't needed for
+     survival but materially improves tracking quality, yaw most").
+3. **Encoding = ABSOLUTE target + directional observation** (oracle), NOT the planned
+   `V*=v_t+g` delta. Oracle emits absolute `V*` = command velocity (+ nominal upright/
+   height for non-velocity comps). The LL **observes** the remaining delta `V*−s_i`
+   and is rewarded `−Σ_c w_c‖V*−s_{i+1}‖`. For the **learned** HL the chosen encoding
+   is **HIRO delta** `V*=s_t+scale·g`, `scale` read from the twist curriculum (Liam's
+   call). For the oracle, absolute and delta coincide; the difference only bites for a
+   learned HL. (See §`Canonical HIRO` note at end of §0.)
+4. **Suicide fix: `fell_over=time_out` (NOT in original plan).** The LL's always-
+   negative goal-distance reward made early termination an attractor (die fast → stop
+   accumulating negative reward; HIRO's domains never terminate so they never hit
+   this). Fix: mark `fell_over` as a **truncation** (`time_out=True`) so PPO bootstraps
+   it (`γ·V`) instead of cutting value to 0. Set in the **A1 env cfg ONLY**
+   (`config/h1_2_a1/env_cfgs.py`); A0 keeps a true terminal (A0 diverges with
+   time_out). One-line toggle for the no-bootstrap ablation.
+5. **Hyperparams that matter:** `entropy_coef=0.005` (0.01 lets action std blow up to
+   ~2 and collapse), `desired_kl=0.005`, velocity goal weight 3, `num_steps_per_env=24`,
+   `c=8`, `gamma_hi=0.99**8`. LR is adaptive and tends to sit near its floor (1e-5).
+
+### Results so far (oracle HL)
+- **Survival SOLVED:** ep_len ~1000, falls ~0, stable to **10k iters** (two long runs,
+  no collapse) with the newest small-interval A0 warm-start.
+- **A1 LL OUT-TRACKS its A0 warm-start:** err_xy 0.56→0.33, err_yaw 0.81→0.49 — a real
+  positive signal for the hierarchy (goal-conditioned LL beat the flat baseline).
+- One collapse (run `11-36-15`, a *different* warm-start) at ~iter 2400 — the
+  "deferred-suicide" idea (bootstrap only defers) is an **UNPROVEN hypothesis**; two
+  long runs held, so it's likely warm-start-specific or stochastic. Don't assume the
+  bootstrap is inadequate. Candidate fix only if it recurs: positive reward / alive
+  bonus (not adopted; Liam prefers staying close to HIRO).
+- std creeps (0.33→0.87 over 10k) but benign at entropy 0.005.
+- Inherited A0 weakness: **poor yaw tracking → circling** (yaw is unconstrained by the
+  orientation/height goals, which are yaw-invariant; yaw command range is widest).
+  Controlled-for in the A0-vs-A1 comparison.
+- Reproducibility: same-config runs diverge a lot (GPU non-determinism + RL chaos);
+  `num_envs` is effectively a hyperparameter — hold it fixed within a comparison set,
+  use ≥2 seeds.
+
+### Milestone 3 — `HighLevelPpo` (IMPLEMENTED; naive ppo FAILS to track — see results)
+Slots into the **existing** `HighLevel` interface + `hrl_runner` co-train loop.
+`HierarchicalRunner._make_high_level()` returns it for `hl_algorithm=="ppo"`. Config:
+`HlPpoCfg` (`config/h1_2_a1/rl_cfg.py`, field `hl_ppo`).
+- A 2nd `rsl_rl.PPO`. HL actor obs = `("policy","command")` — the HL **sees** the
+  command (it's the task input); action head dim = `goal_dim`. Own `RolloutStorage`
+  sized `num_steps_per_env//c` (= 3) per env.
+- `act(env,obs,state)`: sample goal `g`, store HL transition (obs/action/value/logprob),
+  return `V* = state + scale·g` (HIRO delta). `begin_window` zeroes the window-reward;
+  `accumulate(task_rew)` sums the A0 task reward; `end_window` finalizes (reward=Σ, done,
+  + `γ_hi·V` truncation bootstrap when the step extras carry `time_outs`) and pushes to
+  the HL `RolloutStorage`; `update()` = `compute_returns(γ_hi)` + PPO `update`, returning
+  a loss dict logged under `hl/` (incl. `hl/goal_abs_mean`).
+- `GoalSpace.scale(env)` added (per-dim; velocity = half of the live twist command
+  ranges, orientation = 1.0, height = 0.2 m).
+
+**Deviations from this section's original sketch (now the truth):**
+1. **Linear scaling, NOT tanh.** §5a said "GaussianDistribution squashed/scaled". A
+   tanh squash needs a log-prob Jacobian correction that rsl_rl's `GaussianDistribution`
+   does **not** apply → it would be a silent bug. `g` is the raw Gaussian sample and
+   `scale` linearly maps it. `scale` (≈ command half-range) is the goal's effective
+   reach; tune it if `g` magnitudes (logged as `hl/goal_abs_mean`) look off.
+2. **HL critic obs = `("critic",)`, not `("critic","command")`.** The `critic` group
+   **already contains** the command term (A0 critic, unchanged), so appending `command`
+   would duplicate it.
+3. **One small loop change:** `end_window` now takes `extras` (for the `time_outs`
+   bootstrap). The ABC default ignores it (oracle unaffected).
+
+**Known approximation (M3):** windows are always exactly `c` steps; a mid-window episode
+reset is not closed early — the window's done/reward use the window-end step. Acceptable
+for the naive baseline (matches the existing oracle loop); revisit if HL credit
+assignment looks weak.
+
+### M3 experiment results — naive `hl=ppo` does NOT track (4 runs, 2026-06-10/11)
+All: 4096 envs, A0 warm-start `2026-06-09_08-16-27/model_10000.pt`. The learned HL
+**never learns the command→goal mapping**; it lands in one of two failure basins (or
+oscillates between them). Diagnosis runs (W&B project `biped_hrl`):
+
+| run | knobs | outcome |
+|---|---|---|
+| `a1_ppo_hl_5k` | ent 0.005, **velocity-only (3-dim)** | survive (ep_len ~1000) but **don't track** (err_xy ~1.9, yaw ~2.1). HL entropy collapsed +4.3→−2.1 (std ~0.075), goals shrank → "emit ~no change". |
+| `a1_ppo_7dim_ent02_5k` | ent 0.02, 7-dim | std **blew up** (entropy 9.9→19, goal_abs 8.7) → impossible targets → **robot died** (ep_len ~20). Aborted ~it1500. |
+| `a1_ppo_7dim_ent01_stdcap_5k` | ent 0.01 + **std cap** `(1e-3,1.0)` | **stable & survives** (ep_len ~980), goals bounded (~2) — but **still no track** (err_xy ~1.3, yaw ~2.9, worsening). Aborted ~it2000. → exploration/survival are NOT the bottleneck; the HL *mean* won't learn to track. |
+| `a1_ppo_track4x_nocap_2k` | ent 0.01, cap OFF, **+4× track_lin/track_ang weight** (A1 env) | **oscillated.** Best tracking-while-alive any ppo got (it200–800: err ~0.2 @ ep_len ~100–155) → goals grew 1.5→3.6 → **constant falling** (fell_over ~88, ep_len ~46) → survival recovered but **stopped tracking** (final err_xy ~1.05, yaw ~1.74). Never held survive+track. |
+
+**Conclusion:** naive on-policy `hl=ppo` hits a **credit-assignment + co-training-
+instability wall.** The HL gets only **3 transitions/env/iter** (`num_steps_per_env//c`)
+and the dense task reward's small tracking term is swamped by penalties (`joint_pos_limits`
+~−3.6, `action_rate` ~−3.4) → the HL mean drifts to "stay put". Upweighting tracking (4×)
+creates the incentive (run D's early phase proves it) but on-policy co-training then
+oscillates between *track-and-fall* and *survive-and-don't-track*. This is the expected
+naive-hierarchy failure — **it motivates the off-policy TD3 HL (M4)**: a replay buffer =
+orders-of-magnitude more HL updates, and a deterministic actor + bounded exploration
+noise instead of entropy-driven std (no collapse/blowup failure modes).
+
+**Config state after the session (clean baseline restored):** 4× tracking reward
+**reverted** (A1 env back to A0-matched — RQ2 confound removed, Liam's call); HL std cap
+**off**; HL `entropy_coef=0.01`; goal space 7-dim default; `hl_algorithm` default still
+`oracle` (pass `--agent.hl-algorithm ppo` to run ppo).
+
+**Untried ppo levers if M3-ppo is revisited (low priority — TD3 is the designed fix):**
+(a) **HL horizon**: `num_steps_per_env` 24→48+ → 6+ HL transitions/iter (directly targets
+the credit-assignment thinness; also lengthens the LL rollout); (b) 4× tracking reward
+**+ std cap** together (run D had the incentive, run C had the stability — never combined);
+(c) the std cap + lower entropy. None expected to beat what off-policy TD3 gives for free.
+
+- Optionally export `policy_hl.onnx` too (deferred to the deployment milestone).
+- After ppo: Milestones 4 (`td3 relabel=none`) and 5 (`td3 relabel=hiro`) per §5b/§6.
+
+**Launch:** add `--agent.hl-algorithm ppo` to the standard A1 launch (warm-start path
+included). e.g. `... Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096
+--agent.hl-algorithm ppo --agent.warm-start-path <A0 model.pt> --agent.run-name <name>`.
+
+**Run launch convention:** activate the env and run python directly (NOT `conda run`,
+which buffers and breaks live wandb): `conda activate unitree_mjlab_h1_2_rl && python
+scripts/train.py Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096 --agent.max-iterations N
+--agent.warm-start-path <A0 model.pt> --agent.run-name <name>`.
 
 ---
 
@@ -234,26 +404,34 @@ class HiroOffPolicyCorrection(RelabelStrategy):
 
 ## 7. File-by-file plan
 
+**ACTUAL current structure (✅ exists / ⬜ to build):**
 ```
 src/tasks/velocity/
+├── velocity_env_cfg.py      # ✅ base env; fell_over true-terminal (A1 overrides to time_out)
 ├── config/h1_2_a1/
-│   ├── __init__.py          # register Unitree-H1_2-Flat-A1 (+ -Rough-A1)
-│   ├── env_cfgs.py          # reuse unitree_h1_2_flat_env_cfg(); add `goal` obs
-│   │                        #   group; build LL actor/critic groups (drop cmd)
-│   └── rl_cfg.py            # HrlRunnerCfg: ll (PPO) + hl_algorithm + hl_ppo/hl_td3 + relabel
+│   ├── __init__.py          # ✅ register Unitree-H1_2-Flat-A1; runner cfg = source of
+│   │                        #    truth for goal_components, env derives goal obs dim
+│   ├── env_cfgs.py          # ✅ reuse flat env; _restructure_obs_groups (split actor →
+│   │                        #    policy/command/goal, drop actor); set fell_over time_out
+│   └── rl_cfg.py            # ✅ HrlRunnerCfg: LL=PPO + c/goal_components/goal_weights/
+│                            #    hl_algorithm/relabeling/gamma_hi/warm_start_path/...
 └── rl/
-    ├── runner.py            # (existing VelocityOnPolicyRunner — unchanged)
+    ├── runner.py            # ✅ VelocityOnPolicyRunner (+ _export_policy_onnx, reused by A1)
     └── hrl/
-        ├── __init__.py
-        ├── hrl_runner.py    # HierarchicalRunner: drives LL-PPO + HL (ppo|td3) co-train,
-        │                    #   save/load, export_policy_to_onnx (two models)
-        ├── hl_ppo.py        # HighLevelPpo (wires a 2nd rsl_rl.PPO at the HL timescale)
-        ├── td3.py           # HighLevelTd3 (actor, twin critics, update)
-        ├── storage.py       # HLReplayBuffer (td3) + HLTransition/HLBatch
-        ├── goal_env.py      # GoalConditionedWrapper: base_velocity(), build_ll_obs,
-        │                    #   intrinsic reward, goal buffer the obs term reads
-        └── relabeling.py    # RelabelStrategy + NoRelabel + HiroOffPolicyCorrection
+        ├── __init__.py      # ✅ exports HierarchicalRunner, HighLevel, OracleHighLevel
+        ├── hrl_runner.py    # ✅ HierarchicalRunner(VelocityOnPolicyRunner): co-train loop,
+        │                    #    warm-start (_partial_load gap-aware), save/load+hl, onnx
+        ├── goal_space.py    # ✅ GoalComponent/GoalSpace + registry (REPLACES goal_env.py);
+        │                    #    extract/reward/oracle_target/scale; goal_dim derived
+        ├── high_level.py    # ✅ HighLevel ABC + OracleHighLevel + HighLevelPpo (M3)
+        ├── td3.py           # ⬜ HighLevelTd3 (M4)
+        ├── storage.py       # ⬜ HLReplayBuffer + HLTransition/HLBatch (M4)
+        └── relabeling.py    # ⬜ RelabelStrategy + NoRelabel + HiroOffPolicyCorrection (M5)
 ```
+NOTE: there is **no `GoalConditionedWrapper`** — the goal is a plain obs term
+(`mdp.hrl_goal` reads `env.hrl_goal`, written by the runner each step); the goal space
+logic lives in `goal_space.py`. The LL obs surgery is done by `_restructure_obs_groups`
+in `env_cfgs.py`, not a wrapper.
 
 ### Goal injection mechanism (keeps the env config reusable)
 The A1 `env_cfgs.py` adds a 3-dim `goal` observation **group** whose term reads
@@ -310,14 +488,16 @@ LL (existing PPO metrics) + `intrinsic_reward/mean`, `task_reward/mean`,
 
 ## 10. Milestones (recommended order)
 
-1. **Scaffolding + plumbing.** A1 task package, goal obs group, `GoalConditionedWrapper`,
-   `HierarchicalRunner` skeleton. Env builds; shapes verified.
-2. **Oracle-HL sanity test.** Bypass the HL and feed the *true external command*
-   as the goal directly. The LL should learn to track goal=command and reach ≈ A0
-   performance. **This validates the entire LL plumbing (obs surgery, intrinsic
-   reward, goal injection) before any HL learning is introduced.**
-3. **`hl=ppo` (2-level PPO).** Wire `HighLevelPpo`; co-train. This is the naive-
-   hierarchy baseline and the simplest learned HL — get it stable first.
+1. ✅ **DONE — Scaffolding + plumbing.** A1 task package, goal obs group (declarative
+   `goal_space.py`, not a wrapper), `HierarchicalRunner`. Env builds; shapes verified.
+2. ✅ **DONE — Oracle-HL sanity test** (plus the fixes it forced: warm-start,
+   `fell_over=time_out`, entropy 0.005). LL tracks goal=command and reaches/exceeds A0
+   (out-tracks it). Stable to 10k iters. See §0 for results & deviations.
+3. ⚠️ **IMPLEMENTED & TESTED — `hl=ppo` (2-level PPO) does NOT track.** `HighLevelPpo`
+   wired in and co-trains (smoke + 4 diagnosis runs). The learned HL never learns
+   command→goal (credit-assignment + co-training instability). **Decision pending:** one
+   more ppo lever (HL horizon, or 4× track + std cap) vs proceed to M4. Full results in
+   §0 "M3 experiment results" (authoritative over §5a).
 4. **`hl=td3 relabel=none`.** Add `HighLevelTd3` + replay buffer; co-train. Compare
    to `hl=ppo`.
 5. **`hl=td3 relabel=hiro`.** Add the correction; log accept-rate; ablate vs row 4.
@@ -339,15 +519,21 @@ LL (existing PPO metrics) + `intrinsic_reward/mean`, `task_reward/mean`,
 
 ---
 
-## 12. Confirmed decisions
+## 12. Confirmed decisions  *(⚠ items 2–3 superseded by §0 — see notes)*
 
-1. **`c` = 8** (0.16 s).
-2. **Goal range tied to the command curriculum** (`goal_scale=None` → derived from
-   `commands["twist"].ranges`), so editing the curriculum rescales the goal.
-3. **Train A1 from scratch** (no A0 warm-start) — cleaner A0↔A1 comparison.
-4. **`γ_hi = γ^c`** — HL and LL horizons aligned.
-5. **HL switch is the learner:** `hl_algorithm ∈ {ppo, td3}`; `relabeling ∈ {none,
-   hiro}` applies only to `td3`. Relabeling cannot exist on the on-policy `ppo` HL.
+1. **`c` = 8** (0.16 s). ✅ still true.
+2. **Goal range tied to the command curriculum** — still the intent; for the *learned*
+   HL the scale is read from `commands["twist"].ranges`. ⚠ Not yet implemented:
+   `GoalSpace.scale(env)` must be added for Milestone 3.
+3. ⚠ **SUPERSEDED:** "train from scratch" was tried and FAILED. A1 is now **warm-started
+   from a converged A0** (gap-aware partial copy) — this is load-bearing (§0 dev. 1).
+4. **`γ_hi = γ^c`** — HL and LL horizons aligned. ✅
+5. **HL switch is the learner:** `hl_algorithm ∈ {oracle, ppo, td3}`; `relabeling ∈
+   {none, hiro}` applies only to `td3`. ✅ (`oracle` added for M2.)
+6. **NEW — `fell_over=time_out` in the A1 env only** (bootstrap the fall to kill the
+   suicide attractor from the negative goal-distance reward). A0 keeps a true terminal.
+7. **NEW — entropy_coef=0.005, desired_kl=0.005, velocity goal weight 3**; goal space
+   currently **velocity-only (3-dim)** (ablation), declarative via `goal_components`.
 
 ---
 

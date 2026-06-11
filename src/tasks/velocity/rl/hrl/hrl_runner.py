@@ -28,7 +28,7 @@ from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
-from .high_level import HighLevel, OracleHighLevel
+from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 
 
 class HierarchicalRunner(VelocityOnPolicyRunner):
@@ -179,9 +179,21 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
   def _make_high_level(self) -> HighLevel:
     if self.hl_algorithm == "oracle":
       return OracleHighLevel(self.goal_space, command_name="twist")
+    if self.hl_algorithm == "ppo":
+      obs = self.env.get_observations().to(self.device)
+      return HighLevelPpo(
+        self.goal_space,
+        obs,
+        self.env.num_envs,
+        self.cfg["num_steps_per_env"] // self.c,
+        self.goal_dim,
+        self.gamma_hi,
+        self.cfg["hl_ppo"],
+        self.device,
+      )
     raise NotImplementedError(
-      f"hl_algorithm='{self.hl_algorithm}' not implemented yet (milestone 1/2 ship "
-      "'oracle'; 'ppo' and 'td3' arrive in later milestones)."
+      f"hl_algorithm='{self.hl_algorithm}' not implemented yet (milestone 1/2/3 ship "
+      "'oracle' and 'ppo'; 'td3' arrives in later milestones)."
     )
 
   def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
@@ -236,7 +248,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           self.alg.process_env_step(obs, r_lo, dones, extras)
           self.hl.accumulate(task_rew)
           if (k + 1) % self.c == 0:
-            self.hl.end_window(uenv, obs, achieved, dones)
+            self.hl.end_window(uenv, obs, achieved, dones, extras)
 
           # Episode bookkeeping uses task reward (A0-comparable); intrinsic is the
           # LL's actual training signal, logged separately via the loss dict.
@@ -284,8 +296,15 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     saved_dict["infos"] = infos
     saved_dict["hl"] = self.hl.state_dict()
     torch.save(saved_dict, path)
-    # LL input is proprio ++ goal, so deployment feeds the goal where A0 fed the command.
-    self._export_policy_onnx(path)
+    # A1 has no "actor" obs group (split into policy/command/goal); get_base_metadata
+    # reads active_terms["actor"], so alias it to the LL deploy obs (proprio ++ goal)
+    # for the export, then remove it — active_terms is the live dict compute() iterates.
+    om = self.env.unwrapped.observation_manager
+    om.active_terms["actor"] = om.active_terms["policy"] + om.active_terms["goal"]
+    try:
+      self._export_policy_onnx(path)
+    finally:
+      del om.active_terms["actor"]
     if self.cfg["upload_model"]:
       self.logger.save_model(path, self.current_learning_iteration)
 

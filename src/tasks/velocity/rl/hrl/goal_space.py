@@ -68,6 +68,29 @@ def _height_nominal(env) -> torch.Tensor:
   return _robot(env).default_root_state[:, 2:3]
 
 
+# --- Per-dim goal scales (HIRO delta map V* = state + scale * g) -------------
+# g is the high level's bounded Gaussian sample (a *directional* goal: the desired
+# change in state over the window); scale sets the per-dim reach of that delta.
+# Velocity scales track the live twist curriculum so editing the command ranges
+# automatically rescales the goal.
+
+
+def _vel_scale(env) -> torch.Tensor:
+  r = env.command_manager.get_term("twist").cfg.ranges
+  half = lambda lo, hi: max((hi - lo) / 2.0, 1e-3)  # noqa: E731
+  return torch.tensor(
+    [half(*r.lin_vel_x), half(*r.lin_vel_y), half(*r.ang_vel_z)], device=env.device
+  )
+
+
+def _orient_scale(env) -> torch.Tensor:
+  return torch.ones(3, device=env.device)  # projected gravity lives in [-1, 1]
+
+
+def _height_scale(env) -> torch.Tensor:
+  return torch.tensor([0.2], device=env.device)  # ~0.2 m of height deviation
+
+
 @dataclass
 class GoalComponent:
   """One slice of the goal space."""
@@ -78,6 +101,8 @@ class GoalComponent:
   """env -> current value of this slice, shape [N, dim]."""
   nominal: Callable[[object], torch.Tensor]
   """env -> nominal/default target (oracle uses this for non-task components)."""
+  scale: Callable[[object], torch.Tensor]
+  """env -> per-dim delta scale, shape [dim] (learned HL: V* = state + scale*g)."""
   is_task: bool
   """If True, the oracle targets the command instead of the nominal value."""
   weight: float = 1.0
@@ -87,12 +112,15 @@ class GoalComponent:
 # Factory: name -> GoalComponent (given a reward weight).
 _FACTORY: dict[str, Callable[[float], GoalComponent]] = {
   "velocity": lambda w: GoalComponent(
-    "velocity", 3, _vel_extract, lambda e: torch.zeros(e.num_envs, 3, device=e.device), True, w
+    "velocity", 3, _vel_extract, lambda e: torch.zeros(e.num_envs, 3, device=e.device),
+    _vel_scale, True, w
   ),
   "orientation": lambda w: GoalComponent(
-    "orientation", 3, _orient_extract, _orient_nominal, False, w
+    "orientation", 3, _orient_extract, _orient_nominal, _orient_scale, False, w
   ),
-  "height": lambda w: GoalComponent("height", 1, _height_extract, _height_nominal, False, w),
+  "height": lambda w: GoalComponent(
+    "height", 1, _height_extract, _height_nominal, _height_scale, False, w
+  ),
 }
 
 
@@ -109,6 +137,13 @@ class GoalSpace:
   def extract(self, env) -> torch.Tensor:
     """Current state slice s, shape [N, dim]."""
     return torch.cat([c.extract(env) for c in self.components], dim=-1)
+
+  def scale(self, env) -> torch.Tensor:
+    """Per-dim delta scale for the HIRO map V* = state + scale*g, shape [dim].
+
+    Read from the env (velocity tracks the live twist curriculum), so it reflects
+    the active command ranges if the curriculum stage changes between calls."""
+    return torch.cat([c.scale(env) for c in self.components], dim=-1)
 
   def reward(self, target: torch.Tensor, achieved: torch.Tensor) -> torch.Tensor:
     """HIRO intrinsic reward: -Σ_c w_c ||target_c - achieved_c||_2, shape [N]."""
