@@ -29,6 +29,7 @@ from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
 from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
+from .td3 import HighLevelTd3
 
 
 class HierarchicalRunner(VelocityOnPolicyRunner):
@@ -50,6 +51,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl_algorithm: str = train_cfg["hl_algorithm"]
     self.ll_task_reward_coef: float = train_cfg["ll_task_reward_coef"]
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
+    self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
+    self.freeze_ll: bool = self.freeze_ll_path is not None
+    if self.warm_start_path and self.freeze_ll_path:
+      raise ValueError("warm_start_path and freeze_ll_path are mutually exclusive.")
 
     # Declarative goal space -> goal_dim is derived (nothing hardcodes a dimension).
     self.goal_space = build_goal_space(
@@ -79,6 +84,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # A resume-load (if any) runs after __init__ and overrides this.
     if self.warm_start_path:
       self._warm_start_low_level(self.warm_start_path)
+
+    # Freeze-LL mode: load a converged A1 LL in full and freeze it (only the HL learns).
+    if self.freeze_ll_path:
+      self._load_frozen_ll(self.freeze_ll_path)
 
   def _warm_start_low_level(self, path: str) -> None:
     """Initialise the LL PPO actor/critic from an A0 checkpoint.
@@ -126,6 +135,20 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       f"[HRL] Warm-started LL from A0: {path} "
       f"(actor command gap cols [{cmd_start}:{cmd_start + cmd_width}] dropped)"
     )
+
+  def _load_frozen_ll(self, path: str) -> None:
+    """Load a converged A1 LL (actor+critic, full) and freeze it.
+
+    Unlike ``_warm_start_low_level`` (A0->A1 gap-aware partial copy), the source is an
+    A1 LL with the same goal space as this run, so it's a plain strict load — a shape
+    mismatch (wrong goal space) raises here, loudly. The LL then acts as a fixed
+    deterministic policy; only the HL learns (see :meth:`learn`)."""
+    ck = torch.load(path, map_location=self.device, weights_only=False)
+    actor = getattr(self.alg, "_raw_actor", self.alg.actor)
+    critic = getattr(self.alg, "_raw_critic", self.alg.critic)
+    actor.load_state_dict(ck["actor_state_dict"], strict=True)
+    critic.load_state_dict(ck["critic_state_dict"], strict=True)
+    print(f"[HRL] Loaded + FROZE LL from A1 checkpoint: {path} (LL will not learn).")
 
   @staticmethod
   def _source_cols(src_in: int, skip: tuple[int, int]) -> list[int]:
@@ -191,10 +214,55 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         self.cfg["hl_ppo"],
         self.device,
       )
-    raise NotImplementedError(
-      f"hl_algorithm='{self.hl_algorithm}' not implemented yet (milestone 1/2/3 ship "
-      "'oracle' and 'ppo'; 'td3' arrives in later milestones)."
-    )
+    if self.hl_algorithm == "td3":
+      if self.relabeling != "none":
+        raise NotImplementedError(
+          f"relabeling='{self.relabeling}' not implemented yet (M5); use 'none'."
+        )
+      obs = self.env.get_observations().to(self.device)
+      return HighLevelTd3(
+        self.goal_space,
+        obs,
+        self.env.num_envs,
+        self.goal_dim,
+        self.gamma_hi,
+        self.cfg["hl_td3"],
+        self.device,
+      )
+    raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
+
+  def get_inference_policy(self, device: str | None = None):
+    """Hierarchy-aware inference policy for play/eval.
+
+    The base implementation returns the bare LL actor — but the LL's ``goal`` obs is
+    only written by :meth:`learn`, so in play it would stay frozen at zero and the
+    command could never reach the robot. This override mirrors the training loop's
+    goal wiring: fire ``hl.act_inference`` (deterministic, side-effect free) every
+    ``c``-th call to refresh ``V*``, write the remaining delta into ``env.hrl_goal``/
+    ``obs["goal"]`` each step, then run the LL actor.
+
+    Known approximation (matches training): the window clock is not reset on episode
+    resets, so after a mid-window reset the stale target persists for < c steps.
+    """
+    self.alg.eval_mode()
+    self.hl.eval_mode()
+    ll_policy = self.alg.get_policy().to(device)
+    uenv = self.env.unwrapped
+    step = 0
+    target = None
+
+    def policy(obs):
+      nonlocal step, target
+      state = self.goal_space.extract(uenv)
+      if step % self.c == 0:
+        target = self.hl.act_inference(uenv, obs, state)
+      step += 1
+      delta = target - state
+      uenv.hrl_goal = delta
+      obs["goal"] = delta
+      return ll_policy(obs)
+
+    return policy
 
   def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
     if init_at_random_ep_len:
@@ -203,7 +271,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       )
 
     obs = self.env.get_observations().to(self.device)
-    self.alg.train_mode()
+    # Frozen LL: keep it in eval (fixed weights + obs normalizer); only the HL learns.
+    self.alg.eval_mode() if self.freeze_ll else self.alg.train_mode()
+    ll_policy = self.alg.get_policy() if self.freeze_ll else None
+    if self.freeze_ll:
+      # One stochastic forward to populate the (constant) action distribution, so the
+      # per-iter `action_std` logging works — deterministic forwards don't set it.
+      with torch.inference_mode():
+        ll_policy(obs, stochastic_output=True)
     self.hl.train_mode()
     self.logger.init_logging_writer()
 
@@ -226,7 +301,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           uenv.hrl_goal = delta
           obs["goal"] = delta
 
-          actions = self.alg.act(obs)
+          # Frozen LL acts via its deterministic mean (the competent walker; its trained
+          # action std ~1.3 is far too noisy to sample). No rollout storage. The learning
+          # LL uses act(), which samples and records the transition.
+          actions = ll_policy(obs) if self.freeze_ll else self.alg.act(obs)
           obs, task_rew, dones, extras = self.env.step(actions.to(self.env.device))
           obs, task_rew, dones = (
             obs.to(self.device),
@@ -245,7 +323,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           uenv.hrl_goal = post_delta
           obs["goal"] = post_delta
 
-          self.alg.process_env_step(obs, r_lo, dones, extras)
+          if not self.freeze_ll:
+            self.alg.process_env_step(obs, r_lo, dones, extras)
           self.hl.accumulate(task_rew)
           if (k + 1) % self.c == 0:
             self.hl.end_window(uenv, obs, achieved, dones, extras)
@@ -257,9 +336,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
         collect_time = time.time() - start
         start = time.time()
-        self.alg.compute_returns(obs)
+        if not self.freeze_ll:
+          self.alg.compute_returns(obs)
 
-      ll_losses = self.alg.update()
+      ll_losses = {} if self.freeze_ll else self.alg.update()
       hl_losses = self.hl.update()
       loss_dict = {
         **ll_losses,

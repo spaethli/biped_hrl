@@ -15,6 +15,9 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   ```
 - Resume: `--agent.resume True --agent.load-run <dir> --agent.load-checkpoint model_<it>.pt`
   (max-iterations counts ADDITIONAL iters: it runs `start_it + max_iterations`).
+- **max-iterations: always N+1** (e.g. `5001`, not `5000`) — the final checkpoint is
+  named after the last iteration *index*, so `5000` ends at `model_4999.pt` while
+  `5001` gives the round `model_5000.pt`.
 - Play / export ONNX: `python scripts/play.py <TaskID> --checkpoint-file <pt> [--export-onnx | --num-envs 1]`
 
 ## Task IDs
@@ -29,12 +32,33 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   hierarchy). Reads the live code first so the math matches the current implementation.
 - **`/wandb-rl-interpreter`** — interpret/diagnose RL training results from W&B (reward
   curves, episode length, losses, locomotion metrics, training health).
+- **`/sync-docs`** — route session results/decisions/conventions into their canonical
+  docs (plan doc §0, `.claude/docs/`, CLAUDE.md) + auto-memory, with a
+  personal-identifier redaction gate (public repo).
 
 ## Code conventions
 
 - If a fix is 1–2 lines and won't be reused, write it **inline** — no premature helper
   function/method. Factor only on real reuse (called from 2+ places).
+- **Don't just write more and more code: reuse or extend existing functions** before
+  adding new ones. Reuse keeps the codebase understandable and modular.
 - Match the surrounding code's terseness/idiom. 2-space indent.
+
+## Development workflow (no vibe coding)
+
+For any non-trivial change (new feature, algorithm/hyperparameter change, fix beyond
+a few lines), work in explicit stages and get explicit user go-ahead between them:
+
+1. **Analysis** — what happened, with evidence (metrics, traces, file:line), before
+   proposing anything.
+2. **Feature definition** — the precise change(s), what is explicitly NOT changed,
+   and the expected effect.
+3. **Implementation** — step by step, matching the agreed spec.
+4. **Testing** — a test plan defined up front (unit/smoke + success criteria), run
+   after implementing; report results honestly.
+
+Don't start editing code mid-diagnosis because a fix "seems obvious" — present the
+analysis and the proposed change first.
 
 ## Load-bearing gotchas
 
@@ -56,5 +80,10 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 
 - **A1 architecture + current status + next steps → `doc/A1_HIRO_implementation_plan.md` §0**
   (read §0 first; it's authoritative over the older sections).
+- Codebase layout, obs dims, A1 class map → `.claude/docs/codebase-map.md`
+- Architecture matrix A0–A4, RQ2 comparison-cleanliness rule, reproducibility →
+  `.claude/docs/experiment-design.md`
+- HPC cluster (SLURM, NVRTC fix, versions) → `.claude/docs/cluster.md`
+- C++ deploy, ONNX export, replay → `.claude/docs/deployment.md`
 - A0 warm-start checkpoints: `logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt`.
 - W&B: project `biped_hrl` (A1 experiment `h1_2_velocity_a1`, A0 `h1_2_velocity`).

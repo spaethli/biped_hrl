@@ -69,4 +69,12 @@ def unitree_h1_2_flat_a1_env_cfg(
   # always-negative goal-distance reward would otherwise be gamed by terminating
   # early (suicide). A0 keeps fell_over as a true terminal (shared base cfg).
   cfg.terminations["fell_over"].time_out = True
+    # Upweight velocity tracking in the reward the HL optimizes (A1 only; A0 untouched).
+  # With weight 1.0, tracking (~+0.6/ep) is swamped by the penalty terms (joint_pos_limits
+  # ~-3.6, action_rate ~-3.4), so the learned HL's dominant gradient is "reduce penalties"
+  # -> emit V*~=state -> don't track. 4x makes tracking the HL's dominant signal. NOTE:
+  # this diverges A1's reward from A0's (RQ2 confound) -- an A1 HL design choice; revisit
+  # if a clean A0-vs-A1 comparison needs matched weights (retrain A0 + warm-start).
+  cfg.rewards["track_linear_velocity"].weight = 5.0
+  cfg.rewards["track_angular_velocity"].weight = 5.0
   return cfg

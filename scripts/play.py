@@ -8,6 +8,7 @@ from typing import Literal
 
 import torch
 import tyro
+import yaml
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
@@ -34,11 +35,30 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
-  export_onnx: bool = False
-  """Export the loaded checkpoint to policy.onnx next to the checkpoint file and exit."""
+  export_onnx: tyro.conf.UseCounterAction[int] = 0
+  """Export the loaded checkpoint to policy.onnx next to the checkpoint file and exit.
+  Bare flag, no value needed (counter type sidesteps mjlab's global
+  FlagConversionOff, which would otherwise demand ``--export-onnx True``)."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
+
+
+def _deep_merge(default: dict, override: dict) -> dict:
+  """Nested dict merge: ``override`` wins where present, ``default`` fills the rest.
+
+  Needed because the dumped agent.yaml is written AFTER runner construction, and
+  model construction pops keys from nested cfg dicts in place (e.g. MLPModel pops
+  ``distribution_cfg["class_name"]``) — so saved cfgs can be missing keys that a
+  rebuild requires. Older runs may also predate newly added cfg fields.
+  """
+  out = dict(default)
+  for k, v in override.items():
+    if isinstance(v, dict) and isinstance(out.get(k), dict):
+      out[k] = _deep_merge(out[k], v)
+    else:
+      out[k] = v
+  return out
 
 
 def run_play(task_id: str, cfg: PlayConfig):
@@ -108,6 +128,37 @@ def run_play(task_id: str, cfg: PlayConfig):
         f"[INFO]: Loading checkpoint: {checkpoint_name} (run: {run_id}, {cached_str})"
       )
     log_dir = resume_path.parent
+
+    # Rebuild the runner with the structure the checkpoint was trained with, not the
+    # current task defaults: a checkpoint trained with a different goal space crashes
+    # the load (dim mismatch), and a different hl_algorithm silently builds the wrong
+    # high level (e.g. oracle instead of the trained ppo/td3, whose state is then
+    # ignored). train.py dumps the launch config to params/agent.yaml; restore the
+    # structure-determining keys from there. Keys absent from the yaml (older runs)
+    # or not on the cfg (e.g. A0) keep the defaults.
+    params_yaml = resume_path.parent / "params" / "agent.yaml"
+    if params_yaml.exists():
+      saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
+      structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
+                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi")
+      restored = {k: saved[k] for k in structure_keys
+                  if k in saved and hasattr(agent_cfg, k)}
+      for k, v in restored.items():
+        cur = getattr(agent_cfg, k)
+        if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):
+          v = _deep_merge(asdict(cur), v)  # cur is a cfg dataclass (hl_ppo / hl_td3)
+        setattr(agent_cfg, k, v)
+      # The env's goal obs dim was baked from the default runner cfg at task
+      # registration; re-derive it from the restored component list.
+      if "goal_components" in restored and "goal" in env_cfg.observations:
+        from src.tasks.velocity.rl.hrl.goal_space import goal_dim
+
+        env_cfg.observations["goal"].terms["goal"].params["dim"] = goal_dim(
+          tuple(restored["goal_components"])
+        )
+      if restored:
+        print(f"[INFO]: Restored run structure from {params_yaml.name}: "
+              f"{ {k: v for k, v in restored.items() if k in ('goal_components', 'hl_algorithm')} }")
 
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs

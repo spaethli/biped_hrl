@@ -2,8 +2,9 @@
 
 > **Status:** Milestones 1 & 2 DONE (scaffolding + oracle-HL LL validated & stable).
 > **Milestone 3 — `hl=ppo` IMPLEMENTED & TESTED: naive on-policy ppo FAILS to track
-> (4 runs; credit-assignment + co-training instability). Decision pending: one more
-> ppo lever vs proceed to M4 (TD3, the designed fix).** See §0 "M3 experiment results".
+> (4 runs; credit-assignment + co-training instability).** See §0 "M3 experiment results".
+> **Milestone 4 — `hl=td3 relabel=none` IMPLEMENTED (2026-06-11): `HighLevelTd3` +
+> `HLReplayBuffer`; smoke-tested; first 5k run `a1_td3_5k` launched.** See §0 "M4".
 > **Scope:** Architecture A1 of the thesis (structural hierarchy). Hybrid design:
 > on-policy PPO low level + off-policy TD3 high level with HIRO goal-relabeling
 > correction. Relabeling is a runtime toggle (enables a clean ablation).
@@ -66,9 +67,9 @@ conflicts with the older sections.**
    `V*=v_t+g` delta. Oracle emits absolute `V*` = command velocity (+ nominal upright/
    height for non-velocity comps). The LL **observes** the remaining delta `V*−s_i`
    and is rewarded `−Σ_c w_c‖V*−s_{i+1}‖`. For the **learned** HL the chosen encoding
-   is **HIRO delta** `V*=s_t+scale·g`, `scale` read from the twist curriculum (Liam's
-   call). For the oracle, absolute and delta coincide; the difference only bites for a
-   learned HL. (See §`Canonical HIRO` note at end of §0.)
+   is **HIRO delta** `V*=s_t+scale·g`, `scale` read from the twist curriculum
+   (confirmed decision). For the oracle, absolute and delta coincide; the difference
+   only bites for a learned HL. (See §`Canonical HIRO` note at end of §0.)
 4. **Suicide fix: `fell_over=time_out` (NOT in original plan).** The LL's always-
    negative goal-distance reward made early termination an attractor (die fast → stop
    accumulating negative reward; HIRO's domains never terminate so they never hit
@@ -89,7 +90,7 @@ conflicts with the older sections.**
   "deferred-suicide" idea (bootstrap only defers) is an **UNPROVEN hypothesis**; two
   long runs held, so it's likely warm-start-specific or stochastic. Don't assume the
   bootstrap is inadequate. Candidate fix only if it recurs: positive reward / alive
-  bonus (not adopted; Liam prefers staying close to HIRO).
+  bonus (not adopted; decision: stay close to canonical HIRO).
 - std creeps (0.33→0.87 over 10k) but benign at entropy 0.005.
 - Inherited A0 weakness: **poor yaw tracking → circling** (yaw is unconstrained by the
   orientation/height goals, which are yaw-invariant; yaw command range is widest).
@@ -154,7 +155,7 @@ orders-of-magnitude more HL updates, and a deterministic actor + bounded explora
 noise instead of entropy-driven std (no collapse/blowup failure modes).
 
 **Config state after the session (clean baseline restored):** 4× tracking reward
-**reverted** (A1 env back to A0-matched — RQ2 confound removed, Liam's call); HL std cap
+**reverted** (A1 env back to A0-matched — RQ2 confound removed by decision); HL std cap
 **off**; HL `entropy_coef=0.01`; goal space 7-dim default; `hl_algorithm` default still
 `oracle` (pass `--agent.hl-algorithm ppo` to run ppo).
 
@@ -166,6 +167,223 @@ the credit-assignment thinness; also lengthens the LL rollout); (b) 4× tracking
 
 - Optionally export `policy_hl.onnx` too (deferred to the deployment milestone).
 - After ppo: Milestones 4 (`td3 relabel=none`) and 5 (`td3 relabel=hiro`) per §5b/§6.
+
+### Milestone 4 — `HighLevelTd3` (IMPLEMENTED 2026-06-11; first run launched)
+`rl/hrl/td3.py` (`HighLevelTd3`) + `rl/hrl/storage.py` (`HLReplayBuffer`/`HLBatch`),
+config `HlTd3Cfg` (`rl_cfg.py`, field `hl_td3`), wired into `_make_high_level` for
+`hl_algorithm=="td3"` (`relabeling` must be `"none"` until M5). Slots into the existing
+`HighLevel` interface — zero co-train-loop changes.
+
+**Design (deviations from §5b's sketch are noted):**
+- **Actor** = raw `rsl_rl.modules.MLP` `[92 → 256,256 → goal_dim]` + `tanh` → `g ∈
+  [-1,1]^goal_dim`; window target is the same HIRO delta map as ppo: `V* = state +
+  GoalSpace.scale(env) · g` (so the tanh bound ≈ the command half-range, curriculum-
+  tracking). NOT an `MLPModel` (no distribution; TD3 is deterministic).
+- **Twin critics** `Q1,Q2`: MLP `[(92+goal_dim) → 256,256 → 1]` over `[norm(s), g]`.
+- **One shared `EmpiricalNormalization(92)`** over the HL state (`policy ++ command`),
+  updated online in `act`, applied *outside* the nets to online and target forwards
+  alike — target deepcopies therefore never hold stale normalizer stats.
+- **TD3 tricks:** soft targets (`tau=0.005`), target-policy smoothing (clipped Gaussian
+  `0.2/0.5` on the next goal), clipped double-Q, delayed actor+target update
+  (`policy_freq=2`), Gaussian exploration noise `0.2` on the bounded `g` at act time.
+- **Replay buffer:** flat GPU ring (`buffer_capacity=500k` ≈ 40 iters of history at
+  4096 envs × 3 windows = 12 288/iter). `n_grad_steps=8` × `batch_size=512` per iter,
+  `learning_starts=10k` (≈ 1 iter), `lr=1e-3`.
+- **Truncation handling mirrors the ppo HL:** the buffer `done` excludes `time_outs`
+  (incl. A1's `fell_over`) so the TD target bootstraps falls (`γ_hi·Q`) — same
+  suicide-attractor fix, expressed as a bootstrap mask instead of a reward patch.
+- **Logging:** `hl/q_loss`, `hl/actor_loss`, `hl/q_value`, `hl/act_abs_mean` (raw |g|,
+  pre-scale — compare against the ppo runs' `hl/goal_abs_mean` *after* multiplying by
+  scale), `hl/buffer_size`.
+- Checkpoint `hl` key holds actor/critics/targets/normalizer/optimizers (resume-safe).
+  Replay buffer NOT saved (a resume refills it in ~40 iters).
+
+**Launch:** `--agent.hl-algorithm td3` on the standard A1 command. TD3 knobs override
+as `--agent.hl-td3.<field>` (e.g. `--agent.hl-td3.expl-noise-std 0.3`).
+
+### M4 run 1 (`a1_td3_5k`, 2026-06-11) — FAILED: actor saturation + coverage collapse
+5k iters, 4096 envs, A0 warm-start, default `HlTd3Cfg`. W&B `atouumzj`, log dir
+`2026-06-11_11-58-13_a1_td3_5k`.
+
+**Trajectory:** track-and-fall to ~it500 → best point ~it1300 (ep_len 1000,
+trk_lin 0.31, err_xy 1.4) → monotonic decay to it5000 (reward −15→−330, err_xy 3.1,
+LL std 0.33→1.02, joint_pos_limits −0.06→−5.7, action_rate −1.6→−6.7, HL Q −1.5→−27).
+Falls ~0 throughout after it750: the failure basin is *survive-but-don't-track*,
+penalty-driven decay — the mirror image of M3-ppo's "stay put" failure.
+
+**Root cause (confirmed by per-dim g inspection at it4999):**
+1. The HL actor **saturated immediately** (|g|≈0.88 by it250, lr 1e-3 vs a fresh
+   critic; deterministic policy gradient races to the tanh bounds).
+2. Saturation is **self-locking via coverage collapse**: exploration noise σ=0.2
+   around a ±0.88 mean (clamped) puts every buffered goal in ≈[0.68,1.0] — the
+   critic has NO interior-goal data, so no gradient ever points back inward.
+   Standard TD3 prevents this with uniform-random warmup actions
+   (`start_timesteps` in Fujimoto's reference impl) — which was missing.
+3. The decay phase = the LL escalating against unreachable saturated targets
+   (intrinsic reward flat ~−4 all run): action aggression grows, penalties explode,
+   HL task reward sinks, Q tracks it down uniformly (saturated-only data → the
+   argmax never moves).
+   At it4999 the deterministic goal is a near-constant vector with velocity dims
+   (−0.67, −0.84, −0.19) → the *fast-backwards-circling* seen in replays.
+
+**Fixes implemented (F1/F2, 2026-06-12):** F1 = uniform random goals `g~U(-1,1)`
+while `len(buffer) < warmup_transitions` (new `HlTd3Cfg` field, default 100k ≈ 8
+iters) — TD3's `start_timesteps`; F2 = `learning_rate` split into
+`actor_learning_rate=3e-4` / `critic_learning_rate=1e-3`. Smoke verified the
+random→actor boundary (|g| ≈ 0.50 uniform → 0.22–0.30 after handover).
+
+### M4 run 2 (`a1_td3_warmup_5k`, 2026-06-12) — F1+F2 NOT sufficient; worse collapse
+5001 iters, 4096 envs, A0 warm-start, defaults otherwise. Log dir
+`2026-06-12_12-34-54_a1_td3_warmup_5k`, W&B `lj623x4l`, final ckpt `model_5000.pt`.
+
+- **Saturation returned ~it250** (|g|≈0.86 with expl noise; deterministic mean less
+  saturated: |g| 0.60 at it5000 vs run 1's 0.72). The 100k random-coverage
+  transitions were **evicted from the 500k ring by ~it50 of post-warmup data** —
+  F1's coverage is transient; F2 delayed nothing measurable.
+- Same survive-but-don't-track basin (ep_len ~1000 from it1000, err_xy flat 2.0–2.3)
+  BUT the **penalty decay spiral was WORSE than run 1**: reward 0.3→**−552** (run 1:
+  −330), action_rate −15.3, joint_pos_limits −7.5, **LL std 0.33→1.73** (run 1:
+  1.02), intrinsic flat-to-worse (−4→−6.8). err_xy *looked* flat while reward
+  collapsed — the decay was pure action-violence, not tracking change.
+- Deterministic closed-loop eval @5000 (64 envs/600 steps): err (0.52, 0.56, 0.54),
+  0 falls, g signed means moderate/varied — better than run 1 (0.56, 0.86, 1.13),
+  still ~2× worse than M3-ppo's mean (0.25, 0.20, 0.46) and ~10× worse than oracle.
+- **Revised root cause (two runs, same signature):** not just buffer coverage — a
+  **co-training spiral the HL cannot gradient out of**: extreme/noisy goals degrade
+  the LL (std explosion, penalty growth); the HL reward (= summed task reward) is
+  then dominated by LL-violence penalties that are nearly **goal-independent**, so
+  Q(s,g) carries almost no tracking gradient; the actor drifts/saturates on noise
+  while everything sinks. Echoes the M3 finding (tracking term swamped by penalties)
+  at the HL timescale.
+- F3 candidate levers (decision pending): freeze-LL phase (train HL against the
+  frozen warm-started LL first, then co-train); persistent random-goal fraction
+  (ε-style, coverage never evicted); goal-scale cap (reachability); exploration-noise
+  decay; HL-reward composition (tracking-weighted — architecture-internal, logged
+  A0-comparable reward unchanged; design decision).
+
+### M4 F3 — Freeze-LL TD3 (IMPLEMENTED 2026-06-15; run launched)
+Decision: freeze a **converged velocity-only oracle LL** and train the TD3 HL against
+it. Stationary LL ⇒ the co-training spiral is structurally impossible (the LL cannot
+degrade), isolating the open question: *can the TD3 HL learn command→goal at all?*
+**Velocity-only chosen** because the frozen LL is memoryless (conditioned on the
+instantaneous delta `V*−s`): velocity deltas a HIRO-delta HL emits are in-distribution
+(⊆ what the oracle LL saw; g=0 ⇒ maintain), but the oracle only ever trained
+orientation/height toward *nominal*, so a learned HL emitting non-zero
+orientation/height goals would be off-distribution (this is what bit run 2). Restricting
+to velocity removes those dims entirely.
+
+**Implementation:** `HrlRunnerCfg.freeze_ll_path` (mutually exclusive with
+`warm_start_path`); `_load_frozen_ll` does a strict full load of actor+critic from an A1
+checkpoint (shape mismatch = wrong goal space, errors loudly). In `learn()` the LL acts
+via its **deterministic mean** (`get_policy()(obs)`; its trained action std ~1.3 is far
+too noisy to sample), no rollout storage, no `process_env_step`/`compute_returns`/
+`update` — only the HL learns. F1/F2 stay active. One throwaway stochastic forward at
+learn() start populates the (constant) action distribution so `action_std` logging
+works.
+
+**Goal-space coupling fix (Option A, TEMPORARY):** the env's `goal` obs dim is baked at
+task-registration from the *default* `goal_components`; `--agent.goal-components` only
+changes the runner, not the env (the dict param isn't a tyro flag — same desync class as
+the play.py bug). So the registered default in `unitree_h1_2_hrl_runner_cfg()` was
+flipped to `("velocity",)` (3-dim) for this experiment. **REVERT to 7-dim when done**
+(the line is marked in `rl_cfg.py`). The 7-dim default is the documented decision.
+
+**Smoke-validated (256 envs):** goal group 3-dim; frozen LL loads; **LL actor
+byte-identical after 5 train iters** (freeze works); HL buffer fills, losses finite;
+deterministic-mean LL competent under oracle goals via F0 eval (err (0.056,0.044,0.085),
+0 falls — the low in-loop ep_len early on is just the `init_at_random_ep_len` transient).
+
+**Run `a1_td3_frozenLL_5k` (W&B `gnsp3xjv`) — clean NEGATIVE, and it pinpointed the real
+bug.** Aborted ~it2100. With the LL frozen (ll_std constant 1.30, spiral impossible) the
+HL **still failed to track**: err_xy plateaued ~2.5 (worse than the co-train runs!),
+|g| settled ~0.43, reward flat ~−61. So the spiral was never the core problem.
+
+**Hypothesis at the time (LATER FALSIFIED by F4 — see below):** the HL is blind to its
+own translational velocity. The training-metric err_yaw (~1.0) tracked ~2.4× better than
+err_xy (~2.5), and the HL actor obs (`policy ++ command` = the A0 actor) omits
+`base_lin_vel` (vx/vy critic-only) — so the HL sees yaw-rate but not vx/vy. Seemed to
+explain the asymmetry. **But the F4 A/B det-eval showed velocity obs changes nothing** —
+this hypothesis was wrong; the training-metric asymmetry was misleading (det eval shows
+the HL tracks yaw best and vx worst *regardless* of velocity observability).
+
+### M4 F4 — velocity observability — TRIED then REVERTED (2026-06-15): a NO-OP
+**Result first:** the A/B deterministic eval (same frozen velocity-only LL) showed blind
+HL (0.85, 0.39, 0.28) ≈ velocity-obs HL (0.85, 0.38, 0.25) — **velocity observability
+changed nothing.** The velocity-blindness hypothesis is FALSIFIED; F4 was reverted (it
+added a privileged input — `base_lin_vel`, needing an on-robot estimate at deploy — for
+zero tracking benefit). **Process lesson:** I built F4 on the training-metric yaw/xy
+asymmetry without first running the deterministic A/B, which would have killed the
+hypothesis in a minute. Always det-eval before committing to a fix.
+
+**Bigger correction:** det evals (which strip the goal exploration noise that inflates
+training err to ~2.4) show every learned HL achieves *partial* tracking, never oracle:
+oracle (0.06,0.04,0.09); **M3 PPO track4x (0.25,0.20,0.46) — best vx/vy**; TD3 run2
+(0.52,0.56,0.54); TD3 frozen (0.85,0.39,0.28) — best yaw, but **freezing made vx WORSE**.
+No lever (warmup/LR/freeze/velocity-obs/5×) closed the gap to oracle. Judge HLs by det
+eval, not training err.
+
+**Config state (2026-06-15):** goal_components default = velocity-only (Option A,
+TEMPORARY — revert to 7-dim); A1 env carries **5× track_lin/track_ang** (reward-comp
+lever, RQ2 confound vs A0); HL PPO **std cap (1e-3,1.0)** re-added (fixes std blowup); F4
+reverted. The 5× frozen-LL run was also unsuccessful (cluster). Next: **M5 relabeling**.
+
+<details><summary>Original F4 implementation notes (now reverted)</summary>
+
+Add `base_lin_vel` to the **HL actor** obs (keep the relative HIRO goal). New env obs
+group `base_lin_vel` (A1 only, `_restructure_obs_groups`), corruption matching the actor
+(it's a noisy IMU/estimate term); HL actor obs = `policy ++ command ++ base_lin_vel`
+(95-dim), critic Q-in 98. `HighLevelTd3._state_vec`/`_state_dim` and `HighLevelPpo`
+actor obs_groups updated; LL and A0 unchanged. Foot terms (also critic-only) deliberately
+NOT added — irrelevant to forming a velocity goal. **Deploy flag:** `base_lin_vel` is an
+`imu_lin_vel` sensor (noise ±0.5), so the deployed HL needs an on-robot base-velocity
+estimate (yaw-rate is a true gyro reading). Smoke-validated: group present (3-dim), HL
+actor in-dim 95, frozen LL still loads/frozen, buffer fills.
+**Run: `a1_td3_frozenLL_velobs_5k`** (5001 iters, 4096 envs, frozen velocity-only LL),
+W&B pending. Sharp prediction: **err_xy drops toward the err_yaw level** (the observed
+axis already works). If it does, velocity-blindness is confirmed and the fix transfers to
+the co-training TD3/PPO HLs (add base_lin_vel there too). If err_xy stays high even with
+velocity observed, the HL-learning problem is deeper than observability.
+</details>
+
+### Play/replay was broken for A1 until 2026-06-11 (F0 fix — IMPLEMENTED)
+`play.py` uses `get_inference_policy()`, which returned the bare LL actor; nothing
+fired the HL or wrote `env.hrl_goal` in play, so **every A1 replay (all milestones)
+showed the LL with the goal frozen at zero** — the command physically can't reach
+the LL in that path. All pre-F0 qualitative replay impressions are void; W&B
+training metrics (HL in the loop) were always the ground truth.
+Fix: `HighLevel.act_inference` (deterministic, side-effect-free; PPO/TD3 override)
++ `HierarchicalRunner.get_inference_policy` override that mirrors the training
+loop's goal wiring (fire HL every c-th call, write remaining delta).
+**Validated headless (64 envs, 600 steps):** oracle ckpt `model_9999` tracks
+(|err| ≈ 0.05/axis, 0 falls) through the inference path; td3 `model_4999` shows the
+true broken behavior (err (0.56,0.86,1.13), saturated constant g). Eval script
+pattern: see `get_inference_policy` docstring (window clock not reset on mid-window
+env resets — same approximation as training).
+
+**play.py structure restore (2026-06-12).** play.py rebuilt the runner from the
+*current task defaults*, so (a) checkpoints with a non-default goal space crashed the
+load (dim mismatch — hit by the velocity-only run), and (b) ppo/td3 checkpoints
+silently replayed with an **oracle** HL (default `hl_algorithm`; the trained `hl`
+state was ignored by the oracle's no-op `load_state_dict`) — i.e. those replays
+showed *trained-LL + command-as-goal*, not the closed loop. Fix: play.py now restores
+the structure keys (`c, goal_components, goal_weights, hl_algorithm, hl_ppo, hl_td3,
+relabeling, gamma_hi`) from the run's own `params/agent.yaml` (yaml.full_load — dumps
+carry python/tuple tags), deep-merging dict cfgs over defaults because the dump is
+written *after* runner construction and MLPModel pops `distribution_cfg["class_name"]`
+in place (so saved yamls are missing it); the env's goal obs dim is re-derived from
+the restored components. Prints `[INFO]: Restored run structure ...` so a replay
+always says which HL it runs. Verified on 4 checkpoints (velocity-only, td3, oracle,
+ppo-track4x).
+
+**Deterministic closed-loop evals (post-fix, 64 envs, 600 steps, play env) — REVISES
+the M3 verdict:** `a1_ppo_track4x` `model_1999` with its real ppo HL tracks
+|err| (0.25, 0.20, 0.46), 0 falls — vs oracle (0.05, 0.04, 0.06) and td3 run-1
+(0.56, 0.86, 1.13). The ppo HL **mean** did learn a partial command→goal map; the
+bleak training-time numbers (err_xy ~1.05+) were measured *with sampling noise* and
+during co-training oscillation. "Naive ppo fails" still holds for the training
+process (unstable, never converged to survive+track simultaneously), but the M3
+artifact is better than the training metrics implied — worth re-evaling other M3
+ckpts deterministically before final writeup comparisons.
 
 **Launch:** add `--agent.hl-algorithm ppo` to the standard A1 launch (warm-start path
 included). e.g. `... Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096
@@ -424,8 +642,8 @@ src/tasks/velocity/
         ├── goal_space.py    # ✅ GoalComponent/GoalSpace + registry (REPLACES goal_env.py);
         │                    #    extract/reward/oracle_target/scale; goal_dim derived
         ├── high_level.py    # ✅ HighLevel ABC + OracleHighLevel + HighLevelPpo (M3)
-        ├── td3.py           # ⬜ HighLevelTd3 (M4)
-        ├── storage.py       # ⬜ HLReplayBuffer + HLTransition/HLBatch (M4)
+        ├── td3.py           # ✅ HighLevelTd3 (M4)
+        ├── storage.py       # ✅ HLReplayBuffer + HLBatch (M4)
         └── relabeling.py    # ⬜ RelabelStrategy + NoRelabel + HiroOffPolicyCorrection (M5)
 ```
 NOTE: there is **no `GoalConditionedWrapper`** — the goal is a plain obs term
@@ -498,8 +716,8 @@ LL (existing PPO metrics) + `intrinsic_reward/mean`, `task_reward/mean`,
    command→goal (credit-assignment + co-training instability). **Decision pending:** one
    more ppo lever (HL horizon, or 4× track + std cap) vs proceed to M4. Full results in
    §0 "M3 experiment results" (authoritative over §5a).
-4. **`hl=td3 relabel=none`.** Add `HighLevelTd3` + replay buffer; co-train. Compare
-   to `hl=ppo`.
+4. ✅ **IMPLEMENTED — `hl=td3 relabel=none`.** `HighLevelTd3` + `HLReplayBuffer` built,
+   smoke-tested, first 5k run launched (`a1_td3_5k`). Compare to `hl=ppo`. See §0 "M4".
 5. **`hl=td3 relabel=hiro`.** Add the correction; log accept-rate; ablate vs row 4.
 6. **Tuning + full omnidirectional run on cluster** (A100). Sweep `c ∈ {5,8,10,16}`,
    goal ranges, HL LR.

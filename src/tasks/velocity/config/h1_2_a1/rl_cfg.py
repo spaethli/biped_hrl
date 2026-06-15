@@ -41,6 +41,10 @@ class HlPpoCfg:
         # std cap removed: with 4x tracking reward (A1 env cfg) the stronger HL task
         # gradient should self-regulate std (too-wide std misses the now-high-value
         # target). Watch for blowup; re-cap with std_range=(1e-3,1.0) if it recurs.
+        # Cap the std so the HL goal can't blow up: at entropy_coef 0.02 the entropy
+        # bonus swamped the weak HL task gradient and std ran away (goal_abs ~8.7 ->
+        # impossible targets -> robot died). Capping at 1.0 makes blowup impossible.
+        "std_range": (1e-3, 1.0),
       },
     )
   )
@@ -68,6 +72,58 @@ class HlPpoCfg:
 
 
 @dataclass
+class Td3NetCfg:
+  """Net spec for a TD3 actor/critic (self-contained MLP; no distribution/normalizer
+  flags — TD3 owns a single shared input normalizer)."""
+
+  hidden_dims: tuple[int, ...] = (256, 256)
+  activation: str = "elu"
+
+
+@dataclass
+class HlTd3Cfg:
+  """High-level off-policy TD3 config (used when ``hl_algorithm == "td3"``).
+
+  The actor sees the deployable HL obs (``policy`` ++ ``command``) and outputs a
+  ``tanh``-bounded goal ``g`` in ``[-1, 1]^goal_dim``; the window target is the HIRO
+  delta ``V* = state + scale*g``. The twin critics take ``[norm(state), g]``. The HL
+  discount is ``HrlRunnerCfg.gamma_hi``. A replay buffer (persisting across iterations)
+  gives many more HL updates than the on-policy PPO HL — the fix for M3's failure.
+  """
+
+  actor: Td3NetCfg = field(default_factory=Td3NetCfg)
+  critic: Td3NetCfg = field(default_factory=Td3NetCfg)
+  actor_learning_rate: float = 3.0e-4
+  """Run 1 used 1e-3 for both nets: the actor raced into the tanh bounds before the
+  critic knew anything (|g| 0.88 by it250). The actor must move slower than the
+  critic learns; 3e-4 is the standard TD3 value."""
+  critic_learning_rate: float = 1.0e-3
+  tau: float = 0.005
+  """Soft target-update rate."""
+  policy_freq: int = 2
+  """Delayed actor update: update actor + targets every ``policy_freq`` critic steps."""
+  expl_noise_std: float = 0.2
+  """Gaussian exploration noise std added to the actor's ``[-1,1]`` goal at act time."""
+  target_noise_std: float = 0.2
+  """Target-policy smoothing noise std."""
+  target_noise_clip: float = 0.5
+  """Clip for the target-policy smoothing noise."""
+  batch_size: int = 512
+  n_grad_steps: int = 8
+  """TD3 gradient steps per training iteration (sampled minibatches from the buffer)."""
+  buffer_capacity: int = 500_000
+  """Replay buffer capacity in HL transitions (~num_envs * num_steps_per_env//c per iter)."""
+  learning_starts: int = 10_000
+  """Don't update until the buffer holds at least this many transitions."""
+  warmup_transitions: int = 100_000
+  """While the buffer holds fewer transitions than this, act() emits uniform random
+  goals g ~ U(-1,1) instead of the actor's output (TD3's start_timesteps). Run 1
+  skipped this: exploration noise around the saturated actor mean left the buffer
+  with zero interior-goal coverage, locking the saturation in (critic never learned
+  that moderate goals are better). ~8 iters at 4096 envs."""
+
+
+@dataclass
 class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """Hierarchical (A1) runner config. LL = inherited PPO; HL = fields below."""
 
@@ -90,9 +146,11 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   goal_weights: dict[str, float] | None = None
   """Per-component reward weights (None -> all 1.0)."""
   hl_algorithm: Literal["oracle", "ppo", "td3"] = "oracle"
-  """High-level learner. Milestone 1/2 ship 'oracle'; M3 adds 'ppo'."""
+  """High-level learner. M1/2 ship 'oracle'; M3 adds 'ppo'; M4 adds 'td3'."""
   hl_ppo: HlPpoCfg = field(default_factory=HlPpoCfg)
   """High-level PPO config (used when hl_algorithm == 'ppo')."""
+  hl_td3: HlTd3Cfg = field(default_factory=HlTd3Cfg)
+  """High-level TD3 config (used when hl_algorithm == 'td3')."""
   relabeling: Literal["none", "hiro"] = "none"
   """HIRO off-policy correction (td3 only; ignored otherwise)."""
   gamma_hi: float = 0.99**8
@@ -105,11 +163,25 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   left freshly initialised. None = train the LL from scratch. On-policy PPO at the LL
   is far less sample-efficient than HIRO's off-policy TD3, so warm-starting from the
   walking A0 policy skips the locomotion-discovery phase."""
+  freeze_ll_path: str | None = None
+  """Path to a converged A1 LL checkpoint to load IN FULL and FREEZE: the LL becomes a
+  fixed obs->action function (deterministic actor mean) and does NOT learn; only the HL
+  trains against it. The goal space must match the checkpoint's (e.g. velocity-only),
+  else the load errors on shape mismatch. Mutually exclusive with warm_start_path.
+  Removes the co-training spiral (the LL cannot degrade), isolating whether the HL can
+  learn command->goal against a stationary, competent LL."""
 
 
 def unitree_h1_2_hrl_runner_cfg() -> HrlRunnerCfg:
   """A1 runner cfg. Low level mirrors the A0 PPO agent exactly."""
   return HrlRunnerCfg(
+    # TEMPORARY (2026-06-15): default flipped to velocity-only (3-dim) for the frozen-LL
+    # TD3 experiment (freeze the velocity-only oracle LL; the env goal obs dim must match
+    # the frozen checkpoint, and the env derives it from this default at registration).
+    # REVERT to 7-dim (drop this line) once that experiment concludes — the documented
+    # default is velocity+orientation+height (orient/height are stabilizing regularizers
+    # that track better; see plan doc §0). goal_dim stays derived from goal_components.
+    goal_components=("velocity",),
     # Default goal space = velocity+orientation+height (DEFAULT_GOAL_COMPONENTS, 7-dim).
     # The velocity-only ablation tracked worse (esp. yaw) at equal survival, so orient/
     # height are kept as stabilizing regularizers. Velocity weighted 3x.

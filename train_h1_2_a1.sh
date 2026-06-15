@@ -31,7 +31,9 @@ cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS:-4096} \
     --agent.max-iterations ${MAX_ITER:-10001} \
-    --agent.warm-start-path logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt
+    --agent.warm-start-path logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt \
+    --agent.hl-algorithm ppo       # activate HL PPO
+
 
 # Auto-sync after training
 wandb sync --sync-all

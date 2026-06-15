@@ -46,6 +46,12 @@ class HighLevel(ABC):
     at the fire step (learned HLs form ``V* = state + scale*g``; the oracle ignores it).
     """
 
+  def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
+    """Deployment-faithful fire: deterministic, no exploration noise, no transition
+    storage, no normalizer updates. Learned HLs override; the oracle's ``act`` is
+    already side-effect free, so the default delegates."""
+    return self.act(env, obs, state)
+
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     """Called at HL fire, after :meth:`act`, to open a transition window."""
 
@@ -152,6 +158,11 @@ class HighLevelPpo(HighLevel):
     self.ppo.critic.update_normalization(obs)
     scale = self.goal_space.scale(env)
     return state + scale * g
+
+  def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
+    # Deterministic mean goal; no transition storage / normalizer updates.
+    g = self.ppo.actor(obs)
+    return state + self.goal_space.scale(env) * g
 
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
