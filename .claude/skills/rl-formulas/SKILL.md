@@ -33,7 +33,19 @@ have changed several times in this project.
    - No scope given → produce M1–M2 and note M3 is available.
    - A component filter (e.g. "reward only", "goal space") → return just that block with its location.
 
-5. **Flag divergences from canonical HIRO** — they are report-worthy:
+5. **PPO loss — ONE convention, and A0 LL ≡ A1 LL.** The A1 low level is the *same*
+   `rsl_rl.PPO` object as the A0 agent, so emit the **identical** PPO formula for both —
+   never show A0 with one form and A1 with another (that drift is a bug, not a real
+   difference). rsl_rl (`algorithms/ppo.py:259-275`) implements the clipped-surrogate
+   **loss-to-minimize**, not the objective-to-maximize:
+   `L_surr = E[max(-A·ρ, -A·clip(ρ,1-ε,1+ε))] = -E[min(ρA, clip(ρ)A)]`,
+   then `L = L_surr + c_v·L_VF - c_e·H` (entropy subtracted; clipped value loss).
+   Default to this code-faithful **max(-A·ρ, …) loss form** and add one sentence noting
+   it equals standard clipped PPO `-L^CLIP`. If the user prefers the paper's
+   `min(ρA, …)` objective form, use it — but then apply it consistently everywhere and
+   keep the leading minus in the total loss.
+
+6. **Flag divergences from canonical HIRO** — they are report-worthy:
    - absolute target `V*` + directional observation `Δ = V* - s` vs canonical `V* = s_t + g`;
    - intrinsic reward = **sum of per-component L2 norms** (`Σ_c w_c ‖·‖`), not a single norm over the whole goal vector;
    - learned-HL goal map is **linear** `scale ⊙ g` (a raw Gaussian sample), NOT tanh-squashed (rsl_rl's GaussianDistribution applies no Jacobian correction, so tanh would be a silent bug);

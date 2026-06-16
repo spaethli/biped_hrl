@@ -5,6 +5,10 @@
 > (4 runs; credit-assignment + co-training instability).** See §0 "M3 experiment results".
 > **Milestone 4 — `hl=td3 relabel=none` IMPLEMENTED (2026-06-11): `HighLevelTd3` +
 > `HLReplayBuffer`; smoke-tested; first 5k run `a1_td3_5k` launched.** See §0 "M4".
+> **Milestone 5 — `hl=td3 relabel=hiro` IMPLEMENTED & RUN (2026-06-16): relabeling helps
+> translational tracking (best vx/vy of any TD3 variant) but a c-sweep {4,8,12} shows
+> HL cadence/step-count is NOT the limiter — the vx/vy wall (~4–5× A0) is STRUCTURAL.**
+> See §0 "M5 + c-sweep". Next: goal-achievability probe (`doc/A1_goal_achievability_probe.md`).
 > **Scope:** Architecture A1 of the thesis (structural hierarchy). Hybrid design:
 > on-policy PPO low level + off-policy TD3 high level with HIRO goal-relabeling
 > correction. Relabeling is a runtime toggle (enables a clean ablation).
@@ -393,6 +397,57 @@ included). e.g. `... Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096
 which buffers and breaks live wandb): `conda activate unitree_mjlab_h1_2_rl && python
 scripts/train.py Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096 --agent.max-iterations N
 --agent.warm-start-path <A0 model.pt> --agent.run-name <name>`.
+
+### M5 — HIRO relabeling + c-sweep (IMPLEMENTED & RUN 2026-06-16)
+
+**Relabeling (`relabel=hiro`) IMPLEMENTED** inline in `HighLevelTd3` (no separate
+`relabeling.py`): `HLReplayBuffer(relabel=True)` stores the per-window LL trace
+(policy/goal-state/action seqs + scale + s_{t+c}); `_relabel(batch)` builds k=10 candidate
+goals (stored g, empirical `(s_{t+c}-s_t)/scale`, +8 Gaussian), scores each by the current
+LL's log-likelihood of the stored action trace (one flat `ll_actor` forward), and
+substitutes `batch.actions` before the critic update. Logs `hl/relabel_frac`.
+
+**Results (deterministic benchmark, 64 envs × 600 steps × 2 eval seeds; see "Benchmark"
+below). Run `a1_td3_relabel_3k` (c=8) + c-sweep `a1_td3_relabel_c{4,12}_3k`:**
+
+| c | HL steps/ep | err_vx | err_vy | err_yaw | action_rate | height_dev | falls |
+|---|---|---|---|---|---|---|---|
+| 4 | 250 | 0.47 | 0.30 | 0.41 | 1.52 | 0.072 | 0 |
+| 8 | 125 | 0.42 | 0.35 | 0.64 | 1.41 | 0.064 | 0 |
+| 12| 83  | 0.39 | 0.26 | 0.58 | 1.23 | 0.048 | 0 |
+| A0 ref | — | 0.09 | 0.11 | 0.10 | 0.66 | 0.027 | 0 |
+
+- **Relabeling helps translational tracking:** the c=8 relabel run's vx/vy (0.42/0.35) is
+  the best of any TD3 variant (vs run2 0.52/0.56, frozen 0.85/0.39; nears M3-PPO 0.25/0.20).
+- **"Too few HL steps" hypothesis NOT supported.** Finer cadence (c=4 → 2× the HL
+  transitions of c=8) did not improve tracking; vx/vy stay ~0.26–0.47 (still ~4–5× A0)
+  with no monotonic gain. yaw is non-monotonic (c8=0.64 an outlier-high) → the early
+  "c=4 fixes yaw" read was training-seed noise. The only CLEAN monotonic effect: coarser
+  c → smoother (action_rate 1.52→1.23) + better height (0.072→0.048), at no tracking cost —
+  the opposite of "needs more HL steps."
+- **Conclusion: the translational-tracking wall is STRUCTURAL** (goal-space scale/
+  reachability, LL goal-achievability, or the command→goal map) — both data quantity AND
+  temporal resolution are now ruled out, as is the co-training spiral (frozen-LL) and
+  velocity observability (F4). **CAVEAT: 1 training seed per c**; per the reproducibility
+  rule, c-to-c tracking gaps are likely within training-seed noise (eval std only
+  ~0.01–0.05) — the smoothness/height trends are the credible signal.
+- **Next:** decompose the tracking error into HL-goal-error vs LL-reach-error — see
+  `doc/A1_goal_achievability_probe.md`.
+
+**`gamma_hi` footgun FIXED (2026-06-16):** was hardcoded `0.99**8`, decoupled from `c` —
+any `c != 8` run silently got the wrong HL discount. Now derived `0.99**c` **unconditionally**
+in `HrlRunnerCfg.__post_init__` (a `if None` guard fails because tyro carries the
+factory-derived c=8 value forward when only `c` is overridden, so it must re-derive every
+construct). Verified via the real tyro path: `--agent.c 4` → `gamma_hi 0.96`.
+
+**Benchmark tool (`scripts/play.py --eval-steps N --eval-seeds K`):** the canonical in-sim
+policy comparator — deterministic, multi-metric scorecard (err_vx/vy/yaw, fall_rate,
+action_rate, orient_dev, height_dev) + `[BENCH] {json}` line, multi-seed mean±std. Reuses
+play.py's checkpoint/structure-restore. Outcome metrics (architecture-agnostic, strip
+exploration noise) → replaces ad-hoc det-eval; A0 baseline = 0.09/0.11/0.10. NOTE: `ep_len`
+is uninformative in play mode (`episode_length_s=1e9`, no resets) — use `fall_rate` for
+survival. Sim-to-sim (ONNX → deploy MuJoCo) is a SEPARATE, later transfer check, not a
+substitute for this in-sim benchmark.
 
 ---
 

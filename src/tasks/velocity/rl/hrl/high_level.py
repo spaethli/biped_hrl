@@ -58,6 +58,13 @@ class HighLevel(ABC):
   def accumulate(self, task_reward: torch.Tensor) -> None:
     """Accumulate per-step task reward into the open HL transition."""
 
+  def record_step(
+    self, policy_obs: torch.Tensor, goal_state: torch.Tensor, action: torch.Tensor
+  ) -> None:
+    """Record the per-step LL trace (proprio obs, goal-space state, LL action) for the
+    open window. Only the relabeling TD3 HL uses it (to score candidate goals by the LL
+    action likelihood); no-op otherwise."""
+
   def end_window(self, env, obs, state: torch.Tensor, dones: torch.Tensor, extras=None) -> None:
     """Close the HL window and store/push the transition (no-op for oracle).
 

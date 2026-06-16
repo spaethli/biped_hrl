@@ -215,10 +215,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         self.device,
       )
     if self.hl_algorithm == "td3":
-      if self.relabeling != "none":
-        raise NotImplementedError(
-          f"relabeling='{self.relabeling}' not implemented yet (M5); use 'none'."
-        )
       obs = self.env.get_observations().to(self.device)
       return HighLevelTd3(
         self.goal_space,
@@ -228,6 +224,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         self.gamma_hi,
         self.cfg["hl_td3"],
         self.device,
+        relabel=self.relabeling,
+        ll_actor=getattr(self.alg, "_raw_actor", self.alg.actor),
       )
     raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
 
@@ -305,6 +303,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # action std ~1.3 is far too noisy to sample). No rollout storage. The learning
           # LL uses act(), which samples and records the transition.
           actions = ll_policy(obs) if self.freeze_ll else self.alg.act(obs)
+          # Record the per-step LL trace (proprio, goal state, action) for HIRO relabeling
+          # (no-op unless the HL is a relabeling TD3). Pre-step values = what the LL saw.
+          self.hl.record_step(obs["policy"], state, actions)
           obs, task_rew, dones, extras = self.env.step(actions.to(self.env.device))
           obs, task_rew, dones = (
             obs.to(self.device),

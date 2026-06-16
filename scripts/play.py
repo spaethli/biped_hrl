@@ -27,6 +27,14 @@ class PlayConfig:
   motion_file: str | None = None
   num_envs: int | None = None
   device: str | None = None
+  eval_steps: int = 0
+  """Headless deterministic eval: if > 0, run this many steps (no viewer) and print the
+  mean per-axis velocity-tracking error (vx, vy, yaw) = |command - achieved|, the survival metrics fall rate 
+  and episode length, the smoothness metric action-rate and the stability metrics orienation deviation and body height deviation.
+  All of them are averaged over steps and envs. Matches the prior A1 det-eval procedure (e.g. 64 envs / 600 steps)."""
+  eval_seeds: int = 1
+  """Number of independent rollouts (each with a distinct seed) to average over. Reports
+  mean ± std per metric across the K rollouts."""
   video: bool = False
   video_length: int = 200
   video_height: int | None = None
@@ -226,6 +234,114 @@ def run_play(task_id: str, cfg: PlayConfig):
       return
 
     policy = runner.get_inference_policy(device=device)
+
+  # Headless deterministic benchmark: roll out `eval_steps` steps x `eval_seeds` seeds.
+  if cfg.eval_steps > 0:
+    import json
+    uenv = env.unwrapped
+    robot = uenv.scene["robot"].data
+    n_envs = uenv.num_envs
+    tm = uenv.termination_manager
+    has_fell = "fell_over" in tm.active_terms
+
+    # Collect label / structure info for the JSON line.
+    bench_meta: dict = {"label": str(resume_path) if resume_path is not None else "unknown"}
+    for k in ("hl_algorithm", "goal_components", "c"):
+      if hasattr(agent_cfg, k):
+        v = getattr(agent_cfg, k)
+        bench_meta[k] = list(v) if isinstance(v, (list, tuple)) else v
+
+    seed_results: list[dict] = []
+    for seed_idx in range(cfg.eval_seeds):
+      seed = 42 + seed_idx
+      torch.manual_seed(seed)
+      # reset() does in-place buffer updates; must be inside inference_mode or it errors
+      # on seed >= 1 (the prior rollout marked those env buffers as inference tensors).
+      with torch.inference_mode():
+        obs, _ = env.reset()
+
+      errs_vx, errs_vy, errs_yaw = [], [], []
+      fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
+      prev_actions: torch.Tensor | None = None
+
+      with torch.inference_mode():
+        for _ in range(cfg.eval_steps):
+          actions = policy(obs)
+          obs, _, dones, extras = env.step(actions.to(env.device))
+
+          # 1. Tracking error.
+          cmd = uenv.command_manager.get_command("twist")  # [B, >=3]
+          achieved = torch.cat(
+            [robot.root_link_lin_vel_b[:, :2], robot.root_link_ang_vel_b[:, 2:3]], dim=-1
+          )
+          ae = (cmd[:, :3] - achieved).abs()  # [B, 3]
+          errs_vx.append(ae[:, 0].mean().item())
+          errs_vy.append(ae[:, 1].mean().item())
+          errs_yaw.append(ae[:, 2].mean().item())
+
+          # 2. Survival: fall flag and episode length.
+          if has_fell:
+            fall_flags.append(tm.get_term("fell_over").float().mean().item())
+          else:
+            fall_flags.append(dones.float().mean().item())
+          ep_lens.append(uenv.episode_length_buf.float().mean().item())
+
+          # 3. Smoothness: action rate ||a_t - a_{t-1}||.
+          if prev_actions is not None:
+            action_rates.append((actions - prev_actions).norm(dim=-1).mean().item())
+          prev_actions = actions.clone()
+
+          # 4. Stability: orientation deviation + height deviation.
+          orient_devs.append(
+            robot.projected_gravity_b[:, :2].norm(dim=-1).mean().item()
+          )
+          nom_h = robot.default_root_state[:, 2]  # [B] nominal height
+          height_devs.append(
+            (robot.root_link_pos_w[:, 2] - nom_h).abs().mean().item()
+          )
+
+      def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
+
+      seed_results.append({
+        "err_vx":      _m(errs_vx),
+        "err_vy":      _m(errs_vy),
+        "err_yaw":     _m(errs_yaw),
+        "fall_rate":   _m(fall_flags),
+        "mean_ep_len": _m(ep_lens),
+        "action_rate": _m(action_rates) if action_rates else float("nan"),
+        "orient_dev":  _m(orient_devs),
+        "height_dev":  _m(height_devs),
+      })
+
+    # Aggregate across seeds.
+    keys = list(seed_results[0].keys())
+    vals = {k: torch.tensor([r[k] for r in seed_results]) for k in keys}
+    means = {k: vals[k].mean().item() for k in keys}
+    stds  = {k: vals[k].std().item() if cfg.eval_seeds > 1 else float("nan") for k in keys}
+
+    def _fmt(k): return f"{means[k]:.4f} ± {stds[k]:.4f}" if cfg.eval_seeds > 1 else f"{means[k]:.4f}"  # noqa: E731
+
+    print()
+    print("=" * 58)
+    print(f"  BENCHMARK SCORECARD  |  {cfg.eval_steps} steps x {n_envs} envs x {cfg.eval_seeds} seed(s)")
+    print("=" * 58)
+    print(f"  Tracking  err_vx    : {_fmt('err_vx')}")
+    print(f"  Tracking  err_vy    : {_fmt('err_vy')}")
+    print(f"  Tracking  err_yaw   : {_fmt('err_yaw')}")
+    print(f"  Survival  fall_rate : {_fmt('fall_rate')}")
+    print(f"  Survival  ep_len    : {_fmt('mean_ep_len')}")
+    print(f"  Smoothness act_rate : {_fmt('action_rate')}")
+    print(f"  Stability orient_dev: {_fmt('orient_dev')}")
+    print(f"  Stability height_dev: {_fmt('height_dev')}")
+    print("=" * 58)
+    print()
+
+    bench_out = {**bench_meta, **{k: round(means[k], 6) for k in keys},
+                 **{f"{k}_std": round(stds[k], 6) for k in keys},
+                 "eval_steps": cfg.eval_steps, "num_envs": n_envs, "eval_seeds": cfg.eval_seeds}
+    print(f"[BENCH] {json.dumps(bench_out)}")
+    env.close()
+    return
 
   # Handle "auto" viewer selection.
   if cfg.viewer == "auto":

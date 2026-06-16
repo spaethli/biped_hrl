@@ -44,7 +44,7 @@ class HlPpoCfg:
         # Cap the std so the HL goal can't blow up: at entropy_coef 0.02 the entropy
         # bonus swamped the weak HL task gradient and std ran away (goal_abs ~8.7 ->
         # impossible targets -> robot died). Capping at 1.0 makes blowup impossible.
-        "std_range": (1e-3, 1.0),
+        #"std_range": (1e-3, 1.0),
       },
     )
   )
@@ -121,6 +121,12 @@ class HlTd3Cfg:
   skipped this: exploration noise around the saturated actor mean left the buffer
   with zero interior-goal coverage, locking the saturation in (critic never learned
   that moderate goals are better). ~8 iters at 4096 envs."""
+  num_candidates: int = 10
+  """HIRO relabeling candidate count (used when ``relabeling == 'hiro'``): the stored
+  goal, the empirical achieved delta, and (num_candidates - 2) Gaussian samples around
+  it. The winner maximizes the current LL's log-likelihood of the stored action trace."""
+  candidate_std: float = 0.5
+  """Std (in raw [-1,1] goal units) of the Gaussian sampling for relabel candidates."""
 
 
 @dataclass
@@ -128,6 +134,16 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """Hierarchical (A1) runner config. LL = inherited PPO; HL = fields below."""
 
   class_name: str = "HierarchicalRunner"
+
+  def __post_init__(self):
+    # Horizon-match the HL discount to c. Unconditional (not `if None`): tyro carries the
+    # factory-derived value forward when only `c` is overridden, so a conditional check
+    # would keep the stale c=8 gamma. gamma_hi is horizon-matched by definition, so it is
+    # always derived from c (not independently settable).
+    parent_post = getattr(super(), "__post_init__", None)
+    if parent_post is not None:
+      parent_post()
+    self.gamma_hi = 0.99**self.c
 
   # Observation routing: LL actor sees proprio+goal (no command); critic privileged+goal.
   obs_groups: dict[str, tuple[str, ...]] = field(
@@ -153,8 +169,10 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """High-level TD3 config (used when hl_algorithm == 'td3')."""
   relabeling: Literal["none", "hiro"] = "none"
   """HIRO off-policy correction (td3 only; ignored otherwise)."""
-  gamma_hi: float = 0.99**8
-  """High-level discount = gamma^c (horizon-matched)."""
+  gamma_hi: float | None = None
+  """High-level discount. None -> derived horizon-matched as ``0.99 ** c`` in
+  ``__post_init__`` (so changing ``c`` rescales it automatically; the old hardcoded
+  ``0.99**8`` silently mismatched any c != 8). Set explicitly to override."""
   ll_task_reward_coef: float = 0.0
   """Blend of task reward into the LL intrinsic reward. 0 = pure HIRO."""
   warm_start_path: str | None = None
@@ -175,13 +193,6 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
 def unitree_h1_2_hrl_runner_cfg() -> HrlRunnerCfg:
   """A1 runner cfg. Low level mirrors the A0 PPO agent exactly."""
   return HrlRunnerCfg(
-    # TEMPORARY (2026-06-15): default flipped to velocity-only (3-dim) for the frozen-LL
-    # TD3 experiment (freeze the velocity-only oracle LL; the env goal obs dim must match
-    # the frozen checkpoint, and the env derives it from this default at registration).
-    # REVERT to 7-dim (drop this line) once that experiment concludes — the documented
-    # default is velocity+orientation+height (orient/height are stabilizing regularizers
-    # that track better; see plan doc §0). goal_dim stays derived from goal_components.
-    goal_components=("velocity",),
     # Default goal space = velocity+orientation+height (DEFAULT_GOAL_COMPONENTS, 7-dim).
     # The velocity-only ablation tracked worse (esp. yaw) at equal survival, so orient/
     # height are kept as stabilizing regularizers. Velocity weighted 3x.

@@ -53,11 +53,21 @@ class HighLevelTd3(HighLevel):
     gamma_hi: float,
     cfg: dict,
     device: str,
+    relabel: str = "none",
+    ll_actor: torch.nn.Module | None = None,
   ) -> None:
     super().__init__(goal_space)
     self.device = device
     self.goal_dim = goal_dim
     self.gamma_hi = gamma_hi
+    # HIRO off-policy correction: relabel sampled goals to the goal the *current* LL is
+    # most likely to have produced the stored action trace for. Needs a live LL actor.
+    self.relabel = relabel != "none"
+    self.ll_actor = ll_actor
+    self.num_candidates: int = cfg.get("num_candidates", 10)
+    self.candidate_std: float = cfg.get("candidate_std", 0.5)
+    if self.relabel and ll_actor is None:
+      raise ValueError("relabel HL needs a reference to the LL actor.")
     # HL actor/critic state = deployable HL obs (proprio ++ command), same as the PPO HL.
     self._state_dim = obs["policy"].shape[-1] + obs["command"].shape[-1]
 
@@ -92,15 +102,22 @@ class HighLevelTd3(HighLevel):
       lr=cfg["critic_learning_rate"],
     )
 
-    self.buffer = HLReplayBuffer(cfg["buffer_capacity"], self._state_dim, goal_dim, device)
+    self.buffer = HLReplayBuffer(
+      cfg["buffer_capacity"], self._state_dim, goal_dim, device, relabel=self.relabel
+    )
     self.training = True
     self._update_count = 0
+    self._last_relabel_frac = 0.0  # diagnostic: fraction of goals changed by relabeling
 
     # Per-window scratch (set in act/begin/end_window).
     self._window_reward = torch.zeros(num_envs, device=device)
     self._win_state: torch.Tensor | None = None  # s_t at fire (buffer state)
     self._win_action: torch.Tensor | None = None  # g_t at fire (raw, [-1,1])
     self._last_act_abs = 0.0  # diagnostic: |g| mean of the last fire
+    # Relabel-only per-window LL trace (proprio obs / goal-space state / LL action).
+    self._seq_policy: list[torch.Tensor] = []
+    self._seq_gstate: list[torch.Tensor] = []
+    self._seq_action: list[torch.Tensor] = []
 
   # --- helpers --------------------------------------------------------------
 
@@ -141,19 +158,43 @@ class HighLevelTd3(HighLevel):
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
     self._window_reward.zero_()
+    if self.relabel:
+      self._seq_policy.clear()
+      self._seq_gstate.clear()
+      self._seq_action.clear()
 
   def accumulate(self, task_reward: torch.Tensor) -> None:
     self._window_reward += task_reward
 
+  def record_step(self, policy_obs, goal_state, action) -> None:
+    if not self.relabel:
+      return
+    # Clone: env obs tensors may be views into buffers overwritten on the next step.
+    self._seq_policy.append(policy_obs.clone())
+    self._seq_gstate.append(goal_state.clone())
+    self._seq_action.append(action.clone())
+
   def end_window(self, env, obs, state, dones: torch.Tensor, extras=None) -> None:
-    del env, state
     next_s = self._state_vec(obs)
     # Bootstrap mask: only TRUE terminals cut the TD target. Truncations (time_outs,
     # incl. A1's fell_over) keep done=0 so y = R + gamma_hi * Q(s', a').
     done = dones.float()
     if extras is not None and "time_outs" in extras:
       done = done * (1.0 - extras["time_outs"].to(self.device).float())
-    self.buffer.add(self._win_state, self._win_action, self._window_reward.clone(), next_s, done)
+    if not self.relabel:
+      del env, state
+      self.buffer.add(self._win_state, self._win_action, self._window_reward.clone(), next_s, done)
+      return
+    # Stack the window trace [N, c, ·] and store the HIRO relabel inputs alongside the
+    # 5-tuple. `state` is the achieved goal-space state at window end (s_{t+c}).
+    policy_seq = torch.stack(self._seq_policy, dim=1)
+    goal_state_seq = torch.stack(self._seq_gstate, dim=1)
+    action_seq = torch.stack(self._seq_action, dim=1)
+    scale = self.goal_space.scale(env).expand(next_s.shape[0], self.goal_dim)
+    self.buffer.add(
+      self._win_state, self._win_action, self._window_reward.clone(), next_s, done,
+      policy_seq, goal_state_seq, action_seq, scale, state,
+    )
 
   def update(self) -> dict[str, float]:
     metrics = {"act_abs_mean": self._last_act_abs, "buffer_size": float(len(self.buffer))}
@@ -165,6 +206,9 @@ class HighLevelTd3(HighLevel):
     n_actor = 0
     for _ in range(self.n_grad_steps):
       batch = self.buffer.sample(self.batch_size)
+      if self.relabel:
+        # HIRO off-policy correction: relabel the stored goal before the critic update.
+        batch = batch._replace(actions=self._relabel(batch))
       with torch.no_grad():
         noise = (torch.randn_like(batch.actions) * self.target_noise).clamp(
           -self.target_noise_clip, self.target_noise_clip
@@ -198,7 +242,49 @@ class HighLevelTd3(HighLevel):
     metrics["q_loss"] = q_loss_sum / self.n_grad_steps
     metrics["actor_loss"] = actor_loss_sum / max(n_actor, 1)
     metrics["q_value"] = y.mean().item()
+    if self.relabel:
+      metrics["relabel_frac"] = self._last_relabel_frac
     return metrics
+
+  @torch.no_grad()
+  def _relabel(self, batch) -> torch.Tensor:
+    """HIRO off-policy correction. For each sampled transition, pick the candidate goal
+    that maximizes the *current* LL's log-likelihood of the stored action sequence:
+    g~ = argmax_g Σ_i log π_lo(a_i | s_i, V*(g) - s_i). Candidates = the stored goal, the
+    empirical achieved delta, and Gaussian samples around it (all raw, clamped to [-1,1]).
+    """
+    B, c, _ = batch.action_seq.shape
+    k = self.num_candidates
+    s_t = batch.goal_state_seq[:, 0]  # [B, goal_dim], goal state at window start
+    scale = batch.scale  # [B, goal_dim]
+    g_emp = ((batch.next_goal_state - s_t) / scale).clamp(-1.0, 1.0)  # achieved delta as raw g
+
+    # Candidate goals [B, k, goal_dim]: stored g, empirical g_emp, +(k-2) sampled.
+    cand = torch.empty(B, k, self.goal_dim, device=self.device)
+    cand[:, 0] = batch.actions
+    cand[:, 1] = g_emp
+    noise = torch.randn(B, k - 2, self.goal_dim, device=self.device) * self.candidate_std
+    cand[:, 2:] = (g_emp.unsqueeze(1) + noise).clamp(-1.0, 1.0)
+
+    # Reconstruct the LL goal obs the candidate would have produced each step:
+    # V*_cand = s_t + scale*g; delta_i = V*_cand - s_i. Flatten [B,k,c] for one forward.
+    v_star = s_t.unsqueeze(1) + scale.unsqueeze(1) * cand  # [B, k, goal_dim]
+    delta = v_star.unsqueeze(2) - batch.goal_state_seq.unsqueeze(1)  # [B, k, c, goal_dim]
+    policy = batch.policy_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, policy_dim]
+    actions = batch.action_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, action_dim]
+
+    m = B * k * c
+    flat_obs = TensorDict(
+      {"policy": policy.reshape(m, -1), "goal": delta.reshape(m, -1)},
+      batch_size=[m],
+      device=self.device,
+    )
+    self.ll_actor(flat_obs, stochastic_output=True)  # populate the LL action distribution
+    logp = self.ll_actor.get_output_log_prob(actions.reshape(m, -1))
+    logp = logp.reshape(B, k, c, -1).sum(dim=(-1, -2))  # [B, k], Σ over window (+ any dim)
+    best = logp.argmax(dim=1)  # [B]
+    self._last_relabel_frac = (best != 0).float().mean().item()
+    return cand[torch.arange(B, device=self.device), best]
 
   def _soft_update(self, online: torch.nn.Module, target: torch.nn.Module) -> None:
     for p, tp in zip(online.parameters(), target.parameters()):

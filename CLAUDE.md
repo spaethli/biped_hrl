@@ -19,6 +19,10 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   named after the last iteration *index*, so `5000` ends at `model_4999.pt` while
   `5001` gives the round `model_5000.pt`.
 - Play / export ONNX: `python scripts/play.py <TaskID> --checkpoint-file <pt> [--export-onnx | --num-envs 1]`
+- Benchmark (deterministic in-sim policy comparison): `python scripts/play.py <TaskID>
+  --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --eval-seeds 2` — prints a
+  multi-metric scorecard (err_vx/vy/yaw, fall_rate, action_rate, orient/height dev) +
+  `[BENCH] {json}`. The canonical comparator (use `fall_rate`, not `ep_len`, for survival).
 
 ## Task IDs
 
@@ -73,6 +77,8 @@ analysis and the proposed change first.
 - `goal_components` (in `config/h1_2_a1/rl_cfg.py`) is the **single source of truth**
   for the goal space; the env derives its goal obs dim from it. `goal_dim` is always
   derived, never hardcoded.
+- `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
+  unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
   a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds.
 
