@@ -19,7 +19,10 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 
 import src.tasks.velocity.mdp as mdp
-from src.tasks.velocity.config.h1_2.env_cfgs import unitree_h1_2_flat_env_cfg
+from src.tasks.velocity.config.h1_2.env_cfgs import (
+  apply_lean_reward,
+  unitree_h1_2_flat_env_cfg,
+)
 from src.tasks.velocity.rl.hrl.goal_space import (
   DEFAULT_GOAL_COMPONENTS,
   goal_dim as compute_goal_dim,
@@ -56,14 +59,22 @@ def _restructure_obs_groups(cfg: ManagerBasedRlEnvCfg, goal_dim: int) -> None:
 
 
 def unitree_h1_2_flat_a1_env_cfg(
-  play: bool = False, goal_components: tuple[str, ...] = DEFAULT_GOAL_COMPONENTS
+  play: bool = False,
+  goal_components: tuple[str, ...] = DEFAULT_GOAL_COMPONENTS,
+  lean: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """A1 flat env: A0 flat env with hierarchical observation groups.
 
   The ``goal`` obs dim is derived from ``goal_components`` so it always matches the
   runner's goal space (both default to the same component list).
+
+  ``lean=True`` strips the shaping reward terms (Track F): the env reward then matches
+  lean-A0's, so the lean A0-vs-A1 comparison stays clean. Must warm-start lean-A1 from
+  a *lean*-A0 checkpoint -> doc/hrl/hierarchy_benefit_roadmap.md Track F.
   """
   cfg = unitree_h1_2_flat_env_cfg(play=play)
+  if lean:
+    apply_lean_reward(cfg)
   _restructure_obs_groups(cfg, goal_dim=compute_goal_dim(goal_components))
   # Treat falling as a truncation (bootstrap), not a true terminal: the LL's
   # always-negative goal-distance reward would otherwise be gamed by terminating

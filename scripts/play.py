@@ -43,9 +43,9 @@ class PlayConfig:
   |g| / saturation and a forward-vs-backward vx split (the observed directional bias).
   Sibling to ``eval_steps``; reuses ``eval_seeds``. Requires a hierarchical runner."""
   video: bool = False
-  video_length: int = 200
-  video_height: int | None = None
-  video_width: int | None = None
+  video_length: int = 1000
+  video_height: int = 1080 #| None = None
+  video_width: int = 1920 #| None = None
   camera: int | str | None = None
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False

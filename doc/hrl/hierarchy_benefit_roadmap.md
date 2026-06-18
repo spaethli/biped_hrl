@@ -172,6 +172,19 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   Likely realizable with existing sim sensors + `play.py` logging; no new architecture.
 - **Feeds:** the #6 decision (velocity vs acceleration basis) and the deployment milestone.
 
+### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR)
+- **Idea.** Feed the policy/goal the **noisy/estimated** base velocity (DR-injected estimator
+  noise + bias + latency) instead of privileged sim ground-truth, so it learns to be robust to
+  the real robot's velocity-estimate error rather than overfitting a clean signal.
+- **Why now.** Directly motivated by the sim-deploy finding (`HRL_plan.md` dashboard / A1 sim
+  deploy memory): **the LL goes twitchy under injected estimator noise** → state-noise DR is the
+  named sim2real next step. This is that DR.
+- **Scope / care.** The *reward* may keep ground-truth velocity (privileged is fine for the
+  critic/reward); it's the **observation/goal channel** that should see noise. Pairs naturally
+  with Track F runs — add an `obs-noise` variant to any lean run to test robustness vs accuracy.
+- **Touch points.** The velocity-bearing obs terms in `velocity_env_cfg.py` (`enable_corruption`
+  / a noise model on the base-velocity / goal obs); the A1 goal-obs write in `hrl_runner`.
+
 ---
 
 ## Track D — LL reward restructure so `fell_over` need not be a timeout (#4)
@@ -223,9 +236,41 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
 - **Risk.** A humanoid on tracking+height+orientation alone may never find a smooth gait (shaping
   exists because bipeds are hard) → both fail, no signal. Mitigate with the floor terms above.
 - **Scope.** Keep the **shaped** A0/A1 as the deployment + primary pair; lean is a *controlled
-  ablation alongside*, not a replacement. Cost = 2 extra training runs.
-- **Touch points.** A lean reward variant of `src/tasks/velocity/velocity_env_cfg.py` (or a
-  config override that zeroes the shaping weights); a matching lean-warm-start checkpoint.
+  ablation alongside*, not a replacement.
+
+### Implemented (2026-06-18) — 4-variant run matrix + one-command launcher
+Tasks: **`Unitree-H1_2-Flat-Lean`** (lean A0), **`Unitree-H1_2-Flat-A1-Lean`** (lean A1).
+Lean reward = A0's 16 terms with **7 shaping terms zeroed** (`foot_gait`, `foot_clearance`,
+`foot_slip`, `soft_landing`, `angular_momentum`, `body_ang_vel`, `stand_still`); **kept** =
+tracking + `body_orientation_l2` + `pose`(variable_posture, the height anchor) + floor
+(`is_terminated`, `joint_pos_limits`, `action_rate_l2`, `joint_acc_l2`, `self_collisions`).
+Single source: `apply_lean_reward()` in `config/h1_2/env_cfgs.py`; shaped A0 verified untouched.
+
+One launcher fans out 4 jobs (all **4096 envs, 10001 iters**), `a1_from_lean` gated on
+`a0_scratch` via SLURM `afterok`, the other 3 concurrent:
+
+```bash
+./train_h1_2_lean.sh submit   # on the cluster login node (uses 4 of your 16 GPUs)
+```
+
+| variant | task | init | answers |
+|---|---|---|---|
+| `a0_scratch`   | lean A0 | none (scratch)            | does lean reward alone produce a gait? (flat baseline) |
+| `a0_polished`  | lean A0 | resume polished shaped-A0 | does a good gait *survive* when shaping is stripped? |
+| `a1_from_lean` | lean A1 | warm-start `a0_scratch`   | clean lean hierarchy (LL from lean-A0) vs `a0_scratch` |
+| `a1_polished`  | lean A1 | warm-start polished shaped-A0 | hierarchy from a good gait vs `a0_polished` |
+
+- **Clean axis** = `a0_scratch` vs `a1_from_lean` (reward- and init-matched → isolates the
+  hierarchy; the lean version of the original Track F pair). The `*_polished` pair shares a
+  fixed polished-A0 init to ask "what does each architecture do with the same good gait."
+- **Mechanics.** Lean-A0 reuses `experiment_name=h1_2_velocity`, so `a0_polished` warm-starts
+  via `--agent.resume` from the polished run (continues the iter counter → its 10001 are
+  *additional*). A1 variants use `--agent.warm-start-path` (fresh iter 0, gap-aware partial load).
+  Override the polished checkpoint with `POLISHED_A0=…`.
+- **Verdict metric.** Deterministic benchmark (`scripts/play.py <task> --checkpoint-file <pt>
+  --num-envs 64 --eval-steps 600 --eval-seeds 2`): the hierarchy "earns its keep" if a lean-A1
+  variant holds (lower `fall_rate` / smoother `act_rate`) where its matched lean-A0 degrades.
+- **Optional.** Add the #8b estimator-noise DR to any variant to also probe robustness.
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 

@@ -18,3 +18,20 @@ register_mjlab_task(
   rl_cfg=_rl_cfg,
   runner_cls=HierarchicalRunner,
 )
+
+# Track F: lean-reward A1 (shaping stripped, same env reward as Unitree-H1_2-Flat-Lean).
+# Warm-start from a *lean*-A0 checkpoint, not shaped-A0 (else shaped gait leaks in via
+# the init). Fresh runner cfg instance to avoid shared mutable state with the A1 task.
+# -> doc/hrl/hierarchy_benefit_roadmap.md Track F.
+_rl_cfg_lean = unitree_h1_2_hrl_runner_cfg()
+register_mjlab_task(
+  task_id="Unitree-H1_2-Flat-A1-Lean",
+  env_cfg=unitree_h1_2_flat_a1_env_cfg(
+    goal_components=_rl_cfg_lean.goal_components, lean=True
+  ),
+  play_env_cfg=unitree_h1_2_flat_a1_env_cfg(
+    play=True, goal_components=_rl_cfg_lean.goal_components, lean=True
+  ),
+  rl_cfg=_rl_cfg_lean,
+  runner_cls=HierarchicalRunner,
+)

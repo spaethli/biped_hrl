@@ -193,3 +193,40 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
 
   return cfg
+
+
+# Track F (reward-shaping ablation): the shaping reward terms zeroed in the lean
+# variant. Keep = task tracking (track_lin/ang_vel), torso orientation
+# (body_orientation_l2), the posture/height anchor (pose = variable_posture; A0 has
+# no standalone base-height term, so posture is what holds height), and a safety/
+# training floor (is_terminated, joint_pos_limits, action_rate_l2, joint_acc_l2,
+# self_collisions). Zeroed terms are still computed -> they keep logging as
+# diagnostics, they just stop contributing to the gradient. To go "ultra-lean", add
+# "pose" here too (warning: the humanoid may lose its upright anchor and never find a
+# gait -> no signal). See doc/hrl/hierarchy_benefit_roadmap.md Track F.
+_LEAN_ZERO_TERMS = (
+  "foot_gait",
+  "foot_clearance",
+  "foot_slip",
+  "soft_landing",
+  "angular_momentum",
+  "body_ang_vel",
+  "stand_still",
+)
+
+
+def apply_lean_reward(cfg: ManagerBasedRlEnvCfg) -> None:
+  """Zero the shaping reward weights in place (Track F lean variant).
+
+  Shared by lean-A0 and lean-A1 so the A0-vs-A1 comparison stays clean: the env
+  reward is identical for both, the hierarchy is the only delta (RQ2 rule).
+  """
+  for name in _LEAN_ZERO_TERMS:
+    cfg.rewards[name].weight = 0.0
+
+
+def unitree_h1_2_flat_lean_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """Lean-reward A0 flat env (Track F): A0 flat env, shaping terms stripped."""
+  cfg = unitree_h1_2_flat_env_cfg(play=play)
+  apply_lean_reward(cfg)
+  return cfg
