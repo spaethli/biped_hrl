@@ -4,7 +4,7 @@ Why off-policy here: the naive on-policy ``HighLevelPpo`` (M3) fails to learn th
 command->goal map. It gets only ``num_steps_per_env // c`` (= 3) HL transitions per env
 per iteration, and the small tracking term in the dense task reward is swamped by
 penalties, so the HL mean drifts to "stay put" (credit-assignment + co-training
-instability; see ``doc/A1_HIRO_implementation_plan.md`` §0 "M3 experiment results").
+instability; see ``doc/hrl/A1_findings.md`` "M3").
 
 TD3 attacks both failure modes: a replay buffer gives orders-of-magnitude more HL
 updates per environment step (transitions persist across iterations and are resampled),
@@ -55,11 +55,13 @@ class HighLevelTd3(HighLevel):
     device: str,
     relabel: str = "none",
     ll_actor: torch.nn.Module | None = None,
+    target_mode: str = "delta",
   ) -> None:
     super().__init__(goal_space)
     self.device = device
     self.goal_dim = goal_dim
     self.gamma_hi = gamma_hi
+    self.target_mode = target_mode
     # HIRO off-policy correction: relabel sampled goals to the goal the *current* LL is
     # most likely to have produced the stored action trace for. Needs a live LL actor.
     self.relabel = relabel != "none"
@@ -147,13 +149,12 @@ class HighLevelTd3(HighLevel):
     self._win_state = s_vec
     self._win_action = g
     self._last_act_abs = g.abs().mean().item()
-    scale = self.goal_space.scale(env)
-    return state + scale * g
+    return self.goal_space.to_target(env, state, g, self.target_mode)
 
   def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
     # Deterministic actor; no exploration noise, no window scratch, no normalizer update.
     g = self._actor_forward(self.actor, self._state_vec(obs))
-    return state + self.goal_space.scale(env) * g
+    return self.goal_space.to_target(env, state, g, self.target_mode)
 
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
@@ -191,9 +192,13 @@ class HighLevelTd3(HighLevel):
     goal_state_seq = torch.stack(self._seq_gstate, dim=1)
     action_seq = torch.stack(self._seq_action, dim=1)
     scale = self.goal_space.scale(env).expand(next_s.shape[0], self.goal_dim)
+    # Store the absolute-target center too (state-independent ref for `absolute` mode);
+    # in `delta` mode it is unused at relabel time. Captured here so a curriculum range
+    # change can't desync it from the stored window.
+    center = self.goal_space.center(env)
     self.buffer.add(
       self._win_state, self._win_action, self._window_reward.clone(), next_s, done,
-      policy_seq, goal_state_seq, action_seq, scale, state,
+      policy_seq, goal_state_seq, action_seq, scale, state, center,
     )
 
   def update(self) -> dict[str, float]:
@@ -257,7 +262,10 @@ class HighLevelTd3(HighLevel):
     k = self.num_candidates
     s_t = batch.goal_state_seq[:, 0]  # [B, goal_dim], goal state at window start
     scale = batch.scale  # [B, goal_dim]
-    g_emp = ((batch.next_goal_state - s_t) / scale).clamp(-1.0, 1.0)  # achieved delta as raw g
+    # Reference for the g<->V* map: window-start state (delta) or stored center (absolute).
+    # V* = ref + scale*g, so g_emp recovering the achieved V* is (achieved - ref)/scale.
+    ref = batch.center if self.target_mode == "absolute" else s_t
+    g_emp = ((batch.next_goal_state - ref) / scale).clamp(-1.0, 1.0)  # achieved as raw g
 
     # Candidate goals [B, k, goal_dim]: stored g, empirical g_emp, +(k-2) sampled.
     cand = torch.empty(B, k, self.goal_dim, device=self.device)
@@ -267,8 +275,8 @@ class HighLevelTd3(HighLevel):
     cand[:, 2:] = (g_emp.unsqueeze(1) + noise).clamp(-1.0, 1.0)
 
     # Reconstruct the LL goal obs the candidate would have produced each step:
-    # V*_cand = s_t + scale*g; delta_i = V*_cand - s_i. Flatten [B,k,c] for one forward.
-    v_star = s_t.unsqueeze(1) + scale.unsqueeze(1) * cand  # [B, k, goal_dim]
+    # V*_cand = ref + scale*g; delta_i = V*_cand - s_i. Flatten [B,k,c] for one forward.
+    v_star = ref.unsqueeze(1) + scale.unsqueeze(1) * cand  # [B, k, goal_dim]
     delta = v_star.unsqueeze(2) - batch.goal_state_seq.unsqueeze(1)  # [B, k, c, goal_dim]
     policy = batch.policy_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, policy_dim]
     actions = batch.action_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, action_dim]
@@ -325,3 +333,37 @@ class HighLevelTd3(HighLevel):
     self.normalizer.eval()
     for m in (self.actor, self.q1, self.q2):
       m.eval()
+
+  def as_onnx(self, verbose: bool = False):
+    del verbose
+    return _HlTd3OnnxModule(self)
+
+
+class _HlTd3OnnxModule(torch.nn.Module):
+  """ONNX-export wrapper for the TD3 HL actor: ``g = tanh(actor(normalizer(x)))``, where
+  ``x`` is the flat HL obs (``policy ++ command``) the deploy feeds. Mirrors
+  :meth:`HighLevelTd3.act_inference` (deterministic; no exploration noise / normalizer
+  update). Exposes the same ``get_dummy_inputs`` / ``input_names`` / ``output_names``
+  interface as rsl_rl's ``_OnnxMLPModel`` so the runner exports both HL types through one
+  ``torch.onnx.export`` path. The copied normalizer is set to eval at export time so it
+  applies frozen stats."""
+
+  def __init__(self, hl: HighLevelTd3) -> None:
+    super().__init__()
+    self.normalizer = copy.deepcopy(hl.normalizer)
+    self.actor = copy.deepcopy(hl.actor)
+    self.input_size = hl._state_dim
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    return torch.tanh(self.actor(self.normalizer(x)))
+
+  def get_dummy_inputs(self) -> tuple[torch.Tensor]:
+    return (torch.zeros(1, self.input_size),)
+
+  @property
+  def input_names(self) -> list[str]:
+    return ["obs"]
+
+  @property
+  def output_names(self) -> list[str]:
+    return ["actions"]

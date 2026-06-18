@@ -23,13 +23,16 @@ import os
 import time
 
 import torch
+import wandb
 
+from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
 from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 from .td3 import HighLevelTd3
+from ...mdp import rewards as mdp_rewards
 
 
 class HierarchicalRunner(VelocityOnPolicyRunner):
@@ -49,6 +52,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.gamma_hi: float = train_cfg["gamma_hi"]
     self.relabeling: str = train_cfg["relabeling"]
     self.hl_algorithm: str = train_cfg["hl_algorithm"]
+    self.hl_target_mode: str = train_cfg.get("hl_target_mode", "delta")
+    self.hl_reward_mode: str = train_cfg.get("hl_reward_mode", "task")
     self.ll_task_reward_coef: float = train_cfg["ll_task_reward_coef"]
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
     self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
@@ -213,6 +218,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         self.gamma_hi,
         self.cfg["hl_ppo"],
         self.device,
+        target_mode=self.hl_target_mode,
       )
     if self.hl_algorithm == "td3":
       obs = self.env.get_observations().to(self.device)
@@ -226,6 +232,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         self.device,
         relabel=self.relabeling,
         ll_actor=getattr(self.alg, "_raw_actor", self.alg.actor),
+        target_mode=self.hl_target_mode,
       )
     raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
 
@@ -280,6 +287,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl.train_mode()
     self.logger.init_logging_writer()
 
+    # Tracking-only HL reward (penalty-free; the probe showed the full task reward's
+    # penalties collapse the HL to g≈0). Std cached once — term cfgs are static.
+    hl_track = self.hl_reward_mode == "tracking"
+    if hl_track:
+      rm = self.env.unwrapped.reward_manager
+      std_lin = rm.get_term_cfg("track_linear_velocity").params["std"]
+      std_ang = rm.get_term_cfg("track_angular_velocity").params["std"]
+
     start_it = self.current_learning_iteration
     total_it = start_it + num_learning_iterations
     for it in range(start_it, total_it):
@@ -326,7 +341,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
           if not self.freeze_ll:
             self.alg.process_env_step(obs, r_lo, dones, extras)
-          self.hl.accumulate(task_rew)
+          # HL reward: full task reward (penalty-dominated) or velocity-tracking only.
+          if hl_track:
+            hl_rew = (mdp_rewards.track_linear_velocity(uenv, std_lin, "twist")
+                      + mdp_rewards.track_angular_velocity(uenv, std_ang, "twist"))
+          else:
+            hl_rew = task_rew
+          self.hl.accumulate(hl_rew)
           if (k + 1) % self.c == 0:
             self.hl.end_window(uenv, obs, achieved, dones, extras)
 
@@ -377,17 +398,71 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     saved_dict["infos"] = infos
     saved_dict["hl"] = self.hl.state_dict()
     torch.save(saved_dict, path)
-    # A1 has no "actor" obs group (split into policy/command/goal); get_base_metadata
-    # reads active_terms["actor"], so alias it to the LL deploy obs (proprio ++ goal)
-    # for the export, then remove it — active_terms is the live dict compute() iterates.
-    om = self.env.unwrapped.observation_manager
-    om.active_terms["actor"] = om.active_terms["policy"] + om.active_terms["goal"]
-    try:
-      self._export_policy_onnx(path)
-    finally:
-      del om.active_terms["actor"]
+    self.export_hierarchy_to_onnx(path.split("model")[0])
     if self.cfg["upload_model"]:
       self.logger.save_model(path, self.current_learning_iteration)
+
+  def export_hierarchy_to_onnx(self, policy_path: str) -> None:
+    """Export the two deploy nets the C++ hierarchy loads:
+
+    * ``low_level.onnx``  — LL actor, obs = ``policy ++ goal`` (the remaining delta).
+    * ``high_level.onnx`` — HL actor, obs = ``policy ++ command``, output = raw goal ``g``
+      (ppo: Gaussian mean; td3: ``tanh``-bounded — both baked in by ``HighLevel.as_onnx``,
+      so C++ is algorithm-agnostic). Skipped for the oracle (no network).
+
+    A1 has no ``actor`` obs group (split into policy/command/goal); ``get_base_metadata``
+    reads ``active_terms["actor"]``, so we alias it to each net's deploy obs for the
+    metadata, then remove it (``active_terms`` is the live dict ``compute`` iterates)."""
+    om = self.env.unwrapped.observation_manager
+    # Low level: obs = policy ++ goal.
+    om.active_terms["actor"] = om.active_terms["policy"] + om.active_terms["goal"]
+    try:
+      self.export_policy_to_onnx(policy_path, "low_level.onnx")
+      self._attach_hrl_metadata(os.path.join(policy_path, "low_level.onnx"))
+    finally:
+      del om.active_terms["actor"]
+    # High level: obs = policy ++ command.
+    self._export_high_level_onnx(policy_path)
+
+  def _export_high_level_onnx(self, policy_path: str) -> None:
+    module = self.hl.as_onnx(verbose=False)
+    if module is None:
+      print("[HRL] HL has no network (oracle) -> high_level.onnx not exported; deploy "
+            "reconstructs V* from the command + hl_target_mode.")
+      return
+    module = module.to("cpu")
+    module.eval()
+    os.makedirs(policy_path, exist_ok=True)
+    out = os.path.join(policy_path, "high_level.onnx")
+    torch.onnx.export(
+      module, module.get_dummy_inputs(), out, export_params=True, opset_version=18,
+      verbose=False, input_names=module.input_names, output_names=module.output_names,
+      dynamic_axes={}, dynamo=False,
+    )
+    om = self.env.unwrapped.observation_manager
+    om.active_terms["actor"] = om.active_terms["policy"] + om.active_terms["command"]
+    try:
+      self._attach_hrl_metadata(out)
+    finally:
+      del om.active_terms["actor"]
+    print(f"[HRL] Exported high_level.onnx (hl_algorithm={self.hl_algorithm}, "
+          f"hl_target_mode={self.hl_target_mode}, goal_dim={self.goal_dim})")
+
+  def _attach_hrl_metadata(self, onnx_path: str) -> None:
+    """Base export metadata (joint names/gains/scale + observation_names from the current
+    ``actor`` alias) plus the HRL structure fields the deploy reads."""
+    # logger_type is absent when exporting outside training (e.g. play.py --export-onnx,
+    # where the runner has no wandb logger) -> fall back to a local run name.
+    logger_type = getattr(self.logger, "logger_type", None)
+    run_name: str = (
+      wandb.run.name if logger_type == "wandb" and wandb.run else "local"
+    )
+    metadata = get_base_metadata(self.env.unwrapped, run_name)
+    metadata["c"] = self.c
+    metadata["hl_algorithm"] = self.hl_algorithm
+    metadata["hl_target_mode"] = self.hl_target_mode
+    metadata["goal_components"] = [c.name for c in self.goal_space.components]
+    attach_metadata_to_onnx(onnx_path, metadata)
 
   def load(self, path: str, load_cfg=None, strict: bool = True, map_location=None) -> dict:
     infos = super().load(path, load_cfg, strict, map_location)

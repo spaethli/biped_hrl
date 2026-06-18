@@ -2,6 +2,8 @@
 #include "FSM/State_Passive.h"
 #include "FSM/State_FixStand.h"
 #include "FSM/State_RLBase.h"
+#include "FSM/State_RLHRL.h"  // emit REGISTER_FSM(State_RLHRL) registrar into main.o so the
+                              // static-lib object isn't dropped (else "Unknown FSM type RLHRL")
 #include <filesystem>
 
 std::unique_ptr<LowCmd_t> FSMState::lowcmd = nullptr;

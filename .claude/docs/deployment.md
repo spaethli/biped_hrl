@@ -35,11 +35,39 @@ cp logs/.../policy.onnx deploy/robots/h1_2/config/policy/velocity/v0/exported/po
 without the viewer. Training saves also auto-export `policy.onnx` (with metadata)
 next to each checkpoint via `VelocityOnPolicyRunner._export_policy_onnx`.
 
-**A1/HRL caveat:** the A1 LL ONNX input is 96-dim = proprio(89) + GOAL(7), vs A0's
-92-dim = proprio incl. COMMAND(3). For deployment the C++ must feed the goal delta
-where A0 fed the command. Oracle HL: the goal is computable on-robot
-(`oracle_target − state`); learned HL: the HL net must be exported and chained
-(fires every `c` steps — see plan doc §8, deferred to the deployment milestone).
+**A1/HRL deploy (as-built, 2026-06-18 — sim).** Two-ONNX hierarchy, all robot-local
+(no `deploy/include/isaaclab/` edits):
+- Export: `HierarchicalRunner.export_hierarchy_to_onnx` (via `play.py --export-onnx`) →
+  `high_level.onnx` (obs `policy++command`→g; ppo Gaussian-mean / td3 `tanh` + normalizer
+  baked in) + `low_level.onnx` (obs `policy++goal`→action). Oracle skips `high_level.onnx`.
+- Run: `State_RLHRL` (`src/State_RLHRL.cpp`, FSM `type: RLHRL`, reach via key **`h`** /
+  gamepad `RT+X`); loads both ONNX lazily on first `enter()`, fires HL every `c` (holds
+  `V*`), feeds LL `V*−s`. Config dir `config/policy/velocity_hrl/v0/`; goal math in
+  `include/hrl/goal_space.h`. A0 (`State_RLBase`, key `o`) untouched.
+- `deploy.yaml` `hrl:` block switches checkpoints with no rebuild: `hl_algorithm`
+  (`oracle`=analytic `V*`, no HL net | `learned`), `c`, `hl_target_mode`, `goal_components`,
+  `nominal_root_height` (=1.3076, imu-site standing z; offset cancels in height delta).
+- **Gotcha:** `main.cpp` must `#include "FSM/State_RLHRL.h"` or the `REGISTER_FSM` registrar
+  is dropped from the static lib → runtime `Unknown FSM type RLHRL`.
+
+## A1 needs a runtime base-velocity estimate (A0 does not)
+
+The goal the LL reads is `V* − s`, and the velocity part of the goal-space state `s` is the
+current base linear velocity (`goal_space._vel_extract`). So forming the goal at runtime needs
+vx/vy (+ height); yaw-rate and orientation come from the gyro/IMU and are fine. **No network
+takes `base_lin_vel`** (actor obs omit it, like A0) — it's used only to build `s`.
+`State_RLHRL.cpp` reads it (+height) from the sportmode HighState (`highstate_->velocity()` is
+WORLD-frame, rotated to body via the IMU quat; `position().z` is height): in sim that's the
+MuJoCo bridge's **ground-truth** `rt/sportmodestate` (privileged); on the real robot it must come
+from the onboard sport-mode estimator (noisy/drifting) or a custom one. A0 has no such dependency.
+**Test knob:** `deploy.yaml` `hrl.state_noise: {velocity, orientation, height}` injects per-step
+Gaussian noise into `s` in sim, to emulate that estimator noise (default 0). Finding (2026-06-18,
+learned `absolute` TD3): under realistic velocity/height noise the clean-trained LL still stands
+but is **much twitchier, worst when standing still** (cmd=0 → goal = −noise → phantom corrections;
+HL input isn't noised, so this is the LL reacting to noisy goal feedback) → see
+`doc/hrl/A1_findings.md` (sim2real fix = train with state-noise DR). To remove the dependency
+entirely: switch the LL to observe the **absolute `V*`** instead of the delta (`doc/hrl/A1_HIRO.md`
+reserve variant) → no runtime velocity estimate needed.
 
 ## Visualize a checkpoint
 

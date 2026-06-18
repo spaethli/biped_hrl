@@ -91,6 +91,22 @@ def _height_scale(env) -> torch.Tensor:
   return torch.tensor([0.2], device=env.device)  # ~0.2 m of height deviation
 
 
+# --- Absolute-target centers (for the `absolute` HL map V* = center + scale*g) -----
+# Only used when hl_target_mode == "absolute": `center` is the state-INDEPENDENT
+# reference the bounded goal g perturbs around. Velocity uses the command-range
+# midpoint so g in [-1,1] spans exactly the command range (center+scale*g sweeps
+# [lo, hi]); non-task comps reuse their nominal value. Shape [N, dim] (broadcast).
+
+
+def _vel_center(env) -> torch.Tensor:
+  r = env.command_manager.get_term("twist").cfg.ranges
+  mid = lambda lo, hi: (lo + hi) / 2.0  # noqa: E731
+  c = torch.tensor(
+    [mid(*r.lin_vel_x), mid(*r.lin_vel_y), mid(*r.ang_vel_z)], device=env.device
+  )
+  return c.expand(env.num_envs, 3)
+
+
 @dataclass
 class GoalComponent:
   """One slice of the goal space."""
@@ -107,13 +123,16 @@ class GoalComponent:
   """If True, the oracle targets the command instead of the nominal value."""
   weight: float = 1.0
   """Reward weight on this component's distance."""
+  center: Callable[[object], torch.Tensor] | None = None
+  """env -> absolute-target center, shape [N, dim] (learned HL, `absolute` mode:
+  V* = center + scale*g). None -> falls back to ``nominal``."""
 
 
 # Factory: name -> GoalComponent (given a reward weight).
 _FACTORY: dict[str, Callable[[float], GoalComponent]] = {
   "velocity": lambda w: GoalComponent(
     "velocity", 3, _vel_extract, lambda e: torch.zeros(e.num_envs, 3, device=e.device),
-    _vel_scale, True, w
+    _vel_scale, True, w, center=_vel_center
   ),
   "orientation": lambda w: GoalComponent(
     "orientation", 3, _orient_extract, _orient_nominal, _orient_scale, False, w
@@ -144,6 +163,29 @@ class GoalSpace:
     Read from the env (velocity tracks the live twist curriculum), so it reflects
     the active command ranges if the curriculum stage changes between calls."""
     return torch.cat([c.scale(env) for c in self.components], dim=-1)
+
+  def center(self, env) -> torch.Tensor:
+    """Per-dim absolute-target center (velocity = command midpoint, others = nominal),
+    shape [N, dim]. Only used by the `absolute` HL map."""
+    return torch.cat(
+      [(c.center or c.nominal)(env) for c in self.components], dim=-1
+    )
+
+  def to_target(self, env, state: torch.Tensor, g: torch.Tensor, mode: str) -> torch.Tensor:
+    """Map a bounded goal g in [-1,1]^dim to the absolute window target V*.
+
+    ``delta`` (HIRO, default): ``V* = state + scale*g`` (target relative to the current
+    state). ``absolute``: ``V* = center + scale*g`` (state-independent — g spans the
+    command range; the oracle's target structure). The LL still observes V*-s_i either
+    way; only this map changes."""
+    ref = self.center(env) if mode == "absolute" else state
+    return ref + self.scale(env) * g
+
+  def to_g(self, env, state: torch.Tensor, achieved: torch.Tensor, mode: str) -> torch.Tensor:
+    """Inverse of :meth:`to_target`: the raw g whose target equals ``achieved``
+    (the relabel empirical goal), clamped to [-1,1]."""
+    ref = self.center(env) if mode == "absolute" else state
+    return ((achieved - ref) / self.scale(env)).clamp(-1.0, 1.0)
 
   def reward(self, target: torch.Tensor, achieved: torch.Tensor) -> torch.Tensor:
     """HIRO intrinsic reward: -Σ_c w_c ||target_c - achieved_c||_2, shape [N]."""

@@ -5,7 +5,7 @@
 #include <unordered_map>
 
 // [SAFETY FILTER] set to 0 to revert to unfiltered policy output
-#define SAFETY_FILTER 0
+#define SAFETY_FILTER 1
 #if SAFETY_FILTER
 #  include "h1_2_limits.h"
 #  include <cmath>
@@ -95,8 +95,30 @@ void State_RLBase::run()
         }
     }
 
+    // Vertical acceleration fall detection — catches pelvis sinking while body stays upright.
+    // Read accelerometer under the lowstate mutex (3 floats, negligible lock time).
+    Eigen::Vector3f lin_acc_b;
+    {
+        std::lock_guard<std::mutex> lock(lowstate->mutex_);
+        lin_acc_b = Eigen::Vector3f(
+            lowstate->msg_.imu_state().accelerometer()[0],
+            lowstate->msg_.imu_state().accelerometer()[1],
+            lowstate->msg_.imu_state().accelerometer()[2]
+        );
+    }
+    // Rotate to world frame and remove gravity: 0 = standing still, -9.81 = free-fall
+    float a_world_z = (env->robot->data.root_quat_w * lin_acc_b).z() - 9.81f;
+    // Count consecutive ticks below threshold; reset immediately when condition clears
+    static constexpr float kFallAccThresh  = -7.0f; // m/s² downward
+    static constexpr int   kFallAccWindow  = 60;    // 120 ms at 500 Hz
+    if (a_world_z < kFallAccThresh) fall_acc_counter_ = std::min(fall_acc_counter_ + 1, kFallAccWindow);
+    else                             fall_acc_counter_ = std::max(fall_acc_counter_ - 1, 0);
+    bool fall_detected = (fall_acc_counter_ >= kFallAccWindow);
+    if (fall_detected)
+        spdlog::warn("[Safety] Fall: a_world_z={:.2f} m/s²", a_world_z);
+
     // Ramp hold counter up/down over kRampCycles ticks to avoid torque spikes
-    bool hold_active = joint_hold || tilt_safety;
+    bool hold_active = joint_hold || tilt_safety || fall_detected;
     if (hold_active) hold_counter_ = std::min(hold_counter_ + 1, kRampCycles);
     else             hold_counter_ = std::max(hold_counter_ - 1, 0);
     float alpha = static_cast<float>(hold_counter_) / kRampCycles;

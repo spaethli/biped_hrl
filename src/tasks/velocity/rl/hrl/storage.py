@@ -39,6 +39,7 @@ class HLBatch(NamedTuple):
   action_seq: torch.Tensor | None = None  # [B, c, action_dim]
   scale: torch.Tensor | None = None  # [B, goal_dim]
   next_goal_state: torch.Tensor | None = None  # [B, goal_dim] = s_{t+c}
+  center: torch.Tensor | None = None  # [B, goal_dim] absolute-target center (absolute mode)
 
 
 class HLReplayBuffer:
@@ -61,6 +62,7 @@ class HLReplayBuffer:
     self.action_seq: torch.Tensor | None = None
     self.scale: torch.Tensor | None = None
     self.next_goal_state: torch.Tensor | None = None
+    self.center: torch.Tensor | None = None
     self._ptr = 0
     self._size = 0
 
@@ -74,6 +76,7 @@ class HLReplayBuffer:
     self.action_seq = torch.zeros(self.capacity, c, action_seq.shape[-1], device=self.device)
     self.scale = torch.zeros(self.capacity, scale.shape[-1], device=self.device)
     self.next_goal_state = torch.zeros(self.capacity, goal_state_seq.shape[-1], device=self.device)
+    self.center = torch.zeros(self.capacity, scale.shape[-1], device=self.device)
 
   def add(
     self,
@@ -87,6 +90,7 @@ class HLReplayBuffer:
     action_seq: torch.Tensor | None = None,
     scale: torch.Tensor | None = None,
     next_goal_state: torch.Tensor | None = None,
+    center: torch.Tensor | None = None,
   ) -> None:
     """Push a batch of ``N`` transitions (wraps around the ring)."""
     n = states.shape[0]
@@ -104,6 +108,7 @@ class HLReplayBuffer:
       self.action_seq[idx] = action_seq
       self.scale[idx] = scale
       self.next_goal_state[idx] = next_goal_state
+      self.center[idx] = center
     self._ptr = (self._ptr + n) % self.capacity
     self._size = min(self._size + n, self.capacity)
 
@@ -116,5 +121,5 @@ class HLReplayBuffer:
     return HLBatch(
       self.states[i], self.actions[i], self.rewards[i], self.next_states[i], self.dones[i],
       self.policy_seq[i], self.goal_state_seq[i], self.action_seq[i], self.scale[i],
-      self.next_goal_state[i],
+      self.next_goal_state[i], self.center[i],
     )

@@ -2,7 +2,7 @@
 
 Condensed chronological record of the A1 milestones, failed fixes, and diagnoses that led
 to the SOLVED config. Kept so A2/A3 don't re-walk dead ends. Design/status →
-`doc/A1_HIRO.md`; shared machinery → `.claude/docs/hrl-infra.md`. Judge every claim by the
+`doc/hrl/A1_HIRO.md`; shared machinery → `.claude/docs/hrl-infra.md`. Judge every claim by the
 deterministic benchmark, not training-time stochastic metrics.
 
 ## Ruled-out / lessons ledger (read this first)
@@ -16,7 +16,10 @@ deterministic benchmark, not training-time stochastic metrics.
 | HIRO relabel + `c`-sweep {4,8,12} (M5) | relabel helps vx/vy; cadence is NOT the limiter | Finer `c` (more HL transitions) didn't improve tracking → "too few HL steps" unsupported. Only clean monotonic effect: coarser `c` → smoother + better height. Wall is STRUCTURAL. (Caveat: 1 seed/c.) |
 | `absolute`-target HL | fixed LL saturation, **moved wall to HL** | `|g|` 0.84→0.16, LL reach 0.61→0.11 (near oracle). But HL then outputs `g≈0` regardless of command (refuses forward) → end err didn't improve. Isolated the 2nd failure. |
 | `tracking` HL reward (+ absolute) | **SOLVED** | Penalty-dominated task reward was making value-max HL = `g≈0`. Tracking-only HL objective → HL asks for the command. A0-level tracking. |
+| `tracking` reward alone, delta (ablation) | absolute NOT required | delta+tracking 0.14/0.11/0.20 → `tracking` is the primary lever; `absolute` only refines it (0.14→0.098). |
+| `hl=ppo` + absolute + tracking (± std cap) | FAILED both | No cap: `|g|`→13, yaw 1.40. Std cap (1e-3,1.0): still `|g|`→4 + falls (ep_len 9.6) — the cap bounds σ, not the unbounded Gaussian **mean**. PPO can't cleanly bound `g` (rsl_rl has no squashed density); TD3's deterministic `tanh` is load-bearing. |
 | Remove warm-start (control) | catastrophic | `|g|` pins 1.0 (100% sat), action_rate 13.5 vs A0 0.66. Confirms warm-start load-bearing from both directions. |
+| Deploy goal-state noise (sim, `hrl.state_noise`; learned `absolute` TD3) | stands but **twitchy, worst standing still** | Clean-trained LL isn't robust to estimator noise on its velocity/height goal feedback (cmd=0 → goal=−noise → phantom corrections; HL input isn't noised). **Sim2real fix: train LL+HL with state-noise DR** on the goal-state obs. Adding measured `imu_lin_vel` as a direct obs is an option but privileged + F4 showed base_lin_vel in HL obs was a no-op for *clean* tracking — revisit only as a noise-robustness lever. Deploy mechanism + knob → `.claude/docs/deployment.md`. |
 
 ## Milestones
 
@@ -108,14 +111,15 @@ Probe on TD3+relabel c-sweep (`model_3000`), consistent across c∈{4,8,12}:
 goals (`|g|→1`), and the co-trained LL never acquires velocity goal-conditioning against
 those bad goals (co-adaptation collapse). Forward-avoidance is a pure HL artifact (zero
 under oracle). LL, LL intrinsic reward, and command range all CLEARED. Full diagnosis:
-`doc/A1_goal_achievability_probe.md`. → led to the two-lever fix (`doc/A1_HIRO.md`).
+`doc/hrl/A1_goal_achievability_probe.md`. → led to the two-lever fix (`doc/hrl/A1_HIRO.md`).
 
 ## Absolute-target run → tracking-reward run (the fix chain)
-Detailed A/B tables and the SOLVED result are in `doc/A1_HIRO.md` ("Current results").
+Detailed A/B tables and the SOLVED result are in `doc/hrl/A1_HIRO.md` ("Current results").
 Sequence: `absolute` solved LL saturation but flipped the error onto the HL (HL goal err
 0.71, refuses forward → penalty-dominated task reward makes value-max = `g≈0`); adding
 `tracking` HL reward made the HL ask for the command → **err_vx 0.098 / err_vy 0.091,
-A0-level, 0 falls.** Both levers needed.
+A0-level, 0 falls.** Ablation (2026-06-17): `tracking` is the primary lever (alone, delta:
+0.14); `absolute` only refines it.
 
 ## Play/replay fix (F0, 2026-06-11) — all pre-fix qualitative replays are void
 `play.py` used `get_inference_policy()` which returned the bare LL actor — nothing fired the

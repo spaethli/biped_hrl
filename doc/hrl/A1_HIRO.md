@@ -4,7 +4,7 @@
 > HL reward reaches deterministic benchmark **err_vx 0.098 / err_vy 0.091 / err_yaw 0.167,
 > 0 falls — A0-level** on vx/vy (A0 0.09/0.11/0.10), 4.3× better than the prior best A1.
 > Remaining = polish (yaw, smoothness) + writeup ablations. See "Current results" + the
-> chronological journey in `doc/A1_findings.md`.
+> chronological journey in `doc/hrl/A1_findings.md`.
 
 Shared machinery (co-train loop, goal space, warm-start, reward decomp, TD3 internals,
 benchmark/probe tools, checkpoint/ONNX, gotchas) is in **`.claude/docs/hrl-infra.md`** —
@@ -17,8 +17,22 @@ TD3 high level** with HIRO goal-relabeling. The HL fires every `c` steps and han
 velocity(+pose) goal; the LL never sees the command. Relabeling is a runtime toggle (clean
 ablation). Stays in `unitree_rl_mjlab` + `mjlab` + `rsl_rl`; no Isaac Lab.
 
+## Why two levels (honest assessment, 2026-06-18)
+A1 ≈ A0 on flat in-sim tracking is **expected, not a failure** — a hierarchy can't beat a flat
+policy at one stationary task (the goal bottleneck only constrains it). As measured A1 has **no
+in-sim upside and real costs** (yaw 0.17 vs 0.10, jerkier act_rate 1.68 vs 0.66, complexity,
+load-bearing A0 warm-start, + a runtime base-velocity estimate A0 doesn't need — see deploy
+note), so "hierarchy improves locomotion" is **not** supported. The payoff
+is elsewhere: (1) **substrate for A2/A3** — A2's A-RMA adaptation attaches to the HL/LL split,
+where the sim2real story (M3, the primary metric) comes from; (2) **clean RQ2 control** — A1's
+LL = A0 PPO, so A1≈A0 proves the hierarchy is performance-neutral → any A2 gain is attributable
+to adaptation, not confounded; (3) **interface** — goal as a safety-clamp / planner- or
+MPC-driven (A3/A4) / inspection surface, reusing the LL without retraining. **Decision:** don't
+polish A1 for in-sim tracking; fix smoothness only (transfer liability that would confound A2),
+then test where a hierarchy *could* win (OOD/robustness below) and move to A2.
+
 ## The two levers that solved the wall
-Each fixes one probe-isolated failure (see `doc/A1_findings.md` for the diagnosis chain):
+Each fixes one probe-isolated failure (see `doc/hrl/A1_findings.md` for the diagnosis chain):
 
 1. **`hl_target_mode=absolute`** (`HrlRunnerCfg`, default `delta`; CLI
    `--agent.hl-target-mode absolute`). The HL emits a state-independent
@@ -37,7 +51,8 @@ Each fixes one probe-isolated failure (see `doc/A1_findings.md` for the diagnosi
    forward-avoidance gone. The **env reward is unchanged** (no RQ2 confound); only the
    HL-internal objective changes. Safe with `absolute` (V* bounded to command range).
 
-Both are needed (clean A/B: delta-task → absolute-task → absolute-tracking).
+**Attribution (A/B, 2026-06-17):** `tracking` is the essential lever (alone: err_vx 0.14);
+`absolute` is a refinement on top (→0.098, smoother). With `task` reward neither map tracks.
 
 ## HL learners (`hl_algorithm`)
 The switch is the **HL learner**, not just a flag — relabeling needs a replay buffer, so it
@@ -96,6 +111,7 @@ See `hrl-infra.md` for the `GoalSpace` map and `scale`/`center` mechanics.
 |---|---|---|---|---|---|---|---|---|
 | delta baseline (relabel) | 0.42 | 0.35 | 0.64 | 1.41 | 0.84 (58%) | 0.51 | 0.61 | — |
 | absolute, task reward | 0.65 | 0.45 | 0.28 | 2.40 | 0.16 (2%) | 0.71 | 0.11 | 0.92 / 0.19 |
+| delta + tracking | 0.140 | 0.111 | 0.199 | 2.46 | 0.36 (2%) | 0.20 | 0.22 | 0.110 / 0.177 |
 | **absolute + tracking** | **0.098** | **0.091** | **0.167** | 1.68 | 0.16 (0.6%) | **0.11** | 0.10 | **0.096 / 0.083** |
 | A0 reference | 0.09 | 0.11 | 0.10 | 0.66 | — | — | — | — |
 
@@ -109,16 +125,34 @@ is already near it** — that metric is informative only when failing.
 - **Polish (not the wall):** yaw 0.167 (largest residual = HL yaw goal err 0.171; still 4×
   better than prior A1); smoothness act_rate 1.68 vs A0 0.66; posture (orient_dev 0.13,
   height_dev 0.11 vs A0 ~0.03) — LL-execution quality, not tracking.
-- **Open ablation (running `a1_td3_delta_hltrack_5k`):** is `absolute` *necessary*, or does
-  the `tracking` HL reward alone (delta mode) suffice? A/B on `hl_target_mode`, tracking
-  reward held fixed.
+- **Absolute-necessity ablation — DONE** (`a1_td3_delta_hltrack_5k`): tracking reward alone
+  (delta) reaches 0.14/0.11/0.20 → absolute not strictly necessary, just a refinement (see
+  Attribution above).
+- **`hl=ppo` + absolute + tracking — FAILED** (no cap: `|g|`→13; std cap: `|g|`→4 + falls). The
+  two levers don't rescue naive PPO: a std cap bounds σ but not the unbounded Gaussian mean, and
+  rsl_rl has no squashed density → PPO can't cleanly bound `g`. TD3's deterministic `tanh` is
+  load-bearing (keeps `|g|≤1` so `absolute` bounds `V*`).
+- **Open — does the hierarchy buy anything in-sim? A0-vs-A1 robustness/OOD test:** A1's LL was
+  relabeled over a broader goal distribution than A0's command curriculum → may generalize
+  better to OOD commands / push perturbations. If A1 holds where A0 degrades = a real hierarchy
+  benefit; else a clean negative. (The decisive test is still A2's M3 sim2real drop.)
+- **Planned — small `action_rate` penalty, weighted ≪ A0's −0.05:** targets the smoothness gap
+  (act_rate ~1.7 vs A0 0.66). Must enter as a **direct reward term, not the goal/intrinsic
+  channel** — action smoothness isn't a goal-space state, so HIRO's intrinsic goal-distance
+  reward structurally can't encode it (non-observable → not canonical goal structure).
 - **Reserve variant (not implemented):** LL observes the **absolute** target `V*` instead of
-  the delta `V*−s_i` (matches A0's absolute-command training format). Low priority — the
-  oracle control already proves the delta LL representation is fully learnable (0.05 m/s).
-  Touch points: the goal-obs write in `hrl_runner` learn()/`get_inference_policy`, the probe,
-  a matching `ll_goal_obs` flag.
-- Then: full omnidirectional cluster run, optional `c`/goal-range/HL-LR sweep, ONNX
-  `policy_hl.onnx` + C++ two-model chaining (deployment milestone).
+  the delta `V*−s_i`. Two payoffs: matches A0's absolute-command format, AND removes A1's
+  runtime base-velocity dependency — the delta needs current vx/vy to build `s`, so deploy must
+  estimate base velocity (sportmode/state estimator); absolute `V*` needs none (see
+  `.claude/docs/deployment.md`). Low priority for accuracy (oracle proves delta is learnable at
+  0.05 m/s) but the cleanest deploy fix. Touch points: goal-obs write in `hrl_runner`
+  learn()/`get_inference_policy`, the probe, a matching `ll_goal_obs` flag.
+- Then: full omnidirectional cluster run, optional `c`/goal-range/HL-LR sweep.
+- **Sim deploy DONE (2026-06-18):** two-ONNX C++ hierarchy (`high_level.onnx`+`low_level.onnx`,
+  `State_RLHRL`, oracle + learned), runs in MuJoCo; TD3 abs/delta respond → mechanism in
+  `.claude/docs/deployment.md`. **Open sim2real next step:** the LL is twitchy under injected
+  estimator noise on the goal-state (`hrl.state_noise`), worst standing still → train LL+HL with
+  **state-noise DR** on the goal-state obs (and/or `imu_lin_vel` obs). See `A1_findings.md`.
 
 ## A1 file map (`src/tasks/velocity/`)
 ```

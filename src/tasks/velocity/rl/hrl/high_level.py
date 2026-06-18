@@ -87,6 +87,16 @@ class HighLevel(ABC):
   def eval_mode(self) -> None:
     pass
 
+  def as_onnx(self, verbose: bool = False):
+    """Return an ONNX-exportable deterministic module (flat obs vector -> goal ``g``),
+    mirroring :meth:`act_inference`'s network math, or ``None`` if this HL has no
+    network (the oracle: deploy reconstructs ``V*`` from the command + ``hl_target_mode``
+    with no learned weights). The module's input is the HL obs (``policy ++ command``)
+    concatenated in that order; output is the raw goal ``g`` (the runner/deploy then maps
+    ``g -> V*`` via ``goal_space.to_target``)."""
+    del verbose
+    return None
+
 
 class OracleHighLevel(HighLevel):
   """Non-learning HL: emit the absolute target = command velocity + nominal pose.
@@ -138,10 +148,12 @@ class HighLevelPpo(HighLevel):
     gamma_hi: float,
     cfg: dict,
     device: str,
+    target_mode: str = "delta",
   ) -> None:
     super().__init__(goal_space)
     self.device = device
     self.goal_dim = goal_dim
+    self.target_mode = target_mode
     obs_groups = {"actor": ["policy", "command"], "critic": ["critic"]}
 
     actor_cfg = {k: v for k, v in cfg["actor"].items() if k not in _MLP_DROP}
@@ -163,13 +175,12 @@ class HighLevelPpo(HighLevel):
     g = self.ppo.act(obs)
     self.ppo.actor.update_normalization(obs)
     self.ppo.critic.update_normalization(obs)
-    scale = self.goal_space.scale(env)
-    return state + scale * g
+    return self.goal_space.to_target(env, state, g, self.target_mode)
 
   def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
     # Deterministic mean goal; no transition storage / normalizer updates.
     g = self.ppo.actor(obs)
-    return state + self.goal_space.scale(env) * g
+    return self.goal_space.to_target(env, state, g, self.target_mode)
 
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
@@ -211,3 +222,8 @@ class HighLevelPpo(HighLevel):
 
   def eval_mode(self) -> None:
     self.ppo.eval_mode()
+
+  def as_onnx(self, verbose: bool = False):
+    # The HL actor is a standard MLPModel (same class as the LL): its ONNX wrapper bakes
+    # in the obs normalizer + deterministic mean (= g). Input = policy ++ command.
+    return self.ppo.actor.as_onnx(verbose)

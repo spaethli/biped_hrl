@@ -1,0 +1,95 @@
+# A1 (HIRO) two-level deploy config (MuJoCo sim, keyboard). Loaded by State_RLHRL.
+# Switch checkpoints by editing the `hrl:` block + swapping the two ONNX in exported/ —
+# no rebuild. Values below match the velocity+orientation+height (7-dim) absolute-target
+# runs; for a delta-target run set `hl_target_mode: delta`.
+joint_ids_map: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]
+step_dt: 0.02
+stiffness: [200.0, 200.0, 200.0, 300.0, 40.0, 40.0, 200.0, 200.0, 200.0, 300.0, 40.0, 40.0, 200.0,
+            40.0, 40.0, 7.9, 7.9, 7.9, 7.9, 7.9, 40.0, 40.0, 7.9, 7.9, 7.9, 7.9, 7.9]
+damping:   [2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 2.5,
+            2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5, 2.0, 2.0, 0.5, 0.5, 0.5, 0.5, 0.5]
+default_joint_pos: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0]
+
+# HIRO hierarchy parameters (read by State_RLHRL). MUST match the trained checkpoint.
+hrl:
+  hl_algorithm: default                          # oracle (analytic V*=command+nominal, no high_level.onnx)
+                                                # | learned (default; needs high_level.onnx)
+  c: 8                                          # HL period (control steps); HL holds V* between fires
+  hl_target_mode: absolute                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
+                                                # (ignored when hl_algorithm: oracle)
+  goal_components: [velocity, orientation, height]  # the 7-dim goal space; goal_dim derived from this
+  nominal_root_height: 1.3076                   # imu-site standing z (pelvis 1.03 + torso->imu 0.278);
+                                                # imu-vs-root offset cancels in the height delta at this value
+  # Synthetic Gaussian noise added to the goal-space state s each step (per-component std,
+  # 0 = off). Sim s is ground truth; this emulates the real-robot state-estimator noise on
+  # the LL's goal feedback, to test whether A1 would transfer. Suggested real-ish values:
+  # velocity ~0.05-0.1 m/s & rad/s, height ~0.02-0.05 m, orientation ~0.01-0.02. Orientation
+  # & ang_vel come from the IMU on hardware too; velocity & height are the estimator's job.
+  state_noise:
+    velocity: 0.0
+    orientation: 0.0
+    height: 0.0
+
+commands:
+  # IMPORTANT: these ranges set the goal scale/center — they MUST equal the policy's
+  # training (play) ranges, or V* is reconstructed on the wrong scale.
+  base_velocity:
+    ranges:
+      lin_vel_x: [-0.5, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-0.5, 0.5]
+      heading: null
+actions:
+  JointPositionAction:
+    clip: null
+    joint_names: [.*]
+    scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25,
+            0.25, 0.25, 0.57, 0.57, 0.57, 0.57, 0.57, 0.25, 0.25, 0.57, 0.57, 0.57, 0.57, 0.57]
+    offset: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0]
+    joint_ids: null
+
+# Grouped observations. `policy` = A0 proprio with the command removed (LL + HL shared
+# input); `command` = the twist command (HL input only). Order must match the training
+# obs groups: base_ang_vel, projected_gravity, gait_phase, joint_pos_rel, joint_vel_rel,
+# last_action. The 7-dim `goal` (V*-s delta) is synthesized by State_RLHRL, not here.
+observations:
+  policy:
+    base_ang_vel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1
+    projected_gravity:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1
+    gait_phase:
+      params: {period: 0.6}
+      clip: null
+      scale: [1.0, 1.0]
+      history_length: 1
+    joint_pos_rel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+    joint_vel_rel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+    last_action:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+  command:
+    keyboard_velocity_commands:
+      params: {command_name: base_velocity}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1

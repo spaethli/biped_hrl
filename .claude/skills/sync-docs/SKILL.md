@@ -1,6 +1,6 @@
 ---
 name: sync-docs
-description: Sync this session's results, decisions, fixes, and conventions into the project documentation (plan doc §0, .claude/docs, CLAUDE.md) and auto-memory, each fact to its single canonical home, with a personal-identifier redaction gate before finishing. Use at the end of a work session or milestone, or whenever the user asks to "update the docs/memory", "write down what we did/learned", or "sync documentation".
+description: Sync this session's results, decisions, fixes, and conventions into the project documentation (the doc/ HRL plan, .claude/docs, CLAUDE.md) and auto-memory, each fact to its single canonical home, with a personal-identifier redaction gate before finishing. Use at the end of a work session or milestone, or whenever the user asks to "update the docs/memory", "write down what we did/learned", or "sync documentation".
 ---
 
 # Sync session knowledge into docs & memory
@@ -25,8 +25,10 @@ If the session produced nothing in these categories, say so and stop.
 
 | Fact type | Home | Notes |
 |---|---|---|
-| A1 status, run results, decisions, root-cause analyses | `doc/A1_HIRO_implementation_plan.md` **§0** | §0 is authoritative over older sections; update the status header too. Other architectures (A2+): their own design doc under `doc/`. |
-| Stable project knowledge: file/class maps, obs layouts, cluster ops, deploy pipeline, experiment-design rules | `.claude/docs/*.md` | Extend the matching existing file (`codebase-map`, `cluster`, `deployment`, `experiment-design`); create a new file only for a genuinely new topic, then link it from CLAUDE.md. |
+| A<N> **design / as-built spec**, current status, open ablations | `doc/hrl/A<N>_HIRO.md` (A1: `doc/hrl/A1_HIRO.md`) | The "how it works now + where we are" doc. Update its status header. Also update the status-dashboard row in `doc/hrl/HRL_plan.md`. New architectures get their own `doc/hrl/A<N>_*.md`. |
+| A<N> **run results, failed fixes, root-cause analyses, lessons** (chronological) | `doc/hrl/A<N>_findings.md` (A1: `doc/hrl/A1_findings.md`) | The findings ledger: what was tried → outcome → why → lesson; keep result tables verbatim. Carry run name/log dir/W&B id/key metrics. Don't duplicate the design spec — link to it. |
+| **Cross-architecture HRL machinery** (co-train loop, goal space, warm-start, reward decomp, benchmark/probe tools, checkpoint/ONNX, shared gotchas) | `.claude/docs/hrl-infra.md` | Reused by all A1–A4. Put a mechanism here (not in a per-arch doc) the moment a 2nd architecture would touch it. |
+| Stable project knowledge: file/class maps, obs layouts, cluster ops, deploy pipeline, experiment-design rules (A0–A4 matrix, RQ2 rule) | `.claude/docs/*.md` | Extend the matching existing file (`codebase-map`, `cluster`, `deployment`, `experiment-design`, `hrl-infra`); create a new file only for a genuinely new topic, then link it from CLAUDE.md / `doc/hrl/HRL_plan.md`. |
 | Conventions needed at every launch or code edit (e.g. launch flags, max-iterations N+1, coding style) | `CLAUDE.md` | One line + link at most. If it needs a paragraph, it belongs in `.claude/docs/` with a CLAUDE.md link. |
 | User preferences, feedback on how to work, session-scoped context, anything personal | auto-memory ONLY | Never into the repo. Follow the memory system's own conventions for file format and the MEMORY.md index. |
 
@@ -38,8 +40,28 @@ repo doc is canonical for project facts; the memory may *point* to it.
 - Match each file's existing structure and terseness; update stale statements you
   touch (status headers, ✅/⬜ markers, "next steps").
 - Convert relative dates ("yesterday") to absolute dates.
-- Plan-doc results entries should carry enough identity to find the run again:
+- Findings-ledger entries should carry enough identity to find the run again:
   run name, log dir, W&B run id, key metrics.
+
+### Conciseness budget (prevent doc bloat)
+
+Each sync should leave the doc **roughly flat in length** — a milestone *retires* stale
+text, it doesn't only append. Concretely:
+
+- **Edit-in-place over append.** First look for the existing line/row/status this fact
+  updates and *replace* it. Only add a new line when nothing it supersedes exists.
+- **Budget per fact: ~1 table row + ≤2 lines.** A new run result = one row in the
+  results table (+ at most one sentence of interpretation). If you're writing a
+  paragraph, you're duplicating a table or the linked doc — cut it.
+- **Retire what the new fact obsoletes:** flip "running/TODO" → done, delete the old
+  verdict the new result overturns, drop superseded hypotheses (don't keep both).
+  Net new lines per sync should be small.
+- **Numbers live in exactly one place.** Put the result table in its canonical doc;
+  every other mention *links* to it rather than restating the figures.
+- **Prefer tables/terse clauses over prose.** No restating context the reader can see
+  one line up. Cut hedging and adjectives.
+- If a section has grown sprawling, compact it *now* (merge rows, summarize a resolved
+  thread to one line) rather than leaving it for a future cleanup pass.
 
 ## 4. Redaction gate (MANDATORY before finishing)
 

@@ -10,6 +10,9 @@ FSM:
     Velocity:
       id: 3
       type: RLBase
+    VelocityHRL:    # A1 (HIRO) two-level policy; loads high_level.onnx + low_level.onnx
+      id: 4
+      type: RLHRL
   Passive:
     transitions:
       FixStand: LT + up.on_pressed
@@ -33,9 +36,11 @@ FSM:
     transitions:
       Passive: LT + B.on_pressed
       Velocity: RT + A.on_pressed
+      VelocityHRL: RT + X.on_pressed
     keyboard_transitions:
       Passive: "p"      # p = passive (back to limp)
-      Velocity: "o"     # o = walk (Velocity/policy)
+      Velocity: "o"     # o = walk (A0 policy)
+      VelocityHRL: "h"  # h = walk (A1 HIRO hierarchy)
     kp: [
       250, 250, 250, 400, 80, 40,
       250, 250, 250, 400, 80, 40,
@@ -66,3 +71,9 @@ FSM:
     keyboard_transitions:
       Passive: "p"      # p = passive (stop policy)
     policy_dir: config/policy/velocity
+  VelocityHRL:
+    transitions:
+      Passive: LT + B.on_pressed
+    keyboard_transitions:
+      Passive: "p"      # p = passive (stop policy)
+    policy_dir: config/policy/velocity_hrl

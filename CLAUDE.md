@@ -23,6 +23,10 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --eval-seeds 2` — prints a
   multi-metric scorecard (err_vx/vy/yaw, fall_rate, action_rate, orient/height dev) +
   `[BENCH] {json}`. The canonical comparator (use `fall_rate`, not `ep_len`, for survival).
+- A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
+  --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2` — per-window HL goal error
+  vs LL reach error + `|g|` saturation + fwd/bwd vx split + `[GOALDIAG] {json}`. Verdict
+  (2026-06-16): LL competent, wall = learned HL saturated goals (`doc/hrl/A1_goal_achievability_probe.md`).
 
 ## Task IDs
 
@@ -37,7 +41,7 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 - **`/wandb-rl-interpreter`** — interpret/diagnose RL training results from W&B (reward
   curves, episode length, losses, locomotion metrics, training health).
 - **`/sync-docs`** — route session results/decisions/conventions into their canonical
-  docs (plan doc §0, `.claude/docs/`, CLAUDE.md) + auto-memory, with a
+  docs (the `doc/` HRL plan + `.claude/docs/`, CLAUDE.md) + auto-memory, with a
   personal-identifier redaction gate (public repo).
 
 ## Code conventions
@@ -84,8 +88,13 @@ analysis and the proposed change first.
 
 ## Where the deep context lives
 
-- **A1 architecture + current status + next steps → `doc/A1_HIRO_implementation_plan.md` §0**
-  (read §0 first; it's authoritative over the older sections).
+- **HRL master index + A0–A4 status dashboard → `doc/hrl/HRL_plan.md`** (start here).
+- **Shared HRL machinery** (co-train loop, goal space, warm-start, reward decomp,
+  benchmark/probe tools, checkpoint/ONNX, gotchas) → `.claude/docs/hrl-infra.md`
+  (A2/A3 reuse this — read before starting a new architecture).
+- **A1 design (as-built) + current status + open ablations → `doc/hrl/A1_HIRO.md`**;
+  A1 findings ledger (what was tried/ruled out, M1→M5 + probes) → `doc/hrl/A1_findings.md`;
+  goal-achievability probe → `doc/hrl/A1_goal_achievability_probe.md`.
 - Codebase layout, obs dims, A1 class map → `.claude/docs/codebase-map.md`
 - Architecture matrix A0–A4, RQ2 comparison-cleanliness rule, reproducibility →
   `.claude/docs/experiment-design.md`

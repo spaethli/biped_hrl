@@ -44,7 +44,7 @@ class HlPpoCfg:
         # Cap the std so the HL goal can't blow up: at entropy_coef 0.02 the entropy
         # bonus swamped the weak HL task gradient and std ran away (goal_abs ~8.7 ->
         # impossible targets -> robot died). Capping at 1.0 makes blowup impossible.
-        #"std_range": (1e-3, 1.0),
+        "std_range": (1e-3, 1.0),
       },
     )
   )
@@ -58,8 +58,9 @@ class HlPpoCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.01,  # 0.005 collapsed HL to deterministic ("don't track"); 0.02
+      entropy_coef=0.007,  # 0.005 collapsed HL to deterministic ("don't track"); 0.02
                           # blew std up (goals exploded, robot died). 0.01 + std cap.
+                          # with 0.01 + no std_cap still blow up
       num_learning_epochs=5,
       num_mini_batches=4,
       learning_rate=1.0e-3,
@@ -169,6 +170,24 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """High-level TD3 config (used when hl_algorithm == 'td3')."""
   relabeling: Literal["none", "hiro"] = "none"
   """HIRO off-policy correction (td3 only; ignored otherwise)."""
+  hl_reward_mode: Literal["task", "tracking"] = "task"
+  """What the learned HL accumulates as its per-window reward (ppo/td3 only). ``task``
+  (default): the full env task reward summed over the window — but it is PENALTY-DOMINATED
+  (joint/action penalties swamp the exp tracking term), so the probe (2026-06-16) showed the
+  HL collapses to g≈0 ("ask for ~neutral velocity") and won't command forward. ``tracking``:
+  velocity command-tracking only (``track_linear_velocity + track_angular_velocity``, the
+  proven A0 exp terms) — the outcome the HL controls, with the LL-execution penalties removed
+  (they are the LL's concern). The env reward is UNCHANGED (no RQ2 confound); only what the HL
+  optimizes internally changes. Safe with ``hl_target_mode=absolute`` (V* is bounded to the
+  command range, so a pure-positive tracking reward can't push unsafe targets)."""
+  hl_target_mode: Literal["delta", "absolute"] = "delta"
+  """How the learned HL maps its bounded goal g to the window target V* (ppo/td3 only;
+  oracle ignores it — it always sets V*=command absolutely). ``delta`` (HIRO default):
+  ``V*=state+scale*g`` — a STATE-DEPENDENT target the probe (2026-06-16) showed the HL
+  fails to learn (it saturates |g|->1). ``absolute``: ``V*=center+scale*g`` with
+  ``center``=command-range midpoint (velocity) / nominal (orient,height) — a STATIC
+  command->g map (g spans the command range), the oracle's structure that the LL already
+  tracks to 0.05 m/s. The LL is unchanged either way (still observes V*-s_i)."""
   gamma_hi: float | None = None
   """High-level discount. None -> derived horizon-matched as ``0.99 ** c`` in
   ``__post_init__`` (so changing ``c`` rescales it automatically; the old hardcoded

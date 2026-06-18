@@ -1,5 +1,13 @@
 # Plan: A1 goal-achievability probe — decompose the tracking error (HL vs LL)
 
+> **DONE 2026-06-16 — verdict summarized in `doc/hrl/A1_findings.md` "Goal-achievability probe"
+> (the SOLVED fix it led to is in `doc/hrl/A1_HIRO.md`).** Implemented as
+> `scripts/play.py --diagnose-goals N`. Result: the warm-started LL
+> is a competent velocity tracker (0.05 m/s, no directional bias under the ORACLE HL); the
+> wall + the forward-avoidance are the LEARNED HL collapsing to saturated goals (|g|→1) that
+> the co-trained LL never learns to follow. Goal-scale/command-asymmetry RULED OUT (symmetric-x
+> run unchanged). The plan text below is the original (pre-run) design, kept for reference.
+>
 > Standalone plan to start in a NEW chat. Status as of 2026-06-16: the translational
 > (vx/vy) tracking wall has survived every HL-side lever (warm-start, LR split, freeze-LL,
 > velocity-obs F4, 5× reward, HIRO relabel) AND the c-sweep {4,8,12} — so neither HL data

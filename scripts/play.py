@@ -35,6 +35,13 @@ class PlayConfig:
   eval_seeds: int = 1
   """Number of independent rollouts (each with a distinct seed) to average over. Reports
   mean ± std per metric across the K rollouts."""
+  diagnose_goals: int = 0
+  """A1-only goal-achievability probe: if > 0, run this many deterministic steps and
+  decompose the velocity tracking error per HL window into the HL goal error
+  |command - V*| (is the HL asking for the commanded velocity?) and the LL reach error
+  |V* - achieved| (does the LL deliver the target the HL set?). Also reports raw goal
+  |g| / saturation and a forward-vs-backward vx split (the observed directional bias).
+  Sibling to ``eval_steps``; reuses ``eval_seeds``. Requires a hierarchical runner."""
   video: bool = False
   video_length: int = 200
   video_height: int | None = None
@@ -148,7 +155,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     if params_yaml.exists():
       saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
       structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
-                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi")
+                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode")
       restored = {k: saved[k] for k in structure_keys
                   if k in saved and hasattr(agent_cfg, k)}
       for k, v in restored.items():
@@ -219,17 +226,28 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
 
-    # Export mode: write policy.onnx next to the checkpoint and exit.
+    # Export mode: write the ONNX policy/policies next to the checkpoint and exit.
     if cfg.export_onnx:
       assert log_dir is not None
-      runner.export_policy_to_onnx(str(log_dir), filename="policy.onnx")
-      onnx_path = log_dir / "policy.onnx"
-      print(f"[INFO] Exported: {onnx_path}")
-      deploy = (
-        "~/ramlab_ws/src/unitree_rl_mjlab/deploy/robots/h1_2/"
-        "config/policy/velocity/v0/exported/policy.onnx"
-      )
-      print(f"[INFO] Copy to deploy:\n  cp {onnx_path} {deploy}")
+      if hasattr(runner, "export_hierarchy_to_onnx"):
+        # A1 hierarchy: two nets (HL fires every c steps -> goal -> LL).
+        runner.export_hierarchy_to_onnx(str(log_dir) + os.sep)
+        print(f"[INFO] Exported: {log_dir}/low_level.onnx (+ high_level.onnx unless oracle)")
+        deploy = (
+          "~/ramlab_ws/src/unitree_rl_mjlab/deploy/robots/h1_2/"
+          "config/policy/velocity_hrl/v0/exported/"
+        )
+        print(f"[INFO] Copy to deploy:\n"
+              f"  cp {log_dir}/low_level.onnx {log_dir}/high_level.onnx {deploy}")
+      else:
+        runner.export_policy_to_onnx(str(log_dir), filename="policy.onnx")
+        onnx_path = log_dir / "policy.onnx"
+        print(f"[INFO] Exported: {onnx_path}")
+        deploy = (
+          "~/ramlab_ws/src/unitree_rl_mjlab/deploy/robots/h1_2/"
+          "config/policy/velocity/v0/exported/policy.onnx"
+        )
+        print(f"[INFO] Copy to deploy:\n  cp {onnx_path} {deploy}")
       env.close()
       return
 
@@ -340,6 +358,136 @@ def run_play(task_id: str, cfg: PlayConfig):
                  **{f"{k}_std": round(stds[k], 6) for k in keys},
                  "eval_steps": cfg.eval_steps, "num_envs": n_envs, "eval_seeds": cfg.eval_seeds}
     print(f"[BENCH] {json.dumps(bench_out)}")
+    env.close()
+    return
+
+  # A1 goal-achievability probe: decompose tracking error into HL goal error vs LL
+  # reach error, per HL window. Mirrors HierarchicalRunner.get_inference_policy goal
+  # wiring (fire hl.act_inference every c steps; LL sees the remaining delta) but
+  # captures s_fire / V* / command at each fire and `achieved` at window end.
+  if cfg.diagnose_goals > 0:
+    import json
+    if not hasattr(runner, "hl"):
+      raise ValueError("--diagnose-goals requires a hierarchical (A1) runner.")
+    uenv = env.unwrapped
+    gs = runner.goal_space
+    c = runner.c
+    ll_policy = runner.alg.get_policy().to(device)
+    runner.alg.eval_mode(); runner.hl.eval_mode()
+    # Goal-space layout: find the velocity (is_task) slice for the command comparison.
+    offs, vel_slice = {}, None
+    i = 0
+    for comp in gs.components:
+      offs[comp.name] = (i, i + comp.dim)
+      if comp.is_task and vel_slice is None:
+        vel_slice = (i, i + comp.dim)
+      i += comp.dim
+    assert vel_slice is not None and (vel_slice[1] - vel_slice[0]) == 3, \
+      "probe assumes a 3-dim velocity is_task component (vx, vy, yaw)"
+    D = gs.dim
+    n_envs = uenv.num_envs
+    n_windows = cfg.diagnose_goals // c
+
+    # Per-(window,env) buffers accumulated across seeds; masked by within-window done.
+    cmd_a, vstar_a, gabs_a, sfire_a, ach_a, keep_a = [], [], [], [], [], []
+    for seed_idx in range(cfg.eval_seeds):
+      torch.manual_seed(42 + seed_idx)
+      with torch.inference_mode():
+        obs, _ = env.reset()
+      with torch.inference_mode():
+        for _ in range(n_windows):
+          s_fire = gs.extract(uenv)                          # [B, D]
+          v_star = runner.hl.act_inference(uenv, obs, s_fire)  # [B, D]
+          scale = gs.scale(uenv)                             # [D]
+          g_raw = ((v_star - s_fire) / scale).abs()         # [B, D] recovered |g|
+          cmd = uenv.command_manager.get_command("twist")[:, :3].clone()  # [B, 3]
+          done_in_window = torch.zeros(n_envs, dtype=torch.bool, device=env.device)
+          for k in range(c):
+            cur = gs.extract(uenv)
+            delta = v_star - cur
+            uenv.hrl_goal = delta
+            obs["goal"] = delta
+            obs, _, dones, _ = env.step(ll_policy(obs).to(env.device))
+            done_in_window |= dones.bool()
+          achieved = gs.extract(uenv)                        # [B, D] window end
+          cmd_a.append(cmd.cpu()); vstar_a.append(v_star.cpu()); gabs_a.append(g_raw.cpu())
+          sfire_a.append(s_fire.cpu()); ach_a.append(achieved.cpu())
+          keep_a.append((~done_in_window).cpu())             # drop reset-contaminated windows
+
+    cmd_t = torch.cat(cmd_a)            # [W, 3]  (W = windows*envs*seeds, flattened)
+    vstar_t = torch.cat(vstar_a)        # [W, D]
+    gabs_t = torch.cat(gabs_a)          # [W, D]
+    sfire_t = torch.cat(sfire_a)        # [W, D]
+    ach_t = torch.cat(ach_a)            # [W, D]
+    keep = torch.cat(keep_a)            # [W] bool
+    cmd_t, vstar_t, gabs_t, sfire_t, ach_t = (
+      x[keep] for x in (cmd_t, vstar_t, gabs_t, sfire_t, ach_t)
+    )
+    vs, ve = vel_slice
+    vstar_vel, sfire_vel, ach_vel = vstar_t[:, vs:ve], sfire_t[:, vs:ve], ach_t[:, vs:ve]
+    gabs_vel = gabs_t[:, vs:ve]
+
+    # Per-velocity-axis decomposition (signed sums close exactly: HL + LL = end).
+    hl_err = (cmd_t - vstar_vel)                 # HL goal error  [W, 3]
+    ll_err = (vstar_vel - ach_vel)               # LL reach error [W, 3]
+    end_err = (cmd_t - ach_vel)                  # end error      [W, 3]
+    axes = ("vx", "vy", "yaw")
+
+    def _col(t, j): return t[:, j]
+    # Forward (cmd_vx > 0.05) vs backward (cmd_vx < -0.05) split on vx only.
+    fwd = cmd_t[:, 0] > 0.05
+    bwd = cmd_t[:, 0] < -0.05
+
+    print()
+    print("=" * 70)
+    print(f"  GOAL-ACHIEVABILITY PROBE | {cfg.diagnose_goals} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | c={c} | windows kept={int(keep.sum())}/{keep.numel()}")
+    print("=" * 70)
+    print(f"  {'axis':<5} {'|HL goal err|':>13} {'|LL reach err|':>14} "
+          f"{'|end err|':>10} {'|g|':>7} {'sat>0.95':>9}")
+    for j, ax in enumerate(axes):
+      print(f"  {ax:<5} {_col(hl_err, j).abs().mean():>13.4f} "
+            f"{_col(ll_err, j).abs().mean():>14.4f} {_col(end_err, j).abs().mean():>10.4f} "
+            f"{_col(gabs_vel, j).mean():>7.3f} {(_col(gabs_vel, j) > 0.95).float().mean():>9.3f}")
+    print("  " + "-" * 66)
+    print(f"  signed-closure check (mean): HL + LL == end  (should hold per axis)")
+    for j, ax in enumerate(axes):
+      print(f"    {ax:<4} HL {_col(hl_err, j).mean():+.4f}  + LL {_col(ll_err, j).mean():+.4f}"
+            f"  = {_col(hl_err, j).mean() + _col(ll_err, j).mean():+.4f}  (end {_col(end_err, j).mean():+.4f})")
+    print("  " + "-" * 66)
+    print("  vx forward vs backward (the directional-bias check):")
+    for label, m in (("forward", fwd), ("backward", bwd)):
+      if m.any():
+        print(f"    {label:<8} n={int(m.sum()):>6}  |HL|={hl_err[m, 0].abs().mean():.4f}  "
+              f"|LL|={ll_err[m, 0].abs().mean():.4f}  |end|={end_err[m, 0].abs().mean():.4f}  "
+              f"|g_vx|={gabs_vel[m, 0].mean():.3f}  sat={ (gabs_vel[m, 0] > 0.95).float().mean():.3f}")
+    # Realized vs requested delta per velocity axis (under-reach if ratio << 1).
+    req = (vstar_vel - sfire_vel).mean(0)        # mean requested delta [3]
+    real = (ach_vel - sfire_vel).mean(0)         # mean realized delta  [3]
+    print("  " + "-" * 66)
+    print("  realized/requested delta (LL follow-through; <<1 = under-reach):")
+    for j, ax in enumerate(axes):
+      r = (real[j] / req[j]).item() if abs(req[j]) > 1e-3 else float("nan")
+      print(f"    {ax:<4} requested {req[j]:+.4f}  realized {real[j]:+.4f}  ratio {r:+.3f}")
+    print("=" * 70)
+    print()
+
+    diag_out = {"label": str(resume_path) if resume_path is not None else "unknown",
+                "c": c, "kept_windows": int(keep.sum()), "total_windows": int(keep.numel())}
+    for j, ax in enumerate(axes):
+      diag_out[f"hl_err_{ax}"] = round(hl_err[:, j].abs().mean().item(), 6)
+      diag_out[f"ll_err_{ax}"] = round(ll_err[:, j].abs().mean().item(), 6)
+      diag_out[f"end_err_{ax}"] = round(end_err[:, j].abs().mean().item(), 6)
+      diag_out[f"gabs_{ax}"] = round(gabs_vel[:, j].mean().item(), 6)
+    if fwd.any():
+      diag_out["fwd_hl_vx"] = round(hl_err[fwd, 0].abs().mean().item(), 6)
+      diag_out["fwd_ll_vx"] = round(ll_err[fwd, 0].abs().mean().item(), 6)
+      diag_out["fwd_gabs_vx"] = round(gabs_vel[fwd, 0].mean().item(), 6)
+    if bwd.any():
+      diag_out["bwd_hl_vx"] = round(hl_err[bwd, 0].abs().mean().item(), 6)
+      diag_out["bwd_ll_vx"] = round(ll_err[bwd, 0].abs().mean().item(), 6)
+      diag_out["bwd_gabs_vx"] = round(gabs_vel[bwd, 0].mean().item(), 6)
+    print(f"[GOALDIAG] {json.dumps(diag_out)}")
     env.close()
     return
 
