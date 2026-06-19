@@ -31,6 +31,7 @@ from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
 from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
+from .state_noise import GoalStateNoise
 from .td3 import HighLevelTd3
 from ...mdp import rewards as mdp_rewards
 
@@ -66,6 +67,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       tuple(train_cfg["goal_components"]), train_cfg.get("goal_weights")
     )
     self.goal_dim: int = self.goal_space.dim
+
+    # Estimator-noise on the LL goal channel (#8b sim2real DR; off by default ->
+    # transparent passthrough). Persists across rollouts so per-episode bias survives.
+    self.state_noise = GoalStateNoise(
+      train_cfg.get("goal_state_noise"), self.goal_space, env.num_envs, device
+    )
 
     # Initialise the goal buffer BEFORE the base builds models, so the env's `goal`
     # observation group resolves to the right dimension at construction time.
@@ -297,20 +304,26 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
     start_it = self.current_learning_iteration
     total_it = start_it + num_learning_iterations
+    prev_dones = None  # for the estimator-noise model's per-episode reset (#8b)
     for it in range(start_it, total_it):
       start = time.time()
       intrinsic_sum = 0.0
       with torch.inference_mode():
         uenv = self.env.unwrapped
         for k in range(self.cfg["num_steps_per_env"]):
-          state = self.goal_space.extract(uenv)
+          state = self.goal_space.extract(uenv)  # ground-truth (reward + HL stay clean)
+          # Deploy-realistic estimator reading for the LL goal channel only (#8b). When
+          # noise is off this equals `state` (noise_off == 0), so the path is unchanged.
+          state_n = self.state_noise(state, prev_dones)
+          noise_off = state_n - state
           # High level fires at the start of each window -> new absolute target V*.
+          # Built from the clean state so the absolute-mode reward target stays privileged.
           if k % self.c == 0:
             self._target = self.hl.act(uenv, obs, state)
             self.hl.begin_window(uenv, obs, state)
 
-          # Low level observes the remaining delta V* - s_i.
-          delta = self._target - state
+          # Low level observes the remaining delta V* - s_i on the noisy estimate.
+          delta = self._target - state_n
           uenv.hrl_goal = delta
           obs["goal"] = delta
 
@@ -334,8 +347,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           if self.ll_task_reward_coef != 0.0:
             r_lo = r_lo + self.ll_task_reward_coef * task_rew
           # Refresh the goal in the post-step obs (remaining delta at the new state)
-          # so the normalizer/next-act input is consistent.
-          post_delta = self._target - achieved
+          # so the normalizer/next-act input is consistent. Carry the same per-step
+          # estimator offset so the stored next-obs goal matches what the LL conditions on.
+          post_delta = self._target - (achieved + noise_off)
           uenv.hrl_goal = post_delta
           obs["goal"] = post_delta
 
@@ -355,6 +369,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # LL's actual training signal, logged separately via the loss dict.
           intrinsic_sum += r_lo.mean().item()
           self.logger.process_env_step(task_rew, dones, extras)
+          prev_dones = dones  # envs that reset -> resample estimator bias next step
 
         collect_time = time.time() - start
         start = time.time()

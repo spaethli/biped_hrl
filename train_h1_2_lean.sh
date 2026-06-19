@@ -72,7 +72,7 @@ export LD_LIBRARY_PATH=$SITE_PKGS/nvidia/cuda_nvrtc/lib:$SITE_PKGS/nvidia/cuda_r
 ulimit -l unlimited
 
 # Redirect warp cache and compiler temp to $WORK (compute node /tmp is too small)
-export WARP_CACHE_PATH=$WORK/.warp_cache
+export WARP_CACHE_PATH=$WORK/.warp_cache/$SLURM_JOB_ID
 export TMPDIR=$WORK/tmp
 mkdir -p $WORK/.warp_cache $WORK/tmp
 

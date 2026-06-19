@@ -59,6 +59,18 @@ is the single source of truth**; the env derives its `goal` obs dim from it via 
   obs surgery (`actor` → `policy`/`command`/`goal`, drop `command`) is done by
   `_restructure_obs_groups` in the A1 `env_cfgs.py`.
 
+### Goal-channel estimator noise (`GoalStateNoise`, `rl/hrl/state_noise.py` — #8b sim2real DR)
+Optional DR that trains the LL on a deploy-realistic base-velocity estimate (the real robot
+reads `vx,vy` from `rt/sportmodestate`, not ground-truth). Corrupts only the estimator-supplied
+goal columns: `velocity`→`vx,vy` (yaw-rate stays clean — gyro), `height` optional. Components:
+**bias** (per-episode constant), **drift** (OU random walk), **lag** (1st-order low-pass).
+**Privileged/asymmetric:** the runner extracts a **clean** `state` (reward + HL target unchanged)
+and a **noisy** `state_n` used *only* for the LL's observed delta `V*−s_n`; the same per-step
+offset is carried to the post-step goal refresh so the filter steps once per env-step. **Off by
+default** → `state_n==state`, path byte-identical (RQ2-safe). Config `GoalStateNoiseCfg`
+(`config/h1_2_a1/rl_cfg.py`), flags `--agent.goal-state-noise.*`. **Meaningful in `absolute` only**
+— a constant bias cancels in the `delta` difference map. Launcher: `train_h1_2_noise.sh`.
+
 ### Obs groups / dims (A1; 92 = ang_vel 3 + proj_grav 3 + command 3 + phase 2 + joint_pos 27 + joint_vel 27 + last_action 27)
 | Network | Obs | Dim |
 |---|---|---|

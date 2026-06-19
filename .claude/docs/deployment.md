@@ -65,9 +65,11 @@ Gaussian noise into `s` in sim, to emulate that estimator noise (default 0). Fin
 learned `absolute` TD3): under realistic velocity/height noise the clean-trained LL still stands
 but is **much twitchier, worst when standing still** (cmd=0 → goal = −noise → phantom corrections;
 HL input isn't noised, so this is the LL reacting to noisy goal feedback) → see
-`doc/hrl/A1_findings.md` (sim2real fix = train with state-noise DR). To remove the dependency
-entirely: switch the LL to observe the **absolute `V*`** instead of the delta (`doc/hrl/A1_HIRO.md`
-reserve variant) → no runtime velocity estimate needed.
+`doc/hrl/A1_findings.md`. The **training-side** counterpart of this deploy knob is now built —
+`GoalStateNoise` injects bias/drift/lag into the LL goal channel during training (#8b, see
+`.claude/docs/hrl-infra.md`), so the policy learns robustness rather than only being tested for it.
+To remove the dependency entirely instead: switch the LL to observe the **absolute `V*`** instead
+of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity estimate needed.
 
 ## Visualize a checkpoint
 

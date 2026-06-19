@@ -172,18 +172,24 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   Likely realizable with existing sim sensors + `play.py` logging; no new architecture.
 - **Feeds:** the #6 decision (velocity vs acceleration basis) and the deployment milestone.
 
-### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR)
-- **Idea.** Feed the policy/goal the **noisy/estimated** base velocity (DR-injected estimator
-  noise + bias + latency) instead of privileged sim ground-truth, so it learns to be robust to
-  the real robot's velocity-estimate error rather than overfitting a clean signal.
-- **Why now.** Directly motivated by the sim-deploy finding (`HRL_plan.md` dashboard / A1 sim
-  deploy memory): **the LL goes twitchy under injected estimator noise** → state-noise DR is the
-  named sim2real next step. This is that DR.
-- **Scope / care.** The *reward* may keep ground-truth velocity (privileged is fine for the
-  critic/reward); it's the **observation/goal channel** that should see noise. Pairs naturally
-  with Track F runs — add an `obs-noise` variant to any lean run to test robustness vs accuracy.
-- **Touch points.** The velocity-bearing obs terms in `velocity_env_cfg.py` (`enable_corruption`
-  / a noise model on the base-velocity / goal obs); the A1 goal-obs write in `hrl_runner`.
+### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR) — **IMPLEMENTED (2026-06-18)**
+- **Idea.** Feed the LL goal a **deploy-realistic base-velocity estimate** (DR: bias + drift +
+  lag) instead of privileged sim ground-truth, so it is robust to the real onboard estimator
+  (`rt/sportmodestate`) rather than overfitting a clean signal. Motivated by the sim-deploy
+  finding (LL twitchy under injected estimator noise — `HRL_plan.md` dashboard).
+- **As-built.** `GoalStateNoise` (`rl/hrl/state_noise.py`) corrupts only the estimator-supplied
+  goal columns — base lin-vel `vx,vy` (yaw-rate is a clean gyro read; height optional, clean by
+  default). **Asymmetric/privileged:** reward + HL stay on ground-truth; only the LL's observed
+  goal `V*−s` sees noise (one filter step/env-step; same per-step offset carried to the post-step
+  refresh). Off by default → byte-identical to the clean pipeline (RQ2-safe). Config =
+  `GoalStateNoiseCfg` in `config/h1_2_a1/rl_cfg.py` (`--agent.goal-state-noise.*`); mechanism in
+  `.claude/docs/hrl-infra.md`.
+- **Absolute-only (decided).** A *constant* bias cancels in the `delta` map (the goal is a
+  *difference* of two equally-biased reads), so bias-DR is a silent no-op there; meaningful only in
+  `absolute`/`oracle`. Delta variant **dropped** to cut complexity.
+- **Run matrix** (launcher `train_h1_2_noise.sh`, both absolute TD3+HIRO+tracking, warm-start
+  polished-A0, 4096 envs / 10001 it): `abs_bias` (bias ±0.10 m/s only) and `abs_full`
+  (bias + OU drift 0.01/0.99 + lag 3 steps). Verdict pending → results to `A1_findings.md`.
 
 ---
 

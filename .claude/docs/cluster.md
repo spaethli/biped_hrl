@@ -26,9 +26,22 @@ Uses `WANDB_MODE=offline` + `wandb sync --sync-all` after training.
 
 Error was: `Warp NVRTC compilation error 6: NVRTC_ERROR_COMPILATION — Catastrophic
 error: unable to obtain mapped memory`.
-Fix: `WARP_CACHE_PATH=$WORK/.warp_cache` + `TMPDIR=$WORK/tmp` (the default TMPDIR /
-warp cache hit size limits on compute nodes). Training works on both the A100
+Fix: `WARP_CACHE_PATH=$WORK/.warp_cache/$SLURM_JOB_ID` + `TMPDIR=$WORK/tmp` (the default
+TMPDIR / warp cache hit size limits on compute nodes). Training works on both the A100
 cluster and the lab RTX 5070.
+
+## Warp cache concurrent-compile race — RESOLVED (2026-06-19)
+
+Symptom: `Exception: Failed to load CUDA module '..._kernel...'` at the first sim step,
+then the job hangs until SLURM kills it at the time limit. Cost a full day — all 4 lean
+jobs (`train_h1_2_lean.sh`) co-scheduled on one node died identically; the noise runs,
+which ran later/alone, were fine.
+Cause: multiple jobs sharing **one** `WARP_CACHE_PATH=$WORK/.warp_cache` on NFS JIT-compile
+the same cold kernels **simultaneously** → cache files collide → module load fails. The
+NVRTC fix above set the cache *location*, not per-job isolation.
+Fix: **per-job cache dir** `WARP_CACHE_PATH=$WORK/.warp_cache/$SLURM_JOB_ID` so concurrent
+jobs never share cache files (applied in all `train_h1_2_*.sh`). For ad-hoc concurrent runs
+(e.g. a play/benchmark beside training) use a unique suffix, e.g. `.../bench_$$`.
 
 ## Pinned versions
 

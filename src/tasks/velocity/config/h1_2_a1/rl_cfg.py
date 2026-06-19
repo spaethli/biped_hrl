@@ -131,6 +131,30 @@ class HlTd3Cfg:
 
 
 @dataclass
+class GoalStateNoiseCfg:
+  """Estimator-noise model for the LL goal/observation channel (#8b — train on a
+  deploy-realistic base-velocity estimate, ``rt/sportmodestate``, instead of sim
+  ground-truth). Corrupts ONLY the goal-space columns the onboard estimator supplies
+  (base linear velocity ``vx, vy``, optionally ``height``); yaw-rate/orientation come
+  from the gyro/IMU and stay clean. The reward and HL always see ground-truth
+  (privileged) — only the LL's observed goal delta ``V*-s`` is noised. Off by default
+  (RQ2-safe). Meaningful in ``hl_target_mode=absolute`` only (a constant bias cancels in
+  the ``delta`` map; see doc/hrl/hierarchy_benefit_roadmap.md #8b)."""
+
+  enable: bool = False
+  components: tuple[str, ...] = ("velocity",)
+  """Goal components to corrupt. ``velocity`` noises ``vx, vy`` (not yaw-rate)."""
+  bias_range: float = 0.10
+  """Per-axis constant offset, resampled per episode ~ U(-bias_range, +bias_range) [m/s]."""
+  drift_std: float = 0.0
+  """Per-step OU innovation std [m/s]; 0 disables within-episode drift."""
+  drift_decay: float = 0.99
+  """OU mean-reversion factor (closer to 1 = slower-varying drift)."""
+  lag_steps: float = 0.0
+  """First-order low-pass time constant in control steps (sensor lag); 0 disables lag."""
+
+
+@dataclass
 class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """Hierarchical (A1) runner config. LL = inherited PPO; HL = fields below."""
 
@@ -168,6 +192,8 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """High-level PPO config (used when hl_algorithm == 'ppo')."""
   hl_td3: HlTd3Cfg = field(default_factory=HlTd3Cfg)
   """High-level TD3 config (used when hl_algorithm == 'td3')."""
+  goal_state_noise: GoalStateNoiseCfg = field(default_factory=GoalStateNoiseCfg)
+  """Estimator-noise on the LL goal channel (#8b sim2real DR). Off by default."""
   relabeling: Literal["none", "hiro"] = "none"
   """HIRO off-policy correction (td3 only; ignored otherwise)."""
   hl_reward_mode: Literal["task", "tracking"] = "task"
