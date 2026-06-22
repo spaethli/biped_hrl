@@ -12,7 +12,7 @@ comparison-cleanliness rule, and reproducibility rules live in
 | Arch | Task ID | Status | Headline |
 |---|---|---|---|
 | **A0** | `Unitree-H1_2-Flat` | ✅ done | Flat PPO baseline. Benchmark ref err_vx/vy/yaw 0.09/0.11/0.10. |
-| **A1** | `Unitree-H1_2-Flat-A1` | ✅ **tracking wall SOLVED** (2026-06-16) | HIRO: PPO LL + TD3 HL + relabel. `absolute` target + `tracking` HL reward → **A0-level** err 0.098/0.091/0.167, 0 falls. Sim deploy done (two-ONNX C++ `State_RLHRL`); state-noise DR **implemented** (#8b `GoalStateNoise`; abs_bias/abs_full via `train_h1_2_noise.sh`, verdict pending). Polish + ablations remain. |
+| **A1** | `Unitree-H1_2-Flat-A1` | ✅ **tracking wall SOLVED** (2026-06-16) | HIRO: PPO LL + TD3 HL + relabel. `absolute` target + `tracking` HL reward → **A0-level** err 0.098/0.091/0.167, 0 falls. Sim deploy done (two-ONNX C++ `State_RLHRL`); state-noise DR **validated** (#8b `GoalStateNoise`; abs_bias & abs_full both reliable, 2/2 clean, clean-baseline quality). Polish + ablations remain. |
 | **A2** | `Unitree-H1_2-Flat-A2` | ⬜ next | HIRO + A-RMA (privileged latent z + adaptation encoder). |
 | **A3** | `Unitree-H1_2-Flat-A3` | ⬜ planned | NaviGait: offline gait library + RL residual. |
 | **A4** | — | ⏸ likely skipped | Trajectory + MPC. Lowest priority. |

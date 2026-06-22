@@ -121,6 +121,25 @@ Sequence: `absolute` solved LL saturation but flipped the error onto the HL (HL 
 A0-level, 0 falls.** Ablation (2026-06-17): `tracking` is the primary lever (alone, delta:
 0.14); `absolute` only refines it.
 
+## Estimator-noise DR (#8b) — reliable, clean-baseline quality (2026-06-22)
+Train the LL goal channel on a deploy-realistic base-velocity estimate (corrupts ONLY the LL's
+observed `V*−s`; HL/reward/critic stay clean — and the HL never observes lin-vel anyway, so
+nothing on the HL side *can* be noised). Resolves the "train LL+HL with state-noise DR" todo from
+the deploy row above. All clean-eval ≈ ref5k (err_vx ~0.08, ep_len max, 0 falls, no goal saturation):
+
+| variant (seed) | err_vx | outcome |
+|---|---|---|
+| bias 0.10 (s42, orig) | 0.53 | COLLAPSE — **transient training corruption** (not seed, not config) |
+| bias 0.10 (s42, rerun) | 0.078 | success |
+| bias 0.10 (s123) | 0.083 | success |
+| full = bias + drift .01/.99 + lag 3 (s42) | 0.072 | success |
+| full (s123) | 0.083 | success |
+
+Verdict: bias-only and full DR both train **reliably** (2/2 clean each) to clean-baseline quality;
+the lone collapse (ep_len 8.9, HL goals 54% saturated — the old A1 wall) was a one-off glitch,
+confirmed benign by a successful same-seed-42 rerun (ep_len 724 by it2000). Do NOT report bias
+instability. Logs `logs/rsl_rl/h1_2_velocity_a1/2026-06-19_*noise_abs_*`.
+
 ## Play/replay fix (F0, 2026-06-11) — all pre-fix qualitative replays are void
 `play.py` used `get_inference_policy()` which returned the bare LL actor — nothing fired the
 HL or wrote `env.hrl_goal`, so **every pre-F0 A1 replay showed the LL with goal frozen at 0**

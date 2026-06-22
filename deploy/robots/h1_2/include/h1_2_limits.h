@@ -3,6 +3,26 @@
 
 struct H12JointLimit { float min; float max; };
 
+// Safety filter thresholds — single source of truth for run() and the logger meta.
+static constexpr float H1_2_TILT_LIMIT      = 0.44f; // rad, ~25 deg
+static constexpr float H1_2_FALL_ACC_THRESH = -7.0f; // m/s² world-frame vertical
+static constexpr int   H1_2_FALL_ACC_WINDOW = 60;    // ticks
+static constexpr int   H1_2_RAMP_CYCLES     = 50;    // ticks
+static constexpr float H1_2_CONTROL_DT      = 0.001f;// FSM run loop period (1000 Hz)
+
+// Joint names indexed by hardware joint ID (used by the safety flight recorder).
+static const std::array<const char*, 27> h1_2_joint_names = {{
+    "left_hip_yaw",   "left_hip_pitch",  "left_hip_roll",  "left_knee",
+    "left_ankle_pitch","left_ankle_roll",
+    "right_hip_yaw",  "right_hip_pitch", "right_hip_roll", "right_knee",
+    "right_ankle_pitch","right_ankle_roll",
+    "waist_yaw",
+    "left_shoulder_pitch","left_shoulder_roll","left_shoulder_yaw","left_elbow",
+    "left_wrist_roll","left_wrist_pitch","left_wrist_yaw",
+    "right_shoulder_pitch","right_shoulder_roll","right_shoulder_yaw","right_elbow",
+    "right_wrist_roll","right_wrist_pitch","right_wrist_yaw",
+}};
+
 // Position limits for all 27 H1-2 joints, indexed by hardware joint ID.
 // Matches the limits used in the invDyn safety filter.
 static const std::array<H12JointLimit, 27> h1_2_joint_limits = {{

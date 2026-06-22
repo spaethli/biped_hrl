@@ -71,6 +71,36 @@ HL input isn't noised, so this is the LL reacting to noisy goal feedback) → se
 To remove the dependency entirely instead: switch the LL to observe the **absolute `V*`** instead
 of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity estimate needed.
 
+## Safety filter + flight recorder (deploy-side, 2026-06-03)
+
+Real-time safety filter in `State_RLBase::run()` (A0) and `State_RLHRL::run()` (A1).
+Compile switch `#define SAFETY_FILTER` in each (`State_RLBase.cpp`=1 on; `State_RLHRL.h`=0
+off by default — flip to 1 to enable on A1). Robot-local only: `robots/h1_2/include/{h1_2_limits.h,
+safety_logger.h}`; the shared `deploy/include/FSM/State_RLBase.h` guards its logger include with
+`__has_include` so g1/go2/a2 still build. Thresholds centralized in `h1_2_limits.h` (`H1_2_*`).
+
+- **Triggers (OR → ramped hold):** joint pos limits (`h1_2_joint_limits`); IMU tilt
+  >`0.44` rad (~25°); downward-accel fall (`a_world_z < −7 m/s²` sustained 60 ticks).
+  Each engages a 50-tick (50 ms @ 1 kHz) ramp `α:0→1` blending the command
+  `q=(1−α)·policy + α·q_meas` (position hold; kp/kd unchanged). Complements — fires earlier/softer
+  than — the existing FSM `bad_orientation`→Passive check.
+- **IMU accel convention (verified in sim):** physical IMU = *specific force* → standing reads
+  +9.81, so `a_world_z=(R·a_imu).z−9.81` ≈0 standing/hanging, ≈−9.81 free-fall. Sim free-fall
+  measured ~−10.7 (leg flailing accelerates pelvis past g) → triggers correctly; no false positive
+  at rest. The `−9.81` is only correct if the real IMU reports specific force — re-verify on hardware.
+- **Flight recorder** (`safety_logger.h`, header-only): active only when `SAFETY_FILTER=1` **and**
+  `H1_2_SAFETY_LOG` set. Launch scripts (`h1_2_sim`/`h1_2_real`) auto-set it to
+  `logs/deploy_safety/<ts>` (timestamped, no manual preamble). Writes `<base>.csv` (per tick: raw
+  policy `action`=**pre-filter** intent, measured q/dq, IMU quat+accel, α, trigger flags) +
+  `<base>_meta.json` (limits/names/thresholds/dt). Hot-path safe: RAM buffer, flush on exit + ~2.5 s.
+  Limitation: one flat folder, not the per-arch run dir (A0/A1 chosen at runtime by key; deployed
+  ONNX carries no source-run record). For per-arch routing, add a config-driven `safety_log_dir` key.
+- **Offline analyzer:** `python scripts/safety_analyzer.py <base>` → `<base>_report.json` +
+  `[SAFETY] {json}` one-liner. Reports raw-vs-measured limit-violation rates, filter engagement
+  (per trigger), per-joint stats. **Raw violations = target-space aggressiveness** (policy commands
+  `processed_actions` past mechanical stops, esp. ankles), NOT unsafe excursions; measured excursions
+  are the physical truth. Example 64 s run: 55% raw vs 11% measured, measured max-over ≤0.04 rad.
+
 ## Visualize a checkpoint
 
 ```bash

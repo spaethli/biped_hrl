@@ -6,8 +6,7 @@
 #include <filesystem>
 #include <stdexcept>
 
-// [SAFETY FILTER] set to 0 to revert to unfiltered policy output (mirrors State_RLBase).
-#define SAFETY_FILTER 0
+// [SAFETY FILTER] master switch lives in FSM/State_RLHRL.h (gates filter + logger).
 #if SAFETY_FILTER
 #  include "h1_2_limits.h"
 #  include <cmath>
@@ -157,14 +156,11 @@ void State_RLHRL::run()
     auto action = env->action_manager->processed_actions();
 
 #if SAFETY_FILTER
-    static constexpr float kTiltLimit  = 0.44f; // ~25 deg
-    static constexpr int   kRampCycles = 50;    // 100 ms at 500 Hz
-
     // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
     const auto& q = env->robot->data.root_quat_w;
     float pitch = std::asin(std::clamp(2.0f*(q.w()*q.y() - q.z()*q.x()), -1.0f, 1.0f));
     float roll  = std::atan2(2.0f*(q.w()*q.x() + q.y()*q.z()), 1.0f - 2.0f*(q.x()*q.x() + q.y()*q.y()));
-    bool tilt_safety = (std::abs(pitch) > kTiltLimit || std::abs(roll) > kTiltLimit);
+    bool tilt_safety = (std::abs(pitch) > H1_2_TILT_LIMIT || std::abs(roll) > H1_2_TILT_LIMIT);
     if (tilt_safety)
         spdlog::warn("[Safety] Tilt: pitch={:.2f} roll={:.2f} rad", pitch, roll);
 
@@ -192,19 +188,17 @@ void State_RLHRL::run()
         );
     }
     float a_world_z = (env->robot->data.root_quat_w * lin_acc_b).z() - 9.81f;
-    static constexpr float kFallAccThresh  = -7.0f; // m/s² downward
-    static constexpr int   kFallAccWindow  = 60;    // 120 ms at 500 Hz
-    if (a_world_z < kFallAccThresh) fall_acc_counter_ = std::min(fall_acc_counter_ + 1, kFallAccWindow);
-    else                             fall_acc_counter_ = std::max(fall_acc_counter_ - 1, 0);
-    bool fall_detected = (fall_acc_counter_ >= kFallAccWindow);
+    if (a_world_z < H1_2_FALL_ACC_THRESH) fall_acc_counter_ = std::min(fall_acc_counter_ + 1, H1_2_FALL_ACC_WINDOW);
+    else                                  fall_acc_counter_ = std::max(fall_acc_counter_ - 1, 0);
+    bool fall_detected = (fall_acc_counter_ >= H1_2_FALL_ACC_WINDOW);
     if (fall_detected)
         spdlog::warn("[Safety] Fall: a_world_z={:.2f} m/s²", a_world_z);
 
-    // Ramp hold counter up/down over kRampCycles ticks to avoid torque spikes
+    // Ramp hold counter up/down over H1_2_RAMP_CYCLES ticks to avoid torque spikes
     bool hold_active = joint_hold || tilt_safety || fall_detected;
-    if (hold_active) hold_counter_ = std::min(hold_counter_ + 1, kRampCycles);
+    if (hold_active) hold_counter_ = std::min(hold_counter_ + 1, H1_2_RAMP_CYCLES);
     else             hold_counter_ = std::max(hold_counter_ - 1, 0);
-    float alpha = static_cast<float>(hold_counter_) / kRampCycles;
+    float alpha = static_cast<float>(hold_counter_) / H1_2_RAMP_CYCLES;
 
     for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
         int jid = (int)env->robot->data.joint_ids_map[i];
@@ -212,6 +206,15 @@ void State_RLHRL::run()
         // alpha=0: pure policy output  |  alpha=1: hold at current measured position
         float q_cmd = (1.0f - alpha) * action[i] + alpha * q_meas;
         lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
+    }
+
+    if (safety_logger_.enabled()) {
+        float quat[4] = { q.w(), q.x(), q.y(), q.z() };
+        float acc[3]  = { lin_acc_b.x(), lin_acc_b.y(), lin_acc_b.z() };
+        safety_logger_.record(action,
+                              env->robot->data.joint_pos.data(),
+                              env->robot->data.joint_vel.data(),
+                              quat, acc, alpha, joint_hold, tilt_safety, fall_detected);
     }
 #else
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {

@@ -212,6 +212,8 @@ _LEAN_ZERO_TERMS = (
   "angular_momentum",
   "body_ang_vel",
   "stand_still",
+  "action_rate_l2",
+  "joint_acc_l2",
 )
 
 

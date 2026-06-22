@@ -17,6 +17,15 @@
 #include <memory>
 #include <random>
 #include <thread>
+#include <cstdlib>
+
+// [SAFETY FILTER] master switch for the HRL state (mirrors State_RLBase). When 1,
+// the position-hold filter is active AND the flight recorder logs automatically if
+// H1_2_SAFETY_LOG is set (the launch script sets it). When 0, neither is compiled in.
+#define SAFETY_FILTER 0
+#if SAFETY_FILTER
+#  include "safety_logger.h"
+#endif
 
 class State_RLHRL : public FSMState
 {
@@ -42,6 +51,14 @@ public:
 
         env->robot->update();
         step_ = 0;
+
+#if SAFETY_FILTER
+        // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set (launch script).
+        if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
+            safety_logger_.init(sp, env->robot->data.joint_ids_map,
+                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT);
+#endif
+
         policy_thread_running = true;
         policy_thread = std::thread([this]{
             using clock = std::chrono::high_resolution_clock;
@@ -69,6 +86,9 @@ public:
         if (policy_thread.joinable()) {
             policy_thread.join();
         }
+#if SAFETY_FILTER
+        safety_logger_.flush(); // write any buffered rows to disk
+#endif
     }
 
 private:
@@ -102,6 +122,9 @@ private:
     // [SAFETY FILTER] — mirrors State_RLBase (duplicated, not shared, to leave A0 untouched)
     int hold_counter_{0};
     int fall_acc_counter_{0};
+#if SAFETY_FILTER
+    SafetyLogger safety_logger_;
+#endif
 };
 
 REGISTER_FSM(State_RLHRL)

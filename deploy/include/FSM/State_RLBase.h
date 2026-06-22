@@ -6,6 +6,14 @@
 #include "FSMState.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include "isaaclab/envs/mdp/terminations.h"
+#include <cstdlib>
+// [SAFETY FILTER] flight recorder is robot-local (h1_2 only). The guard keeps
+// other robots (g1, a2, go2…) — which share this header but lack the file on
+// their include path — building unchanged. Remove this block when reverting.
+#if __has_include("safety_logger.h")
+#  include "safety_logger.h"
+#  define STATE_RLBASE_HAS_SAFETY_LOGGER 1
+#endif
 
 class State_RLBase : public FSMState
 {
@@ -24,6 +32,14 @@ public:
         }
 
         env->robot->update();
+
+#ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
+        // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set.
+        if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
+            safety_logger_.init(sp, env->robot->data.joint_ids_map,
+                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT);
+#endif
+
         // Start policy thread
         policy_thread_running = true;
         policy_thread = std::thread([this]{
@@ -54,6 +70,9 @@ public:
         if (policy_thread.joinable()) {
             policy_thread.join();
         }
+#ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
+        safety_logger_.flush(); // write any buffered rows to disk
+#endif
     }
 
 private:
@@ -65,6 +84,9 @@ private:
     // [SAFETY FILTER] — remove these lines when reverting
     int hold_counter_{0};
     int fall_acc_counter_{0};
+#ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
+    SafetyLogger safety_logger_;
+#endif
 };
 
 REGISTER_FSM(State_RLBase)

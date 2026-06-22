@@ -58,7 +58,7 @@ class HlPpoCfg:
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
       clip_param=0.2,
-      entropy_coef=0.007,  # 0.005 collapsed HL to deterministic ("don't track"); 0.02
+      entropy_coef=0.01,  # 0.005 collapsed HL to deterministic ("don't track"); 0.02
                           # blew std up (goals exploded, robot died). 0.01 + std cap.
                           # with 0.01 + no std_cap still blow up
       num_learning_epochs=5,

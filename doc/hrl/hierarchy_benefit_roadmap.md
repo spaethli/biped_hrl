@@ -172,7 +172,7 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   Likely realizable with existing sim sensors + `play.py` logging; no new architecture.
 - **Feeds:** the #6 decision (velocity vs acceleration basis) and the deployment milestone.
 
-### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR) — **IMPLEMENTED (2026-06-18)**
+### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR) — **VALIDATED (2026-06-22)**
 - **Idea.** Feed the LL goal a **deploy-realistic base-velocity estimate** (DR: bias + drift +
   lag) instead of privileged sim ground-truth, so it is robust to the real onboard estimator
   (`rt/sportmodestate`) rather than overfitting a clean signal. Motivated by the sim-deploy
@@ -189,7 +189,9 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   `absolute`/`oracle`. Delta variant **dropped** to cut complexity.
 - **Run matrix** (launcher `train_h1_2_noise.sh`, both absolute TD3+HIRO+tracking, warm-start
   polished-A0, 4096 envs / 10001 it): `abs_bias` (bias ±0.10 m/s only) and `abs_full`
-  (bias + OU drift 0.01/0.99 + lag 3 steps). Verdict pending → results to `A1_findings.md`.
+  (bias + OU drift 0.01/0.99 + lag 3 steps). **Verdict: both reliable** (2/2 clean each) at
+  clean-baseline quality (err_vx ~0.08, 0 falls); one early `abs_bias` collapse was a transient
+  corruption, not the seed. Full table → `A1_findings.md` (Estimator-noise DR #8b).
 
 ---
 
@@ -246,11 +248,21 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
 
 ### Implemented (2026-06-18) — 4-variant run matrix + one-command launcher
 Tasks: **`Unitree-H1_2-Flat-Lean`** (lean A0), **`Unitree-H1_2-Flat-A1-Lean`** (lean A1).
-Lean reward = A0's 16 terms with **7 shaping terms zeroed** (`foot_gait`, `foot_clearance`,
-`foot_slip`, `soft_landing`, `angular_momentum`, `body_ang_vel`, `stand_still`); **kept** =
-tracking + `body_orientation_l2` + `pose`(variable_posture, the height anchor) + floor
-(`is_terminated`, `joint_pos_limits`, `action_rate_l2`, `joint_acc_l2`, `self_collisions`).
 Single source: `apply_lean_reward()` in `config/h1_2/env_cfgs.py`; shaped A0 verified untouched.
+
+**Two lean variants (terminology — keep distinct):**
+- **semi-lean** (runs 2026-06-19): A0's 16 terms with **7 shaping terms zeroed**
+  (`foot_gait`, `foot_clearance`, `foot_slip`, `soft_landing`, `angular_momentum`,
+  `body_ang_vel`, `stand_still`); the smoothness floor `action_rate_l2` / `joint_acc_l2`
+  was **kept active**. This is asymmetric for A0-vs-A1: lean-A0 pays the smoothness
+  penalty, but lean-A1's LL never sees it — the A1 LL trains only on the intrinsic
+  L2 goal-distance reward (`ll_task_reward_coef=0`), so all env reward terms are
+  diagnostic-only for A1 (see `a1_reward_routing` memory).
+- **true-lean** (runs 2026-06-22): `action_rate_l2` + `joint_acc_l2` **also zeroed**
+  (added to `_LEAN_ZERO_TERMS`), so neither A0 nor A1 has any smoothness guidance →
+  the A0-vs-A1 smoothness read is fair. **Kept** in both = tracking +
+  `body_orientation_l2` + `pose`(variable_posture, the height anchor) + safety floor
+  (`is_terminated`, `joint_pos_limits`, `self_collisions`).
 
 One launcher fans out 4 jobs (all **4096 envs, 10001 iters**), `a1_from_lean` gated on
 `a0_scratch` via SLURM `afterok`, the other 3 concurrent:
@@ -277,6 +289,47 @@ One launcher fans out 4 jobs (all **4096 envs, 10001 iters**), `a1_from_lean` ga
   --num-envs 64 --eval-steps 600 --eval-seeds 2`): the hierarchy "earns its keep" if a lean-A1
   variant holds (lower `fall_rate` / smoother `act_rate`) where its matched lean-A0 degrades.
 - **Optional.** Add the #8b estimator-noise DR to any variant to also probe robustness.
+
+### Results (benchmark: 64 envs × 600 steps × 2 seeds)
+
+All runs 10001 iters @ 4096 envs (`a0_polished` = +10k *additional* on the resumed
+polished-A0 counter, i.e. equal 10k lean budget — **not** 20k from scratch).
+
+**semi-lean** (2026-06-19; `action_rate_l2`/`joint_acc_l2` still active):
+
+| variant | err_vx | err_vy | err_yaw | fall_rate | act_rate | orient_dev | height_dev |
+|---|---|---|---|---|---|---|---|
+| `a0_scratch`   | 0.085 | 0.075 | 0.087 | 0.00 | 0.62 | 0.031 | 0.021 |
+| `a0_polished`  | 0.085 | 0.098 | 0.090 | 0.00 | 0.48 | 0.036 | 0.023 |
+| `a1_from_lean` | 0.065 | 0.045 | 0.205 | 0.00 | 2.90 | 0.061 | 0.133 |
+| `a1_polished`  | 0.070 | 0.050 | 0.160 | 0.00 | 2.62 | 0.067 | 0.138 |
+
+**true-lean** (2026-06-22, running; `action_rate_l2`/`joint_acc_l2` zeroed) — *plug in*:
+
+| variant | err_vx | err_vy | err_yaw | fall_rate | act_rate | orient_dev | height_dev |
+|---|---|---|---|---|---|---|---|
+| `a0_scratch`   | — | — | — | — | — | — | — |
+| `a0_polished`  | — | — | — | — | — | — | — |
+| `a1_from_lean` | — | — | — | — | — | — | — |
+| `a1_polished`  | — | — | — | — | — | — | — |
+
+Goal-achievability probe (`--diagnose-goals 600 --eval-seeds 2`, A1 only; c=8, no
+saturation `sat=0.000` in either):
+
+| variant | reward set | HL err vx | LL err vx | HL err yaw | LL err yaw | vx follow ratio |
+|---|---|---|---|---|---|---|
+| `a1_from_lean` | semi-lean | 0.027 | 0.035 | 0.171 | 0.130 | −0.28 |
+| `a1_polished`  | semi-lean | 0.037 | 0.038 | 0.140 | 0.081 | +0.59 |
+| `a1_from_lean` | true-lean | — | — | — | — | — |
+| `a1_polished`  | true-lean | — | — | — | — | — |
+
+**Semi-lean read (2026-06-22).** Hierarchy keeps a translational-tracking edge at equal
+10k budget (A1 vx 0.065–0.070 / vy 0.045–0.050 vs A0 ~0.085 / ~0.075), but costs ~5×
+`act_rate`, ~6× `height_dev`, ~2× `err_yaw`; all survive (0 falls). Probe: no goal
+saturation, yaw the lone weak axis. **Caveat that motivates true-lean:** the `act_rate`
+gap is confounded — semi-lean A0 was penalized for jerk, semi-lean A1 was not (A1 LL =
+intrinsic reward only). True-lean removes that penalty from A0 to make the smoothness
+comparison fair; fill the tables above when those runs land.
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 
