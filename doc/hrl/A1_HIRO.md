@@ -20,9 +20,13 @@ ablation). Stays in `unitree_rl_mjlab` + `mjlab` + `rsl_rl`; no Isaac Lab.
 ## Why two levels (honest assessment, 2026-06-18)
 A1 ≈ A0 on flat in-sim tracking is **expected, not a failure** — a hierarchy can't beat a flat
 policy at one stationary task (the goal bottleneck only constrains it). As measured A1 has **no
-in-sim upside and real costs** (yaw 0.17 vs 0.10, jerkier act_rate 1.68 vs 0.66, complexity,
-load-bearing A0 warm-start, + a runtime base-velocity estimate A0 doesn't need — see deploy
-note), so "hierarchy improves locomotion" is **not** supported. The payoff
+in-sim upside and real costs** (yaw 0.17 vs 0.10, complexity, load-bearing A0 warm-start, + a
+runtime base-velocity estimate A0 doesn't need — see deploy note), so "hierarchy improves
+locomotion" is **not** supported. **Correction (2026-06-23):** the prior "jerkier A1" cost
+(act_rate 1.68 vs 0.66) was a **reward artifact** — A0 is penalized for jerk, A1's LL never is
+(LL = intrinsic reward only). Under a matched penalty-free reward A1-from-polished is ~10×
+*smoother* than A0 (Track F true-lean → `hierarchy_benefit_roadmap.md`), so smoothness is not a
+genuine A1 cost; the deploy-relevant concern is only the shaped-reward gait. The payoff
 is elsewhere: (1) **substrate for A2/A3** — A2's A-RMA adaptation attaches to the HL/LL split,
 where the sim2real story (M3, the primary metric) comes from; (2) **clean RQ2 control** — A1's
 LL = A0 PPO, so A1≈A0 proves the hierarchy is performance-neutral → any A2 gain is attributable

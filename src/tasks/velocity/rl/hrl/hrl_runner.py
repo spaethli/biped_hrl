@@ -91,6 +91,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl: HighLevel = self._make_high_level()
     # Per-window absolute target V* in goal space (set when the HL fires).
     self._target = torch.zeros(env.num_envs, self.goal_dim, device=device)
+    # LL-obs target base: clean V* in absolute, noisy-estimate V* in delta (#8b faithful DR).
+    self._target_obs = self._target
 
     # Warm-start the LL from an A0 checkpoint (proprio columns + deeper layers).
     # A resume-load (if any) runs after __init__ and overrides this.
@@ -320,10 +322,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # Built from the clean state so the absolute-mode reward target stays privileged.
           if k % self.c == 0:
             self._target = self.hl.act(uenv, obs, state)
+            # Faithful delta DR (#8b): the LL-obs target base uses the noisy estimate so a
+            # constant bias cancels in V*-s, matching deploy (V* = v_est(t0) + g, obs = V*-v_est).
+            # Absolute V* is state-independent -> noise_off contributes nothing -> identical path.
+            self._target_obs = (
+              self._target + noise_off if self.hl_target_mode == "delta" else self._target
+            )
             self.hl.begin_window(uenv, obs, state)
 
           # Low level observes the remaining delta V* - s_i on the noisy estimate.
-          delta = self._target - state_n
+          delta = self._target_obs - state_n
           uenv.hrl_goal = delta
           obs["goal"] = delta
 
@@ -349,7 +357,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.
-          post_delta = self._target - (achieved + noise_off)
+          post_delta = self._target_obs - (achieved + noise_off)
           uenv.hrl_goal = post_delta
           obs["goal"] = post_delta
 

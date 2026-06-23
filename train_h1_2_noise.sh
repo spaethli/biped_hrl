@@ -22,12 +22,15 @@
 #   WORKER (set automatically by submit; or run one by hand):
 #       sbatch --export=ALL,VARIANT=abs_bias train_h1_2_noise.sh
 #
-# Variants (both: absolute TD3 + HIRO + tracking, 4096 envs, 10001 iters,
-#           warm-started from the polished shaped-A0):
-#   abs_bias   bias only            -- does the LL absorb a static estimator offset?
-#   abs_full   bias + drift + lag   -- full estimator realism (noise + slow drift + lag)
+# Variants (all: TD3 + HIRO + tracking, 4096 envs, 10001 iters, warm-started polished-A0).
+# Two axes -- target map {abs,delta} x noise {bias,full}:
+#   abs_bias    absolute target, bias only          -- does the LL absorb a static offset?
+#   abs_full    absolute target, bias + drift + lag -- full estimator realism
+#   delta_bias  directional target, bias only       -- bias CANCELS in V*-s (faithful DR,
+#   delta_full  directional target, + drift + lag      hrl_runner _target_obs); residual = drift/lag
 #
-# Knobs (env vars, optional): NUM_ENVS, MAX_ITER, POLISHED_A0, MODE (seq|"").
+# Submit knobs (env vars): VARIANTS (default 'delta_bias delta_full'), SEEDS (default '42 123'),
+#   NUM_ENVS, MAX_ITER, POLISHED_A0, MODE (seq chains all jobs on one GPU | "" concurrent).
 # Noise magnitudes (env vars, optional, override the cfg defaults):
 #   BIAS_RANGE (0.10 m/s)  DRIFT_STD (0.01)  DRIFT_DECAY (0.99)  LAG_STEPS (3)
 
@@ -45,20 +48,26 @@ LAG_STEPS=${LAG_STEPS:-3}
 # Entered when VARIANT is unset (i.e. invoked directly on the login node).
 if [[ -z "${VARIANT:-}" ]]; then
   if [[ "${1:-}" != "submit" && "${1:-}" != "all" ]]; then
-    echo "Usage: ./train_h1_2_noise.sh submit         # both variants concurrently"
-    echo "       MODE=seq ./train_h1_2_noise.sh submit # chained on one GPU"
+    echo "Usage: ./train_h1_2_noise.sh submit          # VARIANTS x SEEDS, concurrent"
+    echo "       MODE=seq ./train_h1_2_noise.sh submit  # chain all jobs on one GPU"
+    echo "       VARIANTS='abs_bias abs_full' SEEDS=42 ./train_h1_2_noise.sh submit"
     exit 1
   fi
   SELF="$(realpath "$0")"
-  J1=$(sbatch --parsable --job-name=noise_abs_bias \
-        --export=ALL,VARIANT=abs_bias "$SELF")
-  echo "submitted abs_bias  -> $J1"
-  DEP=""
-  [[ "${MODE:-}" == "seq" ]] && DEP="--dependency=afterok:$J1"
-  J2=$(sbatch --parsable $DEP --job-name=noise_abs_full \
-        --export=ALL,VARIANT=abs_full "$SELF")
-  echo "submitted abs_full  -> $J2 ${DEP:+(waits for abs_bias $J1)}"
-  echo "Both noise runs submitted (NUM_ENVS=$NUM_ENVS MAX_ITER=$MAX_ITER MODE=${MODE:-concurrent})."
+  VARIANTS=${VARIANTS:-"delta_bias delta_full"}
+  SEEDS=${SEEDS:-"42 123"}
+  PREV=""
+  for V in $VARIANTS; do
+    for S in $SEEDS; do
+      DEP=""
+      [[ "${MODE:-}" == "seq" && -n "$PREV" ]] && DEP="--dependency=afterok:$PREV"
+      JID=$(sbatch --parsable $DEP --job-name=noise_${V}_s${S} \
+            --export=ALL,VARIANT=${V},SEED=${S} "$SELF")
+      echo "submitted ${V} seed ${S} -> $JID ${DEP:+(after $PREV)}"
+      PREV=$JID
+    done
+  done
+  echo "Submitted VARIANTS='${VARIANTS}' SEEDS='${SEEDS}' (NUM_ENVS=$NUM_ENVS MAX_ITER=$MAX_ITER MODE=${MODE:-concurrent})."
   exit 0
 fi
 
@@ -84,32 +93,29 @@ export WANDB_MODE=offline
 cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 
 COMMON="--env.scene.num-envs ${NUM_ENVS} --agent.max-iterations ${MAX_ITER}"
-# The solved A1 HL config (absolute target + tracking HL reward, off-policy TD3 + HIRO).
-A1_HL="--agent.hl-algorithm td3 --agent.relabeling hiro --agent.hl-target-mode absolute --agent.hl-reward-mode tracking"
-# Estimator-noise on the LL goal channel; bias is shared by both variants.
+# Estimator-noise on the LL goal channel; bias is shared, full adds OU drift + sensor lag.
 NOISE_ON="--agent.goal-state-noise.enable True --agent.goal-state-noise.bias-range ${BIAS_RANGE}"
 NOISE_FULL="${NOISE_ON} --agent.goal-state-noise.drift-std ${DRIFT_STD} --agent.goal-state-noise.drift-decay ${DRIFT_DECAY} --agent.goal-state-noise.lag-steps ${LAG_STEPS}"
 
-echo "[noise] VARIANT=$VARIANT  NUM_ENVS=$NUM_ENVS  MAX_ITER=$MAX_ITER  warm-start=$POLISHED_A0"
-
+# Variant -> (target map, noise set). abs_* = absolute (V* = command-range center + g);
+# delta_* = directional (V* = state + g; bias cancels in V*-s, faithful DR). *_full adds drift+lag.
 case "$VARIANT" in
-  abs_bias)
-    # Bias only: drift_std/lag_steps left at their cfg defaults (0 -> off).
-    python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE_ON \
-      --agent.warm-start-path "$POLISHED_A0" \
-      --agent.run-name noise_abs_bias
-    ;;
-
-  abs_full)
-    # Bias + within-episode OU drift + first-order sensor lag.
-    python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE_FULL \
-      --agent.warm-start-path "$POLISHED_A0" \
-      --agent.run-name noise_abs_full
-    ;;
-
-  *)
-    echo "Unknown VARIANT: $VARIANT"; exit 1 ;;
+  abs_bias)   TGT=absolute; NOISE="$NOISE_ON"   ;;
+  abs_full)   TGT=absolute; NOISE="$NOISE_FULL" ;;
+  delta_bias) TGT=delta;    NOISE="$NOISE_ON"   ;;
+  delta_full) TGT=delta;    NOISE="$NOISE_FULL" ;;
+  *) echo "Unknown VARIANT: $VARIANT"; exit 1 ;;
 esac
+# Solved A1 HL config (off-policy TD3 + HIRO + tracking reward); target map per variant.
+A1_HL="--agent.hl-algorithm td3 --agent.relabeling hiro --agent.hl-target-mode ${TGT} --agent.hl-reward-mode tracking"
+SEED=${SEED:-42}
+
+echo "[noise] VARIANT=$VARIANT TGT=$TGT SEED=$SEED NUM_ENVS=$NUM_ENVS MAX_ITER=$MAX_ITER warm-start=$POLISHED_A0"
+
+python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE \
+  --agent.warm-start-path "$POLISHED_A0" \
+  --agent.seed ${SEED} \
+  --agent.run-name noise_${VARIANT}_s${SEED}
 
 # Auto-sync after training
 wandb sync --sync-all

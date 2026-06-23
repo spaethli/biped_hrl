@@ -223,77 +223,40 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
 
 ---
 
-## Track F — Lean-reward A0/A1 pair (reward-shaping ablation) (#9)
+## Track F — Lean-reward A0/A1 pair (reward-shaping ablation) (#9) — RESULTS IN
 
-- **Idea.** Retrain a **pair** — lean-A0 and lean-A1 — on a stripped reward (≈ `track_lin`,
-  `track_ang`, `body_orientation_l2`, base-height; **floor:** keep `is_terminated` +
-  `action_rate`/`joint_acc` so it can still find a gait). Compare lean-A0 vs lean-A1.
-- **Why it answers the critique (the real rationale).** A0's 16-term reward is so well-shaped
-  it already walks beautifully → no headroom for a hierarchy to show value. **Hypothesis: reward
-  shaping masks the hierarchy benefit.** If lean-A0 degrades (jitter, falls) while lean-A1 holds,
-  that is a concrete, defensible "the hierarchy helps" result for the supervisors. This is a
-  different *operating point*, not a "more correct" reward.
-- **Hard constraints.**
-  1. **It is a pair (RQ2).** A1's env reward == A0's by construction; leaning out only A0
-     reintroduces the confound A1 exists to avoid. Define one lean reward set, use it for **both**.
-  2. **Warm-start cascade.** lean-A1's LL must warm-start from **lean**-A0 (not shaped-A0), else
-     shaped-objective gait quality leaks in via the init → contaminated ablation. So lean-A0
-     trains **from scratch**, then seeds lean-A1.
-  3. **Budget-match the baseline.** A1 = warmstart(A0)+co-train, so the fair flat baseline is A0
-     at the **matched total iteration budget**, not fewer. State as a comparison rule.
-- **Risk.** A humanoid on tracking+height+orientation alone may never find a smooth gait (shaping
-  exists because bipeds are hard) → both fail, no signal. Mitigate with the floor terms above.
-- **Scope.** Keep the **shaped** A0/A1 as the deployment + primary pair; lean is a *controlled
-  ablation alongside*, not a replacement.
+**Purpose.** A0's 16-term reward is so well-shaped it already walks beautifully → no headroom
+for a hierarchy to show value. Strip the shaping and compare lean-A0 vs lean-A1 to test whether
+**reward shaping was masking the hierarchy benefit**. A controlled ablation *alongside* the
+shaped pair (still deployment/primary), not a replacement.
+**RQ2 constraints:** one lean reward set for **both** (leaning only A0 reintroduces the confound);
+lean-A1's LL warm-starts from **lean**-A0 not shaped-A0 (else shaped gait leaks in via init);
+compare at **matched iteration budget**.
 
-### Implemented (2026-06-18) — 4-variant run matrix + one-command launcher
-Tasks: **`Unitree-H1_2-Flat-Lean`** (lean A0), **`Unitree-H1_2-Flat-A1-Lean`** (lean A1).
-Single source: `apply_lean_reward()` in `config/h1_2/env_cfgs.py`; shaped A0 verified untouched.
+### Implemented (2026-06-18) — tasks + launcher
+Tasks **`Unitree-H1_2-Flat-Lean`** (A0) / **`Unitree-H1_2-Flat-A1-Lean`** (A1); single source
+`apply_lean_reward()` in `config/h1_2/env_cfgs.py` (shaped A0 untouched). Launch
+`./train_h1_2_lean.sh submit` → 4 jobs @ 4096 envs ×10001 iters, `a1_from_lean` gated on
+`a0_scratch` (SLURM `afterok`). `a0_polished` resumes the polished run (`--agent.resume`, iters
+*additional*); A1 uses `--agent.warm-start-path` (gap-aware partial load). Override via `POLISHED_A0=…`.
 
-**Two lean variants (terminology — keep distinct):**
-- **semi-lean** (runs 2026-06-19): A0's 16 terms with **7 shaping terms zeroed**
-  (`foot_gait`, `foot_clearance`, `foot_slip`, `soft_landing`, `angular_momentum`,
-  `body_ang_vel`, `stand_still`); the smoothness floor `action_rate_l2` / `joint_acc_l2`
-  was **kept active**. This is asymmetric for A0-vs-A1: lean-A0 pays the smoothness
-  penalty, but lean-A1's LL never sees it — the A1 LL trains only on the intrinsic
-  L2 goal-distance reward (`ll_task_reward_coef=0`), so all env reward terms are
-  diagnostic-only for A1 (see `a1_reward_routing` memory).
-- **true-lean** (runs 2026-06-22): `action_rate_l2` + `joint_acc_l2` **also zeroed**
-  (added to `_LEAN_ZERO_TERMS`), so neither A0 nor A1 has any smoothness guidance →
-  the A0-vs-A1 smoothness read is fair. **Kept** in both = tracking +
-  `body_orientation_l2` + `pose`(variable_posture, the height anchor) + safety floor
-  (`is_terminated`, `joint_pos_limits`, `self_collisions`).
+| variant | init | role |
+|---|---|---|
+| `a0_scratch`   | scratch                       | flat lean baseline |
+| `a0_polished`  | resume polished shaped-A0     | does a good gait survive shaping removal? |
+| `a1_from_lean` | warm-start `a0_scratch`       | clean axis (reward+init-matched) vs `a0_scratch` |
+| `a1_polished`  | warm-start polished shaped-A0 | hierarchy from a good gait vs `a0_polished` |
 
-One launcher fans out 4 jobs (all **4096 envs, 10001 iters**), `a1_from_lean` gated on
-`a0_scratch` via SLURM `afterok`, the other 3 concurrent:
+**Two reward variants (keep distinct).** **semi-lean** (2026-06-19) zeros 7 shaping terms
+(`foot_gait`, `foot_clearance`, `foot_slip`, `soft_landing`, `angular_momentum`, `body_ang_vel`,
+`stand_still`) but **keeps** the `action_rate_l2`/`joint_acc_l2` smoothness floor — asymmetric,
+since A1's LL never sees env reward (`ll_task_reward_coef=0`; all env terms diagnostic-only for
+A1 → `a1_reward_routing` memory + hrl-infra reward decomp). **true-lean** (2026-06-22) also zeros
+those two → neither side has smoothness guidance (fair read). Kept both: tracking +
+`body_orientation_l2` + `pose`(height anchor) + safety floor (`is_terminated`, `joint_pos_limits`,
+`self_collisions`).
 
-```bash
-./train_h1_2_lean.sh submit   # on the cluster login node (uses 4 of your 16 GPUs)
-```
-
-| variant | task | init | answers |
-|---|---|---|---|
-| `a0_scratch`   | lean A0 | none (scratch)            | does lean reward alone produce a gait? (flat baseline) |
-| `a0_polished`  | lean A0 | resume polished shaped-A0 | does a good gait *survive* when shaping is stripped? |
-| `a1_from_lean` | lean A1 | warm-start `a0_scratch`   | clean lean hierarchy (LL from lean-A0) vs `a0_scratch` |
-| `a1_polished`  | lean A1 | warm-start polished shaped-A0 | hierarchy from a good gait vs `a0_polished` |
-
-- **Clean axis** = `a0_scratch` vs `a1_from_lean` (reward- and init-matched → isolates the
-  hierarchy; the lean version of the original Track F pair). The `*_polished` pair shares a
-  fixed polished-A0 init to ask "what does each architecture do with the same good gait."
-- **Mechanics.** Lean-A0 reuses `experiment_name=h1_2_velocity`, so `a0_polished` warm-starts
-  via `--agent.resume` from the polished run (continues the iter counter → its 10001 are
-  *additional*). A1 variants use `--agent.warm-start-path` (fresh iter 0, gap-aware partial load).
-  Override the polished checkpoint with `POLISHED_A0=…`.
-- **Verdict metric.** Deterministic benchmark (`scripts/play.py <task> --checkpoint-file <pt>
-  --num-envs 64 --eval-steps 600 --eval-seeds 2`): the hierarchy "earns its keep" if a lean-A1
-  variant holds (lower `fall_rate` / smoother `act_rate`) where its matched lean-A0 degrades.
-- **Optional.** Add the #8b estimator-noise DR to any variant to also probe robustness.
-
-### Results (benchmark: 64 envs × 600 steps × 2 seeds)
-
-All runs 10001 iters @ 4096 envs (`a0_polished` = +10k *additional* on the resumed
-polished-A0 counter, i.e. equal 10k lean budget — **not** 20k from scratch).
+### Results (benchmark: 64 envs × 600 steps × 2 seeds; equal 10k lean budget)
 
 **semi-lean** (2026-06-19; `action_rate_l2`/`joint_acc_l2` still active):
 
@@ -304,32 +267,40 @@ polished-A0 counter, i.e. equal 10k lean budget — **not** 20k from scratch).
 | `a1_from_lean` | 0.065 | 0.045 | 0.205 | 0.00 | 2.90 | 0.061 | 0.133 |
 | `a1_polished`  | 0.070 | 0.050 | 0.160 | 0.00 | 2.62 | 0.067 | 0.138 |
 
-**true-lean** (2026-06-22, running; `action_rate_l2`/`joint_acc_l2` zeroed) — *plug in*:
+**true-lean** (2026-06-22; `action_rate_l2`/`joint_acc_l2` zeroed — fair smoothness
+read). `a1_polished_delta` = A1 from polished with **directional** (delta) HL goals
+`V*=state+scale·g` vs the default **absolute** `V*=center+scale·g`:
 
-| variant | err_vx | err_vy | err_yaw | fall_rate | act_rate | orient_dev | height_dev |
-|---|---|---|---|---|---|---|---|
-| `a0_scratch`   | — | — | — | — | — | — | — |
-| `a0_polished`  | — | — | — | — | — | — | — |
-| `a1_from_lean` | — | — | — | — | — | — | — |
-| `a1_polished`  | — | — | — | — | — | — | — |
+| variant | goals | err_vx | err_vy | err_yaw | fall_rate | act_rate | orient_dev | height_dev |
+|---|---|---|---|---|---|---|---|---|
+| `a0_scratch`        | —        | 0.133 | 0.097 | 0.264 | 0.00 | 35.20 | 0.023 | 0.030 |
+| `a0_polished`       | —        | 0.084 | 0.098 | 0.283 | 0.00 | 20.22 | 0.040 | 0.029 |
+| `a1_from_lean`      | absolute | 0.118 | 0.056 | 0.226 | 0.00 | 22.15 | 0.209 | 0.074 |
+| `a1_polished`       | absolute | 0.088 | 0.057 | 0.186 | 0.00 |  2.47 | 0.112 | 0.164 |
+| `a1_polished_delta` | **directional** | 0.091 | 0.081 | **0.128** | 0.00 | **2.11** | 0.115 | 0.104 |
 
 Goal-achievability probe (`--diagnose-goals 600 --eval-seeds 2`, A1 only; c=8, no
-saturation `sat=0.000` in either):
+saturation `sat=0.000` in any):
 
-| variant | reward set | HL err vx | LL err vx | HL err yaw | LL err yaw | vx follow ratio |
-|---|---|---|---|---|---|---|
-| `a1_from_lean` | semi-lean | 0.027 | 0.035 | 0.171 | 0.130 | −0.28 |
-| `a1_polished`  | semi-lean | 0.037 | 0.038 | 0.140 | 0.081 | +0.59 |
-| `a1_from_lean` | true-lean | — | — | — | — | — |
-| `a1_polished`  | true-lean | — | — | — | — | — |
+| variant | reward set | goals | HL err vx | LL err vx | HL err yaw | LL err yaw | vx follow ratio |
+|---|---|---|---|---|---|---|---|
+| `a1_from_lean` | semi-lean | absolute | 0.027 | 0.035 | 0.171 | 0.130 | −0.28 |
+| `a1_polished`  | semi-lean | absolute | 0.037 | 0.038 | 0.140 | 0.081 | +0.59 |
+| `a1_from_lean`      | true-lean | absolute | 0.102 | 0.091 | 0.173 | 0.168 | — |
+| `a1_polished`       | true-lean | absolute | 0.041 | 0.075 | 0.161 | 0.099 | — |
+| `a1_polished_delta` | true-lean | **directional** | 0.067 | **0.048** | **0.082** | **0.051** | — |
 
-**Semi-lean read (2026-06-22).** Hierarchy keeps a translational-tracking edge at equal
-10k budget (A1 vx 0.065–0.070 / vy 0.045–0.050 vs A0 ~0.085 / ~0.075), but costs ~5×
-`act_rate`, ~6× `height_dev`, ~2× `err_yaw`; all survive (0 falls). Probe: no goal
-saturation, yaw the lone weak axis. **Caveat that motivates true-lean:** the `act_rate`
-gap is confounded — semi-lean A0 was penalized for jerk, semi-lean A1 was not (A1 LL =
-intrinsic reward only). True-lean removes that penalty from A0 to make the smoothness
-comparison fair; fill the tables above when those runs land.
+**Read.** *Semi-lean:* A1 keeps a translational edge (vx 0.065–0.070 / vy 0.045–0.050 vs A0
+~0.085 / ~0.075) but *appears* ~5× jerkier — confounded (A0 penalized for jerk, A1's LL not).
+*True-lean (the fair read, 2026-06-23) — smoothness story flips:* with no smoothness penalty
+either side, flat **A0 act_rate blows to 20–35** (was 0.5–0.6 in semi-lean — it relied on
+`action_rate_l2`) while **A1-from-polished stays ~2.1–2.5 (~10× smoother)** → the hierarchy's
+intrinsic-goal LL is *inherently* smoother than flat PPO. Caveats: (1) **init dominates** —
+`a1_from_lean` inherits the wild `a0_scratch` (act 22, orient 0.21), so the clean axis is
+contaminated under true-lean; the smooth A1 is the *polished*-init one (carries shaped gait in).
+(2) **directional goals win** — `a1_polished_delta` best yaw (0.128; HL-probe 0.082), smoothest,
+lowest LL errs (vx 0.048, yaw 0.051), small vy cost. ("directional" = HIRO's term for
+`V*=state+scale·g`, `goal_space.py:10-11`; `delta` = the `hl_target_mode` id.)
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 
