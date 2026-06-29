@@ -56,12 +56,16 @@ class HighLevelTd3(HighLevel):
     relabel: str = "none",
     ll_actor: torch.nn.Module | None = None,
     target_mode: str = "delta",
+    obs_vel_dim: int = 0,
   ) -> None:
     super().__init__(goal_space)
     self.device = device
     self.goal_dim = goal_dim
     self.gamma_hi = gamma_hi
     self.target_mode = target_mode
+    # Optional extra HL input: the deployable base lin-vel estimate (vx,vy) the runner
+    # writes to obs["hl_vel"]. 0 -> byte-identical to the proprio++command HL.
+    self.obs_vel_dim = obs_vel_dim
     # HIRO off-policy correction: relabel sampled goals to the goal the *current* LL is
     # most likely to have produced the stored action trace for. Needs a live LL actor.
     self.relabel = relabel != "none"
@@ -70,8 +74,8 @@ class HighLevelTd3(HighLevel):
     self.candidate_std: float = cfg.get("candidate_std", 0.5)
     if self.relabel and ll_actor is None:
       raise ValueError("relabel HL needs a reference to the LL actor.")
-    # HL actor/critic state = deployable HL obs (proprio ++ command), same as the PPO HL.
-    self._state_dim = obs["policy"].shape[-1] + obs["command"].shape[-1]
+    # HL actor/critic state = deployable HL obs (proprio ++ command [++ lin-vel est]).
+    self._state_dim = obs["policy"].shape[-1] + obs["command"].shape[-1] + obs_vel_dim
 
     self.tau: float = cfg["tau"]
     self.policy_freq: int = cfg["policy_freq"]
@@ -124,7 +128,10 @@ class HighLevelTd3(HighLevel):
   # --- helpers --------------------------------------------------------------
 
   def _state_vec(self, obs: TensorDict) -> torch.Tensor:
-    return torch.cat([obs["policy"], obs["command"]], dim=-1)
+    parts = [obs["policy"], obs["command"]]
+    if self.obs_vel_dim:
+      parts.append(obs["hl_vel"])  # deployable base lin-vel est, written by the runner
+    return torch.cat(parts, dim=-1)
 
   def _actor_forward(self, net: torch.nn.Module, state: torch.Tensor) -> torch.Tensor:
     return torch.tanh(net(self.normalizer(state)))

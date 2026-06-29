@@ -214,6 +214,14 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``center``=command-range midpoint (velocity) / nominal (orient,height) — a STATIC
   command->g map (g spans the command range), the oracle's structure that the LL already
   tracks to 0.05 m/s. The LL is unchanged either way (still observes V*-s_i)."""
+  hl_obs_vel: bool = False
+  """Feed the HL the deployable base lin-vel estimate (vx,vy) as extra obs (td3 only).
+  Off (default) -> HL input is ``policy ++ command`` (byte-identical; RQ2-safe). On ->
+  ``policy ++ command ++ v_est``, where v_est is the SAME noisy estimate the LL conditions
+  on (``state_n`` vx,vy under #8b noise, clean at eval). Motivated for ``hl_target_mode=delta``:
+  the directional target ``V*=state+scale*g`` needs current velocity to pick g=(command-v)/scale,
+  which a velocity-blind HL must otherwise guess (the residual directional HL wall). Changes the
+  HL obs dim -> deploy ONNX/C++ must feed v_est in the same order (deferred)."""
   gamma_hi: float | None = None
   """High-level discount. None -> derived horizon-matched as ``0.99 ** c`` in
   ``__post_init__`` (so changing ``c`` rescales it automatically; the old hardcoded

@@ -47,12 +47,24 @@ needs C's verdict to choose the goal-space basis. **E** is parked.
 
 ## Track A — Give the HL a richer job (the core answer to the critique)
 
+**Two axes for any candidate goal dimension (apply before adding one).**
+- *Axis 1 — not flat-representable?* Can A0's `(vx,vy,wz)` command already express it? Only a
+  "no" gives the HL a new job (else just command the LL directly) — this is the hierarchy
+  justification.
+- *Axis 2 — hardware-measurable?* Can the real robot estimate it to close the goal loop?
+  Deployability gate (Track C / M5).
+Add a dimension only if Axis 1 = no; it is deployable only if Axis 2 = yes. **#6's accel/IMU
+basis is Axis-2-only** (a flat command expresses the same authority) → a deployability
+*substitution* for the velocity basis, **not** a richer HL job. The richer-job prize is the
+gait-spillover set below (cadence, step length, stance width).
+
 ### #6 — Goal space in real-robot-measurable quantities (accelerations / IMU-derivable)
 - **Idea.** Replace (or augment) the velocity goal with quantities the *real* robot can
   observe/track — accelerations, IMU-integrated velocity, base-frame quantities — so the
   HL→LL interface is physically grounded on hardware, not a sim-only abstraction.
-- **Why it answers the critique.** A goal space the flat A0 command *cannot* express (A0 only
-  takes `(vx,vy,wz)` command) means HL is no longer a relay — it shapes a richer reference.
+- **Reclassified (2026-06-24): Axis-2-only.** Accel/IMU-derivable velocity is the *same*
+  authority a flat command already expresses → it does **not** make HL a richer job; it is a
+  deployability substitution for the velocity basis (→ M5 / Track C), not a Track-A win.
 - **Status / risk.** Changing the goal basis **re-opens the HL reward + target-map solution**
   (the `absolute` + `tracking` fix assumes velocity goals; `GoalSpace.center/to_target/to_g`
   would need a new map). Medium effort. Likely a **new architecture slot (A2/A3), not an A1
@@ -83,6 +95,11 @@ needs C's verdict to choose the goal-space basis. **E** is parked.
   principled split — see Track B for the candidate term inventory. Connects to the already-planned
   `action_rate` penalty (`A1_HIRO.md`: must be a direct LL reward term, **not** the goal/intrinsic
   channel — smoothness isn't a goal-space state).
+- **HL-reward fork (who chooses the gait).** Under the `tracking` HL reward the HL has *no
+  gradient* to choose a richer goal (cadence/step length don't improve velocity tracking). Each
+  such dimension needs either (a) **exogenous command** (curriculum/operator sets it → pure LL
+  tracking, no new HL reward, HL isn't doing the new job) or (b) **a downstream reward the gait
+  serves** (energy/robustness) = the genuine richer-HL-job and the source of any new HL reward term.
 
 ---
 
@@ -145,7 +162,14 @@ directly, both are LL terms, both ~trivial). **joint_mirror** is the highest-cre
 
 **Goal-dimension spillover (→ Track A).** Several terms describe a *reference the HL could set*
 that A0's `(vx,vy,wz)` command cannot express — this is the strongest answer to the supervisors:
-- **gait frequency / phase** (from `feet_gait` period) → HL commands cadence.
+- **gait frequency / phase** (from `feet_gait` period) → HL commands cadence. **Implementable
+  now, no footfall detector:** promote the `foot_gait` phase-clock `period` (rewards.py:190,199)
+  to a goal dimension; the existing reward does the LL-side tracking (open-loop reference clock).
+  **Step length** instead needs footfall — free in sim (`compute_first_contact` rewards.py:246 +
+  foot pos; `current_contact_time/air_time` :144), but on hardware the open gate (force sensor /
+  torque-GRF / learned contact estimator), Axis-2/M5. Commanding cadence/step-length keeps this
+  **A1** (RL-learned gait); it's **A3** only once a model-based gait library is a permanent runtime
+  component with LL residual.
 - **body height / crouch** (base-height-as-command) → HL commands posture height (already a goal
   component; make it *actively modulated*, not fixed).
 - **stance width** (from `feet_distance_lateral`) → HL commands lateral foot spacing.
@@ -184,14 +208,19 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   refresh). Off by default → byte-identical to the clean pipeline (RQ2-safe). Config =
   `GoalStateNoiseCfg` in `config/h1_2_a1/rl_cfg.py` (`--agent.goal-state-noise.*`); mechanism in
   `.claude/docs/hrl-infra.md`.
-- **Absolute-only (decided).** A *constant* bias cancels in the `delta` map (the goal is a
-  *difference* of two equally-biased reads), so bias-DR is a silent no-op there; meaningful only in
-  `absolute`/`oracle`. Delta variant **dropped** to cut complexity.
-- **Run matrix** (launcher `train_h1_2_noise.sh`, both absolute TD3+HIRO+tracking, warm-start
-  polished-A0, 4096 envs / 10001 it): `abs_bias` (bias ±0.10 m/s only) and `abs_full`
-  (bias + OU drift 0.01/0.99 + lag 3 steps). **Verdict: both reliable** (2/2 clean each) at
-  clean-baseline quality (err_vx ~0.08, 0 falls); one early `abs_bias` collapse was a transient
-  corruption, not the seed. Full table → `A1_findings.md` (Estimator-noise DR #8b).
+- **Both target maps trained (2026-06-23 update).** Both `absolute` and `delta` were run under noise
+  (earlier "absolute-only" plan revised — the faithful-DR `_target_obs` fix made delta meaningful).
+  In `delta` a constant bias cancels in `V*−s` by construction (`V*=v_est(t0)+g`), so bias-DR is a
+  near no-op there (delta_bias≈delta_full); in `absolute` the bias persists. **Both maps are
+  deployment-faithful** — noise enters via the LL's observed `V*−state_n`, exactly as on the real
+  robot; the bias-cancellation in delta is a construction property, not a faithfulness edge.
+- **Run matrix** (launcher `train_h1_2_noise.sh`, TD3+HIRO+tracking, warm-start polished-A0,
+  4096 envs / 10001 it): `{abs,delta} × {bias ±0.10 m/s, full = bias + OU drift 0.01/0.99 + lag 3}`,
+  seeds 42 & 123. **Verdict: all four reliable** (2/2 clean each) at clean-baseline quality (0 falls,
+  no saturation). Absolute err_vx ~0.080 / yaw ~0.185; directional err_vx ~0.120 / yaw ~0.163 / smoother
+  (act 2.8 vs 3.9) — the **same HL-side vx↔yaw trade-off as clean Track F**: absolute nails vx, directional
+  nails yaw; LL reach near-perfect in both (HL is the wall). Full tables + verdict → `A1_findings.md`
+  (Estimator-noise DR #8b). One early `abs_bias` collapse was a transient corruption, not the seed.
 
 ---
 
@@ -277,7 +306,9 @@ read). `a1_polished_delta` = A1 from polished with **directional** (delta) HL go
 | `a0_polished`       | —        | 0.084 | 0.098 | 0.283 | 0.00 | 20.22 | 0.040 | 0.029 |
 | `a1_from_lean`      | absolute | 0.118 | 0.056 | 0.226 | 0.00 | 22.15 | 0.209 | 0.074 |
 | `a1_polished`       | absolute | 0.088 | 0.057 | 0.186 | 0.00 |  2.47 | 0.112 | 0.164 |
-| `a1_polished_delta` | **directional** | 0.091 | 0.081 | **0.128** | 0.00 | **2.11** | 0.115 | 0.104 |
+| `a1_polished_delta` (06-22) | **directional** | 0.091 | 0.081 | **0.128** | 0.00 | **2.11** | 0.115 | 0.104 |
+| `a1_polished_delta` (06-23) | **directional** | 0.143 | 0.083 | 0.124 | 0.00 | 2.46 | 0.083 | 0.128 |
+| `a1_from_lean_delta` (06-23) | **directional** | 0.184 | 0.175 | 0.297 | 0.00 | 22.59 | 0.154 | 0.083 |
 
 Goal-achievability probe (`--diagnose-goals 600 --eval-seeds 2`, A1 only; c=8, no
 saturation `sat=0.000` in any):
@@ -288,7 +319,9 @@ saturation `sat=0.000` in any):
 | `a1_polished`  | semi-lean | absolute | 0.037 | 0.038 | 0.140 | 0.081 | +0.59 |
 | `a1_from_lean`      | true-lean | absolute | 0.102 | 0.091 | 0.173 | 0.168 | — |
 | `a1_polished`       | true-lean | absolute | 0.041 | 0.075 | 0.161 | 0.099 | — |
-| `a1_polished_delta` | true-lean | **directional** | 0.067 | **0.048** | **0.082** | **0.051** | — |
+| `a1_polished_delta` (06-22) | true-lean | **directional** | 0.067 | 0.048 | 0.082 | 0.051 | — |
+| `a1_polished_delta` (06-23) | true-lean | **directional** | 0.124 | **0.026** | 0.120 | 0.069 | — |
+| `a1_from_lean_delta` (06-23) | true-lean | **directional** | 0.180 | 0.228 | 0.230 | 0.232 | — |
 
 **Read.** *Semi-lean:* A1 keeps a translational edge (vx 0.065–0.070 / vy 0.045–0.050 vs A0
 ~0.085 / ~0.075) but *appears* ~5× jerkier — confounded (A0 penalized for jerk, A1's LL not).
@@ -298,9 +331,22 @@ either side, flat **A0 act_rate blows to 20–35** (was 0.5–0.6 in semi-lean �
 intrinsic-goal LL is *inherently* smoother than flat PPO. Caveats: (1) **init dominates** —
 `a1_from_lean` inherits the wild `a0_scratch` (act 22, orient 0.21), so the clean axis is
 contaminated under true-lean; the smooth A1 is the *polished*-init one (carries shaped gait in).
-(2) **directional goals win** — `a1_polished_delta` best yaw (0.128; HL-probe 0.082), smoothest,
-lowest LL errs (vx 0.048, yaw 0.051), small vy cost. ("directional" = HIRO's term for
+(2) **directional goals → near-perfect LL, HL becomes the wall** — both `a1_polished_delta`
+runs give the lowest LL reach errs of any A1 (vx 0.026–0.048, yaw 0.051–0.069); end error ≈ HL
+error, so the directional LL nails its goals and the HL is the limiter. Best yaw of the set
+(0.124–0.128). Run-to-run spread is large (two same-config polished_delta runs: err_vx 0.091 vs
+0.143 — the documented same-config divergence). Directional does **not** rescue the scratch
+init: `a1_from_lean_delta` fails like its absolute twin (vx 0.184, act 22.6, LL reach blown to
+0.23) → **init dominates regardless of goal mode**. ("directional" = HIRO's term for
 `V*=state+scale·g`, `goal_space.py:10-11`; `delta` = the `hl_target_mode` id.)
+
+**Directional vs absolute — settled axis trade-off (clean + noise, 2026-06-23).** The same split
+holds in clean true-lean *and* under estimator-noise DR (Track C #8b matrix): **absolute** goals give
+better straight-line vx/vy (HL maps vx well, yaw poorly); **directional** goals give better yaw/turning
+and smoother action (HL maps yaw well, vx loosely). The LL reaches either goal near-perfectly, so the
+HL is always the limiter and the goal mode just selects which command axis the HL is good at. Neither
+dominates — pick absolute for the "mainly straight" headline metric, directional for turning/smoothness.
+Both train reliably with noisy velocity estimates. Decomposition tables → `A1_findings.md` (#8b verdict).
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 

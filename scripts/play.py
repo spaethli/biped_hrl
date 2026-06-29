@@ -155,7 +155,8 @@ def run_play(task_id: str, cfg: PlayConfig):
     if params_yaml.exists():
       saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
       structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
-                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode")
+                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
+                        "hl_obs_vel")
       restored = {k: saved[k] for k in structure_keys
                   if k in saved and hasattr(agent_cfg, k)}
       for k, v in restored.items():

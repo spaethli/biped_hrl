@@ -20,7 +20,7 @@ deterministic benchmark, not training-time stochastic metrics.
 | `hl=ppo` + absolute + tracking (± std cap) | FAILED both | No cap: `|g|`→13, yaw 1.40. Std cap (1e-3,1.0): still `|g|`→4 + falls (ep_len 9.6) — the cap bounds σ, not the unbounded Gaussian **mean**. PPO can't cleanly bound `g` (rsl_rl has no squashed density); TD3's deterministic `tanh` is load-bearing. |
 | Remove warm-start (control) | catastrophic | `|g|` pins 1.0 (100% sat), action_rate 13.5 vs A0 0.66. Confirms warm-start load-bearing from both directions. |
 | Deploy goal-state noise (sim, `hrl.state_noise`; learned `absolute` TD3) | stands but **twitchy, worst standing still** | Clean-trained LL isn't robust to estimator noise on its velocity/height goal feedback (cmd=0 → goal=−noise → phantom corrections; HL input isn't noised). **Sim2real fix: train LL+HL with state-noise DR** on the goal-state obs. Adding measured `imu_lin_vel` as a direct obs is an option but privileged + F4 showed base_lin_vel in HL obs was a no-op for *clean* tracking — revisit only as a noise-robustness lever. Deploy mechanism + knob → `.claude/docs/deployment.md`. |
-| Track F lean A0/A1 (semi→true-lean, 2026-06-23; `*_lean_a0_*`/`*_lean_a1_*` runs) | smoothness "cost" was a **reward artifact**; **directional goals best** | Semi-lean (A0 still jerk-penalized, A1 LL never is) made A1 look ~5× jerkier; **true-lean** (action_rate/joint_acc zeroed both sides) flips it — flat A0 act_rate 20–35, A1-from-polished ~2.1–2.5 (~10× smoother). Caveat: init dominates (`a1_from_lean` inherits the wild `a0_scratch`). Directional(delta)+tracking from polished gives best yaw (0.128) + lowest LL errs. Full tables → `hierarchy_benefit_roadmap.md` Track F Results. |
+| Track F lean A0/A1 (semi→true-lean, 2026-06-23; `*_lean_a0_*`/`*_lean_a1_*` runs) | smoothness "cost" was a **reward artifact**; **directional goals best** | Semi-lean (A0 still jerk-penalized, A1 LL never is) made A1 look ~5× jerkier; **true-lean** (action_rate/joint_acc zeroed both sides) flips it — flat A0 act_rate 20–35, A1-from-polished ~2.1–2.5 (~10× smoother). Caveat: **init dominates regardless of goal mode** (`a1_from_lean`/`a1_from_lean_delta` both inherit the wild `a0_scratch`, act ~22). Directional(delta)+tracking from polished → **near-perfect LL** (reach err vx 0.026–0.048) so the **HL becomes the wall** (end err ≈ HL err); best yaw (0.124–0.128) but large same-config spread (vx 0.091 vs 0.143). **Correction (2026-06-24):** this directional HL wall is **NOT saturation** — `|g|` is small/unsaturated (`gabs_vx` 0.065, `sat=0.000`); the HL **under-reaches** (HL err vx 0.124 with tiny `|g|` = asks for too little). The `|g|→1` saturation of the original `delta baseline (relabel)` row above was a *pre-tracking-reward* failure, cured by `tracking` and absent in all true-lean delta runs → don't cite saturation against delta. Full tables → `hierarchy_benefit_roadmap.md` Track F Results. |
 
 ## Milestones
 
@@ -128,18 +128,59 @@ observed `V*−s`; HL/reward/critic stay clean — and the HL never observes lin
 nothing on the HL side *can* be noised). Resolves the "train LL+HL with state-noise DR" todo from
 the deploy row above. All clean-eval ≈ ref5k (err_vx ~0.08, ep_len max, 0 falls, no goal saturation):
 
-| variant (seed) | err_vx | outcome |
-|---|---|---|
-| bias 0.10 (s42, orig) | 0.53 | COLLAPSE — **transient training corruption** (not seed, not config) |
-| bias 0.10 (s42, rerun) | 0.078 | success |
-| bias 0.10 (s123) | 0.083 | success |
-| full = bias + drift .01/.99 + lag 3 (s42) | 0.072 | success |
-| full (s123) | 0.083 | success |
+**Absolute** target (`2026-06-19_*noise_abs_*`), full benchmark (64×600×2 seeds, model_10000):
+
+| variant (seed) | err_vx | err_vy | err_yaw | act_rate | outcome |
+|---|---|---|---|---|---|
+| bias 0.10 (s42, orig) | 0.53 | — | — | — | COLLAPSE — **transient training corruption** (not seed, not config) |
+| bias 0.10 (s42, rerun) | 0.080 | 0.053 | 0.202 | 4.56 | success |
+| bias 0.10 (s123) | 0.083 | 0.074 | 0.194 | 2.85 | success |
+| full = bias + drift .01/.99 + lag 3 (s42) | 0.072 | 0.051 | 0.170 | 3.02 | success |
+| full (s123) | 0.084 | 0.052 | 0.173 | 5.19 | success |
+
+(Eval is NOT bit-exact: the policy is deterministic but the MuJoCo-Warp GPU rollout isn't, so
+`err_vx` wobbles ~0.002 run-to-run — within each run's across-seed `err_vx_std`. The earlier
+0.078 for s42-rerun is the same run as 0.080 here; CLAUDE.md GPU-non-determinism caveat, eval-time.)
 
 Verdict: bias-only and full DR both train **reliably** (2/2 clean each) to clean-baseline quality;
 the lone collapse (ep_len 8.9, HL goals 54% saturated — the old A1 wall) was a one-off glitch,
 confirmed benign by a successful same-seed-42 rerun (ep_len 724 by it2000). Do NOT report bias
-instability. Logs `logs/rsl_rl/h1_2_velocity_a1/2026-06-19_*noise_abs_*`.
+instability.
+
+### Directional (delta) goals under noise + directional-vs-absolute verdict (2026-06-23)
+Same matrix re-run with **directional** (`hl_target_mode=delta`, `V*=state+scale·g`) HL goals, using the
+faithful-DR `_target_obs` fix. Runs `2026-06-23_*noise_delta_*`, model_10000:
+
+| run | goals | noise | err_vx | err_vy | err_yaw | fall | act_rate |
+|---|---|---|---|---|---|---|---|
+| delta_bias (s42)  | directional | bias | 0.129 | 0.099 | 0.163 | 0.00 | 3.32 |
+| delta_bias (s123) | directional | bias | 0.117 | 0.091 | 0.181 | 0.00 | 2.27 |
+| delta_full (s42)  | directional | full | 0.127 | 0.132 | 0.163 | 0.00 | 2.52 |
+| delta_full (s123) | directional | full | 0.105 | 0.102 | 0.144 | 0.00 | 3.11 |
+| **mean directional** | | | **0.120** | **0.106** | **0.163** | 0.00 | **2.8** |
+| **mean absolute** (4 above) | | | **0.080** | **0.058** | **0.185** | 0.00 | **3.9** |
+
+Probe (HL-vs-LL, c=8, `sat=0.000` every run): the mode flips **which command axis the HL maps well** —
+LL reach is near-perfect (`ll_err_vx ~0.056`) in BOTH, so the HL is always the wall:
+
+| goals | HL err vx | LL err vx | HL err yaw | LL err yaw |
+|---|---|---|---|---|
+| directional (mean of 4) | **0.072** | 0.057 | **0.090** | 0.069 |
+| absolute (mean of 4)    | 0.049 | 0.056 | 0.175 | 0.077 |
+
+**Verdict — neither dominates; HL-side axis trade-off, consistent across clean (Track F) AND noisy:**
+- **Absolute** HL nails vx (hl_err_vx 0.049) → best straight-line tracking (err_vx 0.080 / vy 0.058) but
+  botches yaw (hl_err_yaw 0.175 → err_yaw 0.185).
+- **Directional** HL nails yaw (hl_err_yaw 0.090 → err_yaw 0.163, best of set) and is smoother (act 2.8 vs
+  3.9) but its vx map is looser (err_vx 0.120). Same split as clean true-lean (Track F) and the shaped
+  SOLVED run (`absolute` refined vx 0.14→0.098).
+- **Both modes are deployment-faithful** — the noise enters via the LL's observed state estimate
+  `V*−state_n`, exactly as on the real robot. In delta a constant bias *additionally* cancels in `V*−s` by
+  construction (`V*=v_est(t0)+g`), so delta_bias≈delta_full; in absolute the bias persists in the fixed
+  `V*−v_est`, which is also what the real robot sees. Not a faithfulness edge either way.
+- **Both train reliably under estimator noise** (2/2 clean each, 0 falls, no saturation).
+- **Pick by axis:** absolute for the "mainly straight" headline vx/vy metric; directional for turning and
+  smoothness. Logs `logs/rsl_rl/h1_2_velocity_a1/2026-06-{19,23}_*noise_*`.
 
 ## Play/replay fix (F0, 2026-06-11) — all pre-fix qualitative replays are void
 `play.py` used `get_inference_policy()` which returned the bare LL actor — nothing fired the

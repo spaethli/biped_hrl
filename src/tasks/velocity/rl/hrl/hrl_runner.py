@@ -55,6 +55,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl_algorithm: str = train_cfg["hl_algorithm"]
     self.hl_target_mode: str = train_cfg.get("hl_target_mode", "delta")
     self.hl_reward_mode: str = train_cfg.get("hl_reward_mode", "task")
+    # Feed the HL the deployable base lin-vel estimate (vx,vy) as extra obs. Lets the
+    # directional HL compute g = (command - v)/scale instead of guessing v. Off by default.
+    self.hl_obs_vel: bool = train_cfg.get("hl_obs_vel", False)
+    self._hl_vel_dim: int = 2 if self.hl_obs_vel else 0
     self.ll_task_reward_coef: float = train_cfg["ll_task_reward_coef"]
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
     self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
@@ -242,6 +246,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         relabel=self.relabeling,
         ll_actor=getattr(self.alg, "_raw_actor", self.alg.actor),
         target_mode=self.hl_target_mode,
+        obs_vel_dim=self._hl_vel_dim,
       )
     raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
 
@@ -269,6 +274,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       nonlocal step, target
       state = self.goal_space.extract(uenv)
       if step % self.c == 0:
+        # Eval is noise-free: feed the HL the clean lin-vel (deploy substitutes the
+        # sportmode estimate). No-op unless hl_obs_vel is on.
+        if self.hl_obs_vel:
+          obs["hl_vel"] = state[:, 0:2]
         target = self.hl.act_inference(uenv, obs, state)
       step += 1
       delta = target - state
@@ -321,6 +330,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # High level fires at the start of each window -> new absolute target V*.
           # Built from the clean state so the absolute-mode reward target stays privileged.
           if k % self.c == 0:
+            # Optional HL lin-vel input: the SAME noisy estimate the LL conditions on
+            # (state_n vx,vy), so HL and LL see one consistent deployable reading.
+            if self.hl_obs_vel:
+              obs["hl_vel"] = state_n[:, 0:2]
             self._target = self.hl.act(uenv, obs, state)
             # Faithful delta DR (#8b): the LL-obs target base uses the noisy estimate so a
             # constant bias cancels in V*-s, matching deploy (V* = v_est(t0) + g, obs = V*-v_est).
@@ -360,6 +373,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           post_delta = self._target_obs - (achieved + noise_off)
           uenv.hrl_goal = post_delta
           obs["goal"] = post_delta
+          # Refresh the HL lin-vel input on the post-step obs (same noisy estimate as the
+          # LL's post_delta) so end_window's bootstrap next-state is consistent.
+          if self.hl_obs_vel:
+            obs["hl_vel"] = (achieved + noise_off)[:, 0:2]
 
           if not self.freeze_ll:
             self.alg.process_env_step(obs, r_lo, dones, extras)

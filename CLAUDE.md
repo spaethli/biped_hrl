@@ -102,3 +102,17 @@ analysis and the proposed change first.
 - C++ deploy, ONNX export, replay → `.claude/docs/deployment.md`
 - A0 warm-start checkpoints: `logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt`.
 - W&B: project `biped_hrl` (A1 experiment `h1_2_velocity_a1`, A0 `h1_2_velocity`).
+
+## Agent skills
+
+### Issue tracker
+
+Issues tracked as GitHub issues in `liamlate/biped_hrl` via the `gh` CLI; external PRs are NOT a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary (`needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at repo root. See `docs/agents/domain.md`.
