@@ -340,13 +340,15 @@ init: `a1_from_lean_delta` fails like its absolute twin (vx 0.184, act 22.6, LL 
 0.23) → **init dominates regardless of goal mode**. ("directional" = HIRO's term for
 `V*=state+scale·g`, `goal_space.py:10-11`; `delta` = the `hl_target_mode` id.)
 
-**Directional vs absolute — settled axis trade-off (clean + noise, 2026-06-23).** The same split
-holds in clean true-lean *and* under estimator-noise DR (Track C #8b matrix): **absolute** goals give
-better straight-line vx/vy (HL maps vx well, yaw poorly); **directional** goals give better yaw/turning
-and smoother action (HL maps yaw well, vx loosely). The LL reaches either goal near-perfectly, so the
-HL is always the limiter and the goal mode just selects which command axis the HL is good at. Neither
-dominates — pick absolute for the "mainly straight" headline metric, directional for turning/smoothness.
-Both train reliably with noisy velocity estimates. Decomposition tables → `A1_findings.md` (#8b verdict).
+**Directional vs absolute — trade-off (06-23) then OVERTURNED by HL velocity obs (06-29).** Initially an
+axis trade-off held in clean true-lean *and* under noise: **absolute** better vx (HL maps vx well, yaw
+poorly), **directional** better yaw + smoother (HL maps yaw well, vx loosely); LL near-perfect both, so the
+HL is always the limiter. **Then `hl_obs_vel` removed directional's vx weakness:** the velocity-blind HL
+couldn't form the delta `g=(command−v)/scale`; feeding it the deployable lin-vel estimate halved the forward
+HL goal error (fwd_hl_vx ~0.106→0.051) and end err_vx (0.120→0.062), act 2.8→1.9. **Directional+velobs now
+beats absolute on every axis** (vx 0.062 vs 0.080, yaw 0.146 vs 0.185, act 1.9 vs 3.9) → the trade-off is
+gone; **directional+velobs is the best A1 config.** yaw HL wall unchanged (only lin-vel fed) — feed yaw-rate
+next. One bias-seed collapse (transient). Decomposition + tables → `A1_findings.md` (#8b velobs verdict).
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 

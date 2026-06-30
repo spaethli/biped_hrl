@@ -168,19 +168,40 @@ LL reach is near-perfect (`ll_err_vx ~0.056`) in BOTH, so the HL is always the w
 | directional (mean of 4) | **0.072** | 0.057 | **0.090** | 0.069 |
 | absolute (mean of 4)    | 0.049 | 0.056 | 0.175 | 0.077 |
 
-**Verdict — neither dominates; HL-side axis trade-off, consistent across clean (Track F) AND noisy:**
-- **Absolute** HL nails vx (hl_err_vx 0.049) → best straight-line tracking (err_vx 0.080 / vy 0.058) but
-  botches yaw (hl_err_yaw 0.175 → err_yaw 0.185).
-- **Directional** HL nails yaw (hl_err_yaw 0.090 → err_yaw 0.163, best of set) and is smoother (act 2.8 vs
-  3.9) but its vx map is looser (err_vx 0.120). Same split as clean true-lean (Track F) and the shaped
-  SOLVED run (`absolute` refined vx 0.14→0.098).
-- **Both modes are deployment-faithful** — the noise enters via the LL's observed state estimate
-  `V*−state_n`, exactly as on the real robot. In delta a constant bias *additionally* cancels in `V*−s` by
-  construction (`V*=v_est(t0)+g`), so delta_bias≈delta_full; in absolute the bias persists in the fixed
-  `V*−v_est`, which is also what the real robot sees. Not a faithfulness edge either way.
-- **Both train reliably under estimator noise** (2/2 clean each, 0 falls, no saturation).
-- **Pick by axis:** absolute for the "mainly straight" headline vx/vy metric; directional for turning and
-  smoothness. Logs `logs/rsl_rl/h1_2_velocity_a1/2026-06-{19,23}_*noise_*`.
+**Initial verdict (pre-velobs) — HL-side axis trade-off:** absolute HL nails vx (hl_err_vx 0.049) → best
+straight-line tracking (err_vx 0.080) but botches yaw (hl_err_yaw 0.175 → err_yaw 0.185); directional HL
+nails yaw (hl_err_yaw 0.090 → err_yaw 0.163, best) and is smoother (act 2.8 vs 3.9) but its vx map is looser
+(err_vx 0.120). Same split as clean true-lean (Track F) and the shaped SOLVED run. Both modes are
+deployment-faithful (noise enters via the LL's observed `V*−state_n`); in delta a constant bias additionally
+cancels in `V*−s` by construction, so delta_bias≈delta_full. **This trade-off was overturned by feeding the
+HL the velocity estimate — see below.**
+
+### HL lin-vel observation moves the directional vx wall (2026-06-29) — directional+velobs WINS
+Directional's looser vx came from a **velocity-blind HL**: the delta target `V*=state+scale·g` needs the
+current velocity to pick `g=(command−v)/scale`, but the HL obs (`policy++command`, `history_length=1`) carries
+no lin-vel. Fix: `hl_obs_vel` feeds the HL the SAME deployable lin-vel estimate the LL conditions on
+(`state_n` vx,vy; clean at eval) → HL obs `policy++command++v_est` (td3.py, RQ2-safe HL-internal change).
+Re-ran the delta matrix with `--agent.hl-obs-vel True` (runs `2026-06-29_*noise_delta_*_velobs_*`, **old
+pure-HIRO intrinsic**, the only agent.yaml delta vs the 06-23 baseline is `hl_obs_vel:true` — a clean A/B):
+
+| run | err_vx | err_vy | err_yaw | act | hl_err_vx | fwd_hl_vx | ll_err_vx |
+|---|---|---|---|---|---|---|---|
+| bias_velobs (s42, model_9900) | 0.057 | 0.056 | 0.137 | 1.98 | 0.039 | 0.037 | 0.043 |
+| full_velobs (s42) | 0.061 | 0.049 | 0.169 | 1.92 | 0.046 | 0.044 | 0.040 |
+| full_velobs (s123) | 0.068 | 0.049 | 0.132 | 1.74 | 0.075 | 0.072 | 0.052 |
+| **mean (3 good)** | **0.062** | **0.051** | 0.146 | **1.9** | **0.053** | ~0.051 | 0.044 |
+| bias_velobs (s123) — COLLAPSE | 0.254 | 0.164 | 0.526 | 7.29 | 0.348 | 0.379 | 0.590 |
+| baseline directional (no velobs) | 0.120 | 0.106 | 0.163 | 2.8 | 0.072 | ~0.106 | 0.057 |
+
+**Read.** The vx HL wall **moved down**: hl_err_vx 0.072→0.053 mean, **fwd_hl_vx ~0.106→0.051 (halved)** in the
+clean pairs (bias_s42 0.099→0.037, full_s42 0.113→0.044) — directional's documented forward weakness. End
+err_vx **halved 0.120→0.062**; act_rate 2.8→1.9 (smoother); LL also tightened (0.057→0.044). yaw HL wall
+**unchanged** (hl_err_yaw ~0.090) — expected, only lin-vel was fed; yaw rate is the remaining HL limiter.
+One collapse (`bias_velobs_s123`: |g| 0.79, the saturation wall) — transient (its s42 sibling is the *best*
+run; bias-only has collapsed once before in #8b). **Updated verdict: directional+velobs beats absolute on
+EVERY axis** (vx 0.062 vs 0.080, yaw 0.146 vs 0.185, act 1.9 vs 3.9) — velocity obs closes the one gap (vx)
+absolute used to win, so the axis trade-off is gone. **Directional+velobs is the best A1 config.** Next lever
+for the residual yaw wall: feed yaw-rate too (clean gyro read, also deployable). Logs `2026-06-29_*velobs*`.
 
 ## Play/replay fix (F0, 2026-06-11) — all pre-fix qualitative replays are void
 `play.py` used `get_inference_policy()` which returned the bare LL actor — nothing fired the

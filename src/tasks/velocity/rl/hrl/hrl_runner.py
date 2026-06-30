@@ -60,6 +60,15 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl_obs_vel: bool = train_cfg.get("hl_obs_vel", False)
     self._hl_vel_dim: int = 2 if self.hl_obs_vel else 0
     self.ll_task_reward_coef: float = train_cfg["ll_task_reward_coef"]
+    # Upper-body deploy-hygiene penalties added to the LL intrinsic (ADR-0002): the env's
+    # variable_posture / action_rate_l2 never reach the goal-only LL, so the A1 arms drift
+    # behind the back and twist. Resolve the arms+waist joint ids once (0 coef -> no-op).
+    self.ll_action_rate_coef: float = train_cfg.get("ll_action_rate_coef", 0.0)
+    self.ll_posture_coef: float = train_cfg.get("ll_posture_coef", 0.0)
+    ub_ids, _ = env.unwrapped.scene["robot"].find_joints(
+      [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"]
+    )
+    self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
     self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
     self.freeze_ll: bool = self.freeze_ll_path is not None
@@ -319,6 +328,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     for it in range(start_it, total_it):
       start = time.time()
       intrinsic_sum = 0.0
+      goal_sum = posture_sum = action_rate_sum = 0.0
       with torch.inference_mode():
         uenv = self.env.unwrapped
         for k in range(self.cfg["num_steps_per_env"]):
@@ -362,11 +372,30 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             dones.to(self.device),
           )
 
-          # Intrinsic (goal-distance) reward is the LL's training signal.
+          # Intrinsic = HIRO goal distance + the ADR-0002 upper-body penalties. The three
+          # pieces are logged separately (each as its signed contribution) so that
+          # intrinsic_reward = goal_reward + posture_pen + action_rate_pen exactly.
           achieved = self.goal_space.extract(uenv)
-          r_lo = self.goal_space.reward(self._target, achieved)
+          r_goal = self.goal_space.reward(self._target, achieved)
+          r_lo = r_goal
           if self.ll_task_reward_coef != 0.0:
             r_lo = r_lo + self.ll_task_reward_coef * task_rew
+          goal_sum += r_goal.mean().item()
+          # Upper-body deploy-hygiene penalties (ADR-0002): keep arms+waist near default
+          # and low-jitter so the deployed LL stops drifting/twisting the arms.
+          if self.ll_posture_coef != 0.0:
+            rd = uenv.scene["robot"].data
+            dev = (rd.joint_pos[:, self._ub_joint_ids]
+                   - rd.default_joint_pos[:, self._ub_joint_ids]).square().mean(dim=1)
+            pose_pen = self.ll_posture_coef * dev
+            r_lo = r_lo - pose_pen
+            posture_sum += -pose_pen.mean().item()  # signed reward contribution (<= 0)
+          if self.ll_action_rate_coef != 0.0:
+            ar = (uenv.action_manager.action
+                  - uenv.action_manager.prev_action).square().sum(dim=1)
+            ar_pen = self.ll_action_rate_coef * ar
+            r_lo = r_lo - ar_pen
+            action_rate_sum += -ar_pen.mean().item()  # signed reward contribution (<= 0)
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.
@@ -403,9 +432,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
       ll_losses = {} if self.freeze_ll else self.alg.update()
       hl_losses = self.hl.update()
+      n_steps = self.cfg["num_steps_per_env"]
       loss_dict = {
         **ll_losses,
-        "intrinsic_reward": intrinsic_sum / self.cfg["num_steps_per_env"],
+        "intrinsic_reward": intrinsic_sum / n_steps,
+        "ll/goal_reward": goal_sum / n_steps,
+        "ll/posture_pen": posture_sum / n_steps,
+        "ll/action_rate_pen": action_rate_sum / n_steps,
         **{f"hl/{k}": v for k, v in hl_losses.items()},
       }
       learn_time = time.time() - start

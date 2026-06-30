@@ -59,3 +59,5 @@ have changed several times in this project.
 ## Notes
 - Deep context for the architecture lives in `doc/hrl/A1_HIRO.md` (design/status) + `.claude/docs/hrl-infra.md` (shared machinery) — consult them for design rationale, but take the *equations* from the code.
 - Keep numbers current: e.g. default goal space is velocity(3)+orientation(3)+height(1)=7, weights velocity 3 / orientation 1 / height 1, `c=8`, γ=0.99, γ_hi=0.99^8, control rate 50 Hz (dt 0.02 s). Re-verify each run since these have changed before.
+- Don't add `.` after every equation
+- Don't make comments between the formulas, context for them is good, but keep it as text.

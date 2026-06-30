@@ -262,6 +262,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     n_envs = uenv.num_envs
     tm = uenv.termination_manager
     has_fell = "fell_over" in tm.active_terms
+    # Upper-body deploy-hygiene metrics (ADR-0002): arms+waist drift-from-default + speed.
+    ub_ids, _ = uenv.scene["robot"].find_joints(
+      [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"])
+    ub_ids = torch.as_tensor(ub_ids, device=robot.joint_pos.device)
 
     # Collect label / structure info for the JSON line.
     bench_meta: dict = {"label": str(resume_path) if resume_path is not None else "unknown"}
@@ -281,6 +285,7 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
+      ub_pose_devs, ub_arm_vels = [], []
       prev_actions: torch.Tensor | None = None
 
       with torch.inference_mode():
@@ -319,6 +324,13 @@ def run_play(task_id: str, cfg: PlayConfig):
             (robot.root_link_pos_w[:, 2] - nom_h).abs().mean().item()
           )
 
+          # 5. Upper-body deploy hygiene: arm+waist drift from default + joint speed.
+          ub_pose_devs.append(
+            (robot.joint_pos[:, ub_ids] - robot.default_joint_pos[:, ub_ids])
+            .square().mean(dim=1).mean().item()
+          )
+          ub_arm_vels.append(robot.joint_vel[:, ub_ids].abs().mean().item())
+
       def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
 
       seed_results.append({
@@ -330,6 +342,8 @@ def run_play(task_id: str, cfg: PlayConfig):
         "action_rate": _m(action_rates) if action_rates else float("nan"),
         "orient_dev":  _m(orient_devs),
         "height_dev":  _m(height_devs),
+        "ub_pose_dev": _m(ub_pose_devs),
+        "ub_arm_vel":  _m(ub_arm_vels),
       })
 
     # Aggregate across seeds.
@@ -352,6 +366,8 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Smoothness act_rate : {_fmt('action_rate')}")
     print(f"  Stability orient_dev: {_fmt('orient_dev')}")
     print(f"  Stability height_dev: {_fmt('height_dev')}")
+    print(f"  UpperBody pose_dev  : {_fmt('ub_pose_dev')}")
+    print(f"  UpperBody arm_vel   : {_fmt('ub_arm_vel')}")
     print("=" * 58)
     print()
 
@@ -398,6 +414,8 @@ def run_play(task_id: str, cfg: PlayConfig):
       with torch.inference_mode():
         for _ in range(n_windows):
           s_fire = gs.extract(uenv)                          # [B, D]
+          if getattr(runner, "hl_obs_vel", False):
+            obs["hl_vel"] = s_fire[:, 0:2]  # clean lin-vel for the noise-free probe
           v_star = runner.hl.act_inference(uenv, obs, s_fire)  # [B, D]
           scale = gs.scale(uenv)                             # [D]
           g_raw = ((v_star - s_fire) / scale).abs()         # [B, D] recovered |g|

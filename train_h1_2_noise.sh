@@ -30,7 +30,8 @@
 #   delta_full  directional target, + drift + lag      hrl_runner _target_obs); residual = drift/lag
 #
 # Submit knobs (env vars): VARIANTS (default 'delta_bias delta_full'), SEEDS (default '42 123'),
-#   NUM_ENVS, MAX_ITER, POLISHED_A0, MODE (seq chains all jobs on one GPU | "" concurrent).
+#   NUM_ENVS, MAX_ITER, POLISHED_A0, MODE (seq chains all jobs on one GPU | "" concurrent),
+#   HL_OBS_VEL (default True; feeds HL the base lin-vel estimate, tags run '_velobs').
 # Noise magnitudes (env vars, optional, override the cfg defaults):
 #   BIAS_RANGE (0.10 m/s)  DRIFT_STD (0.01)  DRIFT_DECAY (0.99)  LAG_STEPS (3)
 
@@ -43,6 +44,8 @@ BIAS_RANGE=${BIAS_RANGE:-0.10}
 DRIFT_STD=${DRIFT_STD:-0.01}
 DRIFT_DECAY=${DRIFT_DECAY:-0.99}
 LAG_STEPS=${LAG_STEPS:-3}
+HL_OBS_VEL=${HL_OBS_VEL:-True}   # feed HL the deployable base lin-vel (vx,vy) so the
+                                 # directional HL computes g=(cmd-v)/scale; set False to ablate
 
 # ============================ SUBMIT MODE ============================
 # Entered when VARIANT is unset (i.e. invoked directly on the login node).
@@ -109,13 +112,17 @@ esac
 # Solved A1 HL config (off-policy TD3 + HIRO + tracking reward); target map per variant.
 A1_HL="--agent.hl-algorithm td3 --agent.relabeling hiro --agent.hl-target-mode ${TGT} --agent.hl-reward-mode tracking"
 SEED=${SEED:-42}
+# Feed the directional HL the deployable base lin-vel (vx,vy); tag the run so velobs vs
+# no-velobs deltas are distinguishable in the logs.
+VEL_FLAG=""; VEL_TAG=""
+if [[ "${HL_OBS_VEL}" == "True" ]]; then VEL_FLAG="--agent.hl-obs-vel True"; VEL_TAG="_velobs"; fi
 
 echo "[noise] VARIANT=$VARIANT TGT=$TGT SEED=$SEED NUM_ENVS=$NUM_ENVS MAX_ITER=$MAX_ITER warm-start=$POLISHED_A0"
 
 python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE \
   --agent.warm-start-path "$POLISHED_A0" \
   --agent.seed ${SEED} \
-  --agent.run-name noise_${VARIANT}_s${SEED}
+  --agent.run-name noise_${VARIANT}${VEL_TAG}_s${SEED}
 
 # Auto-sync after training
 wandb sync --sync-all

@@ -209,11 +209,13 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   hl_target_mode: Literal["delta", "absolute"] = "delta"
   """How the learned HL maps its bounded goal g to the window target V* (ppo/td3 only;
   oracle ignores it — it always sets V*=command absolutely). ``delta`` (HIRO default):
-  ``V*=state+scale*g`` — a STATE-DEPENDENT target the probe (2026-06-16) showed the HL
-  fails to learn (it saturates |g|->1). ``absolute``: ``V*=center+scale*g`` with
-  ``center``=command-range midpoint (velocity) / nominal (orient,height) — a STATIC
-  command->g map (g spans the command range), the oracle's structure that the LL already
-  tracks to 0.05 m/s. The LL is unchanged either way (still observes V*-s_i)."""
+  ``V*=state+scale*g`` — a STATE-DEPENDENT target. (NOTE: the old "delta makes the HL
+  saturate |g|->1" claim was a *pre-tracking-reward* artifact — with ``hl_reward_mode=
+  tracking`` delta is unsaturated and tracks well; ``tracking`` is the primary lever, NOT
+  this flag. Correction 2026-06-24, see ``doc/hrl/A1_findings.md``.) ``absolute``:
+  ``V*=center+scale*g`` with ``center``=command-range midpoint (velocity) / nominal
+  (orient,height) — a STATIC command->g map; only *refines* delta+tracking (~0.14->0.098).
+  The LL is unchanged either way (still observes V*-s_i)."""
   hl_obs_vel: bool = False
   """Feed the HL the deployable base lin-vel estimate (vx,vy) as extra obs (td3 only).
   Off (default) -> HL input is ``policy ++ command`` (byte-identical; RQ2-safe). On ->
@@ -228,6 +230,15 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``0.99**8`` silently mismatched any c != 8). Set explicitly to override."""
   ll_task_reward_coef: float = 0.0
   """Blend of task reward into the LL intrinsic reward. 0 = pure HIRO."""
+  ll_action_rate_coef: float = 0.05
+  """Weight on the whole-body action-rate penalty added to the LL intrinsic (ADR-0002).
+  Matches A0's ``action_rate_l2`` weight (0.05); the env term never reaches the goal-only
+  LL otherwise. 0 disables (clean A1-baseline ablation)."""
+  ll_posture_coef: float = 0.5
+  """Weight on the arms+waist deviation-from-default penalty added to the LL intrinsic
+  (ADR-0002), keeping the upper body deployable (no behind-the-back drift / wrist twist).
+  No A0 analog (A0 uses the positive exp ``variable_posture``); 0.5 is a starting value to
+  tune up until the arms settle. 0 disables."""
   warm_start_path: str | None = None
   """Path to an A0 checkpoint to warm-start the LL from. The shared proprio columns
   (and all deeper layers / output head / std) are copied; the goal input columns are

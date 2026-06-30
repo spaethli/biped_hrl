@@ -26,7 +26,11 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2` — per-window HL goal error
   vs LL reach error + `|g|` saturation + fwd/bwd vx split + `[GOALDIAG] {json}`. Verdict
-  (2026-06-16): LL competent, wall = learned HL saturated goals (`doc/hrl/A1_goal_achievability_probe.md`).
+  chain: LL competent; the original `|g|→1` saturation was a **pre-tracking-reward**
+  failure, **cured by `hl_reward_mode=tracking`** (the primary lever; `absolute` only
+  refines, NOT required). **Correction 2026-06-24: do NOT cite saturation against `delta`** —
+  true-lean delta+tracking runs are unsaturated. Authoritative: `doc/hrl/A1_findings.md`
+  (Track F + "fix chain").
 
 ## Task IDs
 

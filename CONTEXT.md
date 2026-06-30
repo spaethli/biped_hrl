@@ -50,7 +50,55 @@ Wide-DR extrinsic (quasi-static per episode).
 _Avoid_: observation delay (sensor-pipeline latency — a separate thing).
 
 **Goal** (`V*`):
-The high level's target in a velocity/orientation/height subspace that the low level is
-rewarded for reaching. The hierarchy's only task-intent channel to the LL (the velocity
-command is removed from the LL obs).
-_Avoid_: command, setpoint (the *command* is the user/eval twist, a different thing).
+The high level's *state target* in a velocity/orientation/height subspace that the low
+level is rewarded for *reaching* (HIRO L2 distance). One of two HL->LL intent channels;
+the other is the _Gait reference_. The velocity command is removed from the LL obs, so
+these two channels carry the LL's only task intent.
+_Avoid_: command, setpoint (the *command* is the user/eval twist, a different thing);
+"the only HL->LL channel" (the gait reference is a second, non-L2 channel since A1a).
+
+**Gait reference** (cadence):
+The high level's commanded step *period*, the second HL->LL channel (A1a onward). Unlike
+the _Goal_, it is not a state target reached by L2 distance: the low level *entrains* to
+it via the open-loop phase clock and the `feet_gait` reward. Deploy-clean, since the phase
+is a function of the commanded period and time, and the entrainment reward is sim-only.
+This is the channel the A3 gait library's footfall pattern plugs into.
+_Avoid_: goal, V* (those are the L2-reached state targets); step length (the reciprocal of
+cadence at a fixed speed, v = f*L, not an independent channel).
+
+**Cost of transport** (`CoT`):
+The high level's efficiency objective (A1a onward): window mechanical energy / window
+distance, gated to commanded motion (`command_threshold`). Added (negative) to the HL
+reward *only*, so the low level stays a pure tracker. That decoupling (efficiency at the
+HL, tracking at the LL) is what justifies the hierarchy against a flat A0+energy baseline.
+The HL trims CoT through the _Gait reference_ at the commanded velocity.
+_Avoid_: energy, power (CoT is energy normalized by distance; raw energy has a stand-still
+attractor, the failure that killed `hl_reward_mode=task`); "LL energy term" (CoT never
+enters the LL reward).
+
+**Intrinsic reward**:
+The A1 low level's *training* signal: the goal-distance reward `-Σ_c w_c ‖V*_c - s_c‖`.
+The only thing the LL learns on (`ll_task_reward_coef = 0`). May also carry privileged
+upper-body regularization (see _Posture penalty_) and, from A1a, a gait-entrainment term
+(`feet_gait` keyed to the _Gait reference_); it is not restricted to canonical HIRO L2.
+_Avoid_: task reward (that is the A0-comparable env reward, not what the LL trains on).
+
+**Task reward**:
+The shared A0 env reward (velocity tracking + posture + penalties). For A1 it is logged
+and accumulated for the high level, but it does **not** train the LL.
+_Avoid_: intrinsic reward (the LL's actual signal).
+
+**Posture penalty**:
+A negative upper-body regularizer added to the A1 LL _intrinsic reward_ so the LL keeps
+the arms near default and low-jitter (the env's `variable_posture`/`action_rate_l2`
+never reach the LL through the goal-only routing). The deploy-hygiene fix for A1's
+uncontrolled arm swing.
+_Avoid_: pose reward (`variable_posture` is a positive exp term; the LL uses a negative
+deviation penalty).
+
+**Suicide attractor**:
+The failure where an always-negative reward makes early termination optimal (stop
+accruing negative reward). The reason A1 uses `fell_over = time_out` (a truncation that
+bootstraps) instead of A0's true terminal. An all-positive (exp) intrinsic would remove
+it — the motivation for the planned exp follow-up.
+_Avoid_: collapse (broader — also covers std blowup / coverage collapse).
