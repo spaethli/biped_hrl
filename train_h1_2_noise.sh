@@ -119,10 +119,11 @@ if [[ "${HL_OBS_VEL}" == "True" ]]; then VEL_FLAG="--agent.hl-obs-vel True"; VEL
 
 echo "[noise] VARIANT=$VARIANT TGT=$TGT SEED=$SEED NUM_ENVS=$NUM_ENVS MAX_ITER=$MAX_ITER warm-start=$POLISHED_A0"
 
-python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE \
+python scripts/train.py Unitree-H1_2-Flat-A1 $COMMON $A1_HL $NOISE $VEL_FLAG\
   --agent.warm-start-path "$POLISHED_A0" \
   --agent.seed ${SEED} \
-  --agent.run-name noise_${VARIANT}${VEL_TAG}_s${SEED}
+  --agent.run-name noise_${VARIANT}${VEL_TAG}_s${SEED} \
+  --agent.ll-action-rate-coef 0.0 --agent.ll-posture-coef 0.0 
 
 # Auto-sync after training
 wandb sync --sync-all

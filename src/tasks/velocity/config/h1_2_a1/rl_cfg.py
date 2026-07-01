@@ -230,7 +230,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``0.99**8`` silently mismatched any c != 8). Set explicitly to override."""
   ll_task_reward_coef: float = 0.0
   """Blend of task reward into the LL intrinsic reward. 0 = pure HIRO."""
-  ll_action_rate_coef: float = 0.05
+  ll_action_rate_coef: float = 0.02
   """Weight on the whole-body action-rate penalty added to the LL intrinsic (ADR-0002).
   Matches A0's ``action_rate_l2`` weight (0.05); the env term never reaches the goal-only
   LL otherwise. 0 disables (clean A1-baseline ablation)."""
