@@ -153,6 +153,8 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as a
   hyperparameter: hold it fixed within a comparison set; use ≥2 seeds.
 - **Always det-eval (benchmark) before committing to a fix** — training-metric asymmetries
-  mislead (F4 velocity-obs was built on one and falsified in a minute by an A/B det-eval).
+  mislead. Corollary: a det-eval verdict is **regime-specific** — F4 velocity-obs benched as
+  a no-op under `absolute`, but is a large linear-tracking win under `delta`; re-test a
+  "no-op" when the regime changes.
 - Launch via the activated env + `python scripts/train.py` directly — **NOT `conda run`**
   (buffers output, breaks live wandb).

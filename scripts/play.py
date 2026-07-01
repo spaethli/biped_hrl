@@ -42,6 +42,9 @@ class PlayConfig:
   |V* - achieved| (does the LL deliver the target the HL set?). Also reports raw goal
   |g| / saturation and a forward-vs-backward vx split (the observed directional bias).
   Sibling to ``eval_steps``; reuses ``eval_seeds``. Requires a hierarchical runner."""
+  eval_cadence_period: float | None = None
+  """A1a: pin the HL-commanded stride period (s) during eval, for the CoT(period) sweep
+  (requires an hl_cadence runner). None -> the runner's mid-range default."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -252,6 +255,8 @@ def run_play(task_id: str, cfg: PlayConfig):
       env.close()
       return
 
+    if cfg.eval_cadence_period is not None and hasattr(runner, "eval_cadence_period"):
+      runner.eval_cadence_period = cfg.eval_cadence_period
     policy = runner.get_inference_policy(device=device)
 
   # Headless deterministic benchmark: roll out `eval_steps` steps x `eval_seeds` seeds.
@@ -266,6 +271,13 @@ def run_play(task_id: str, cfg: PlayConfig):
     ub_ids, _ = uenv.scene["robot"].find_joints(
       [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"])
     ub_ids = torch.as_tensor(ub_ids, device=robot.joint_pos.device)
+    # CoT / cadence metrics (A1a M0): mechanical power, cost of transport, achieved stride period.
+    try:
+      contact_sensor = uenv.scene["feet_ground_contact"]
+    except KeyError:
+      contact_sensor = None
+    step_dt = uenv.step_dt
+    MASS_G = 75.0 * 9.81  # H1-2 ~75 kg; dimensionless CoT = energy / (m g distance)
 
     # Collect label / structure info for the JSON line.
     bench_meta: dict = {"label": str(resume_path) if resume_path is not None else "unknown"}
@@ -285,8 +297,11 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
-      ub_pose_devs, ub_arm_vels = [], []
+      ub_pose_devs, ub_arm_vels, powers = [], [], []
       prev_actions: torch.Tensor | None = None
+      energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
+      prev_contact: torch.Tensor | None = None
+      n_feet = 0
 
       with torch.inference_mode():
         for _ in range(cfg.eval_steps):
@@ -331,6 +346,21 @@ def run_play(task_id: str, cfg: PlayConfig):
           )
           ub_arm_vels.append(robot.joint_vel[:, ub_ids].abs().mean().item())
 
+          # 6. Mechanical power + cost of transport (gated by commanded linear speed > 0.1).
+          power = (robot.qfrc_actuator * robot.joint_vel).abs().sum(dim=1)  # [B] watts
+          powers.append(power.mean().item())
+          lin_speed = robot.root_link_lin_vel_b[:, :2].norm(dim=-1)  # [B] achieved m/s
+          eng = (cmd[:, :2].norm(dim=-1) > 0.1).float()  # commanded-motion gate
+          energy_eng += (power * eng).sum().item() * step_dt
+          dist_eng += (lin_speed * eng).sum().item() * step_dt
+          # 7. Achieved stride period from footfall rising edges (same-foot touchdown interval).
+          if contact_sensor is not None:
+            is_contact = contact_sensor.data.current_contact_time > 0  # [B, n_feet]
+            n_feet = is_contact.shape[1]
+            if prev_contact is not None:
+              td_count += (is_contact & ~prev_contact).float().sum().item()
+            prev_contact = is_contact.clone()
+
       def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
 
       seed_results.append({
@@ -344,6 +374,10 @@ def run_play(task_id: str, cfg: PlayConfig):
         "height_dev":  _m(height_devs),
         "ub_pose_dev": _m(ub_pose_devs),
         "ub_arm_vel":  _m(ub_arm_vels),
+        "mech_power_w": _m(powers) if powers else float("nan"),
+        "cot":          energy_eng / (dist_eng * MASS_G + 1e-6),
+        "stride_period_s": (cfg.eval_steps * step_dt)
+                           / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
       })
 
     # Aggregate across seeds.
@@ -368,6 +402,9 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Stability height_dev: {_fmt('height_dev')}")
     print(f"  UpperBody pose_dev  : {_fmt('ub_pose_dev')}")
     print(f"  UpperBody arm_vel   : {_fmt('ub_arm_vel')}")
+    print(f"  Energy    power_W   : {_fmt('mech_power_w')}")
+    print(f"  Energy    CoT (norm): {_fmt('cot')}")
+    print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print("=" * 58)
     print()
 

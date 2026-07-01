@@ -345,10 +345,11 @@ axis trade-off held in clean true-lean *and* under noise: **absolute** better vx
 poorly), **directional** better yaw + smoother (HL maps yaw well, vx loosely); LL near-perfect both, so the
 HL is always the limiter. **Then `hl_obs_vel` removed directional's vx weakness:** the velocity-blind HL
 couldn't form the delta `g=(command−v)/scale`; feeding it the deployable lin-vel estimate halved the forward
-HL goal error (fwd_hl_vx ~0.106→0.051) and end err_vx (0.120→0.062), act 2.8→1.9. **Directional+velobs now
-beats absolute on every axis** (vx 0.062 vs 0.080, yaw 0.146 vs 0.185, act 1.9 vs 3.9) → the trade-off is
+HL goal error (fwd_hl_vx ~0.106→0.051) and end err_vx (0.120→0.063), act 2.8→2.3. **Directional+velobs now
+beats absolute on every axis** (vx 0.063 vs 0.080, yaw 0.161 vs 0.185, act 2.3 vs 3.9) → the trade-off is
 gone; **directional+velobs is the best A1 config.** yaw HL wall unchanged (only lin-vel fed) — feed yaw-rate
-next. One bias-seed collapse (transient). Decomposition + tables → `A1_findings.md` (#8b velobs verdict).
+next. All 4 velobs cells clean across 2 seeds (the one bias_s123 collapse reran clean → transient).
+Decomposition + tables → `A1_findings.md` (#8b velobs verdict).
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 

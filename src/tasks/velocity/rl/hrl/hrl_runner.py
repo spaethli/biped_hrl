@@ -65,6 +65,19 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # behind the back and twist. Resolve the arms+waist joint ids once (0 coef -> no-op).
     self.ll_action_rate_coef: float = train_cfg.get("ll_action_rate_coef", 0.0)
     self.ll_posture_coef: float = train_cfg.get("ll_posture_coef", 0.0)
+    # A1a (ADR-0004): HL gait-cadence channel + cost-of-transport HL objective.
+    self.hl_cadence: bool = train_cfg.get("hl_cadence", False)
+    self.cadence_period_range = tuple(train_cfg.get("cadence_period_range", (0.5, 1.4)))
+    self.ll_cadence_coef: float = train_cfg.get("ll_cadence_coef", 0.0)
+    self.hl_cot_coef: float = train_cfg.get("hl_cot_coef", 0.0)
+    # Eval-only: pin the commanded stride period (for the CoT(period) sweep). None ->
+    # mid-range constant (oracle/random-trained LL) or, later, the learned HL's action (S1c).
+    self.eval_cadence_period: float | None = None
+    # Gait params for the LL-intrinsic feet_gait term (match A0's foot_gait; period is
+    # ignored when keyed to the commanded phase via use_commanded_phase=True).
+    self._gait_params = dict(period=0.6, offset=[0.0, 0.5], threshold=0.56,
+                             command_threshold=0.1, command_name="twist",
+                             sensor_name="feet_ground_contact")
     ub_ids, _ = env.unwrapped.scene["robot"].find_joints(
       [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"]
     )
@@ -90,6 +103,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Initialise the goal buffer BEFORE the base builds models, so the env's `goal`
     # observation group resolves to the right dimension at construction time.
     init_goal_buffer(env.unwrapped, self.goal_dim, device)
+    # A1a: per-env commanded stride period + accumulated gait phase (read by mdp.phase /
+    # feet_gait). Created only when hl_cadence -> current A1 keeps the fixed-period clock.
+    if self.hl_cadence:
+      lo, hi = self.cadence_period_range
+      env.unwrapped.hrl_period = torch.empty(env.num_envs, device=device).uniform_(lo, hi)
+      env.unwrapped.hrl_phase = torch.zeros(env.num_envs, device=device)
 
     # Base builds self.alg = low-level PPO (using top-level actor/critic/algorithm/
     # obs_groups, which describe the LL) plus self.logger.
@@ -288,7 +307,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         if self.hl_obs_vel:
           obs["hl_vel"] = state[:, 0:2]
         target = self.hl.act_inference(uenv, obs, state)
+        # A1a: command the stride period for this window (eval pins it for the CoT(period)
+        # sweep; else the mid-range constant). The LL entrains via the phase clock fed to
+        # mdp.phase / feet_gait.
+        if self.hl_cadence:
+          lo, hi = self.cadence_period_range
+          p = self.eval_cadence_period if self.eval_cadence_period is not None else (lo + hi) / 2.0
+          uenv.hrl_period.fill_(p)
       step += 1
+      if self.hl_cadence:
+        uenv.hrl_phase = (uenv.hrl_phase + uenv.step_dt / uenv.hrl_period) % 1.0
       delta = target - state
       uenv.hrl_goal = delta
       obs["goal"] = delta
@@ -328,7 +356,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     for it in range(start_it, total_it):
       start = time.time()
       intrinsic_sum = 0.0
-      goal_sum = posture_sum = action_rate_sum = 0.0
+      goal_sum = posture_sum = action_rate_sum = cadence_sum = 0.0
+      cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       with torch.inference_mode():
         uenv = self.env.unwrapped
         for k in range(self.cfg["num_steps_per_env"]):
@@ -365,6 +394,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # Record the per-step LL trace (proprio, goal state, action) for HIRO relabeling
           # (no-op unless the HL is a relabeling TD3). Pre-step values = what the LL saw.
           self.hl.record_step(obs["policy"], state, actions)
+          # A1a: advance the commanded gait phase one control step so env.step's phase obs
+          # reflects the current cadence clock.
+          if self.hl_cadence:
+            uenv.hrl_phase = (uenv.hrl_phase + uenv.step_dt / uenv.hrl_period) % 1.0
           obs, task_rew, dones, extras = self.env.step(actions.to(self.env.device))
           obs, task_rew, dones = (
             obs.to(self.device),
@@ -387,15 +420,33 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             rd = uenv.scene["robot"].data
             dev = (rd.joint_pos[:, self._ub_joint_ids]
                    - rd.default_joint_pos[:, self._ub_joint_ids]).square().mean(dim=1)
+            # Clamp per-env deviation: unbounded L2 otherwise lets a rare sim blow-up
+            # (joints -> huge) spike this to ~-5e5 and detonate the LL PPO update in one
+            # step (2026-06-30 crash @ it9624). Healthy dev ~0.36 rad^2; 9.0 = all
+            # upper-body joints ~pi off default, so this only bites physical blow-ups.
+            dev = dev.clamp(max=9.0)
             pose_pen = self.ll_posture_coef * dev
             r_lo = r_lo - pose_pen
             posture_sum += -pose_pen.mean().item()  # signed reward contribution (<= 0)
           if self.ll_action_rate_coef != 0.0:
+            # Same catastrophe bound as posture (healthy ar ~265; 4000 = deep headroom).
             ar = (uenv.action_manager.action
-                  - uenv.action_manager.prev_action).square().sum(dim=1)
+                  - uenv.action_manager.prev_action).square().sum(dim=1).clamp(max=4000.0)
             ar_pen = self.ll_action_rate_coef * ar
             r_lo = r_lo - ar_pen
             action_rate_sum += -ar_pen.mean().item()  # signed reward contribution (<= 0)
+          # A1a cadence entrainment (ADR-0004): reward the LL for matching the contact
+          # schedule of the HL-commanded stride period. Positive feet_gait term.
+          if self.hl_cadence and self.ll_cadence_coef != 0.0:
+            cad = mdp_rewards.feet_gait(uenv, use_commanded_phase=True, **self._gait_params)
+            r_lo = r_lo + self.ll_cadence_coef * cad
+            cadence_sum += (self.ll_cadence_coef * cad).mean().item()
+          # A1a: cost-of-transport training metric (dimensionless; gated to commanded motion).
+          rd_ = uenv.scene["robot"].data
+          _pw = (rd_.qfrc_actuator * rd_.joint_vel).abs().sum(dim=1)
+          _eng = (uenv.command_manager.get_command("twist")[:, :2].norm(dim=-1) > 0.1).float()
+          cot_energy += (_pw * _eng).sum().item() * uenv.step_dt
+          cot_dist += (rd_.root_link_lin_vel_b[:, :2].norm(dim=-1) * _eng).sum().item() * uenv.step_dt
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.
@@ -424,6 +475,15 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           intrinsic_sum += r_lo.mean().item()
           self.logger.process_env_step(task_rew, dones, extras)
           prev_dones = dones  # envs that reset -> resample estimator bias next step
+          if self.hl_cadence:
+            # Per-episode cadence: one held commanded stride period per episode (resampled on
+            # reset, phase reset too). Per-window resampling (< 1 stride) is unfollowable.
+            d = dones.bool()
+            uenv.hrl_phase = torch.where(d, torch.zeros_like(uenv.hrl_phase), uenv.hrl_phase)
+            if d.any():
+              lo, hi = self.cadence_period_range
+              new_p = torch.empty_like(uenv.hrl_period).uniform_(lo, hi)
+              uenv.hrl_period = torch.where(d, new_p, uenv.hrl_period)
 
         collect_time = time.time() - start
         start = time.time()
@@ -439,6 +499,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/goal_reward": goal_sum / n_steps,
         "ll/posture_pen": posture_sum / n_steps,
         "ll/action_rate_pen": action_rate_sum / n_steps,
+        "ll/cadence_rew": cadence_sum / n_steps,
+        "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
         **{f"hl/{k}": v for k, v in hl_losses.items()},
       }
       learn_time = time.time() - start

@@ -31,6 +31,9 @@ comparison-cleanliness rule, and reproducibility rules live in
 - **Hierarchy-benefit roadmap** (ideas backlog answering the supervisors' "what does the
   hierarchy buy?" critique — richer HL job, smooth/safe reward terms, real-robot feasibility,
   LL reward restructure; parallel tracks) → `doc/hrl/hierarchy_benefit_roadmap.md`.
+- **A1a HL-enrichment plan** (the chosen Track-A answer: HL minimizes cost-of-transport via a
+  commanded gait cadence the flat command can't express; staged S0–S6) →
+  `doc/hrl/A1a_plan.md` (design rationale: `docs/adr/0004-a1a-energy-cadence-hl-enrichment.md`).
 - Architecture matrix, RQ2 rule, reproducibility → `.claude/docs/experiment-design.md`.
 - File paths / class map / obs dims → `.claude/docs/codebase-map.md`.
 - Cluster (SLURM) → `.claude/docs/cluster.md`. C++ deploy/ONNX → `.claude/docs/deployment.md`.

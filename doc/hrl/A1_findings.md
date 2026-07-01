@@ -12,14 +12,15 @@ deterministic benchmark, not training-time stochastic metrics.
 | Naive on-policy `hl=ppo` (M3) | FAILS to track | ~3 HL transitions/env/iter (credit-assignment thin) + tracking term swamped by penalties; co-training oscillates track-and-fall ↔ survive-and-don't-track. Motivates off-policy TD3. |
 | TD3 F1 random warmup + F2 split LR | FAILED (worse) | 100k random-coverage transitions evicted from the 500k ring within ~50 iters → coverage is transient. Revealed the deeper bug: a **co-training spiral**, not buffer coverage. |
 | TD3 F3 freeze-LL (spiral impossible) | clean NEGATIVE | HL *still* failed to track (err_xy ~2.5) → the spiral was never the core problem. Isolated that the HL itself wasn't learning the map. |
-| TD3 F4 add `base_lin_vel` to HL obs | NO-OP, reverted | A/B det-eval: velocity-obs HL ≈ blind HL. Velocity-blindness FALSIFIED; also a privileged input (needs on-robot estimate) for zero gain. **Lesson: always det-eval before committing to a fix** — built on a training-metric asymmetry that an A/B would have killed in a minute. |
+| TD3 F4 `base_lin_vel`→HL obs ("velobs", `hl_obs_vel`) | no-op under `absolute`; **BIG linear-tracking win under `delta`** | Original F4 A/B (absolute/pre-tracking) showed velocity-obs HL ≈ blind → looked like a no-op. **Correction (2026-06-30): NOT a no-op for directional (`delta`) goals** — velobs improves linear tracking a lot, replicated across runs (err_vx 0.137→0.062 at pose0.5; see row below + `a1_estimator_noise_8b`). The directional target `V*=state+scale·g` needs current v to set `g=(command−v)/scale`, so a velocity-blind HL under-reaches. Still privileged (needs on-robot vx,vy estimate) → deployability-gated. **Lesson: det-eval every fix, AND re-test a "no-op" when the regime changes (`absolute`→`delta`).** |
 | HIRO relabel + `c`-sweep {4,8,12} (M5) | relabel helps vx/vy; cadence is NOT the limiter | Finer `c` (more HL transitions) didn't improve tracking → "too few HL steps" unsupported. Only clean monotonic effect: coarser `c` → smoother + better height. Wall is STRUCTURAL. (Caveat: 1 seed/c.) |
 | `absolute`-target HL | fixed LL saturation, **moved wall to HL** | `|g|` 0.84→0.16, LL reach 0.61→0.11 (near oracle). But HL then outputs `g≈0` regardless of command (refuses forward) → end err didn't improve. Isolated the 2nd failure. |
 | `tracking` HL reward (+ absolute) | **SOLVED** | Penalty-dominated task reward was making value-max HL = `g≈0`. Tracking-only HL objective → HL asks for the command. A0-level tracking. |
 | `tracking` reward alone, delta (ablation) | absolute NOT required | delta+tracking 0.14/0.11/0.20 → `tracking` is the primary lever; `absolute` only refines it (0.14→0.098). |
 | `hl=ppo` + absolute + tracking (± std cap) | FAILED both | No cap: `|g|`→13, yaw 1.40. Std cap (1e-3,1.0): still `|g|`→4 + falls (ep_len 9.6) — the cap bounds σ, not the unbounded Gaussian **mean**. PPO can't cleanly bound `g` (rsl_rl has no squashed density); TD3's deterministic `tanh` is load-bearing. |
 | Remove warm-start (control) | catastrophic | `|g|` pins 1.0 (100% sat), action_rate 13.5 vs A0 0.66. Confirms warm-start load-bearing from both directions. |
-| Deploy goal-state noise (sim, `hrl.state_noise`; learned `absolute` TD3) | stands but **twitchy, worst standing still** | Clean-trained LL isn't robust to estimator noise on its velocity/height goal feedback (cmd=0 → goal=−noise → phantom corrections; HL input isn't noised). **Sim2real fix: train LL+HL with state-noise DR** on the goal-state obs. Adding measured `imu_lin_vel` as a direct obs is an option but privileged + F4 showed base_lin_vel in HL obs was a no-op for *clean* tracking — revisit only as a noise-robustness lever. Deploy mechanism + knob → `.claude/docs/deployment.md`. |
+| Deploy goal-state noise (sim, `hrl.state_noise`; learned `absolute` TD3) | stands but **twitchy, worst standing still** | Clean-trained LL isn't robust to estimator noise on its velocity/height goal feedback (cmd=0 → goal=−noise → phantom corrections; HL input isn't noised). **Sim2real fix: train LL+HL with state-noise DR** on the goal-state obs. Adding measured `imu_lin_vel` as a direct obs is privileged but — unlike F4's *absolute*-mode no-op — base_lin_vel in the HL obs (`velobs`) is a large clean-tracking win under `delta` (F4 row). Deploy mechanism + knob → `.claude/docs/deployment.md`. |
+| Upper-body posture penalty (ADR-0002) + velobs sweep (2026-06-30, seed-123; `*_pose0p5/pose1p0/velobs_*_s123`) | **arms tamed ~9×; posture 0.5 = sweet spot; `velobs+pose0.5` = keeper** | A1 LL never saw the env `variable_posture`/`action_rate_l2` (goal-only routing) → arms drift behind back / twist wrists (undeployable). Fix: add negative arms+waist deviation (`ll_posture_coef`) + all-joint action-rate (`ll_action_rate_coef`) to the LL **intrinsic** (`hrl_runner.py:377`). `ar=0.05` climbs `fell_over`→165; **`ar=0.02` → `fell_over`≈0** (the keeper). Benchmark (64×600×2 seeds, model_10000): `velobs_pose0p5_s123` **ub_pose_dev 0.021** (old baseline 0.180, A0 0.0004), **err_vx 0.062**, orient 0.047, CoT 0.76 — best A1 all-round. Posture **1.0 NOT better** (velobs: pose_dev 0.030 > 0.5's 0.021; no-velobs: orient/height →0.14). `velobs` (hl_obs_vel) = clean tracking+arm win (err_vx 0.137→0.062 at pose0.5). Seed s42-vs-s123: **arms replicate, the tracking "gain" was seed luck** (err_vx 0.083 vs 0.137). Still above A0's absolute arm band. **Crash+fix (2026-07-01): penalties were unbounded L2** — `bias_velobs_pose0p5_s123` converged then crashed at it9624 (rare sim blow-up → `posture_pen` spiked −0.18→**−522090** in 3 iters → detonated the LL PPO update → ep_len 980→63, unrecoverable, bench err_vx 1.38). NOT noise-specific (3 other pose0p5 runs ran 10k clean; full-noise one only reached it2620, healthy). Fix `hrl_runner.py`: `dev.clamp(max=9.0)` (posture) + `ar.clamp(max=4000.0)` (action-rate) — catastrophe-headroom, normal training byte-unaffected (healthy dev ~0.36). Rerun the failed pose0p5 runs. |
 | Track F lean A0/A1 (semi→true-lean, 2026-06-23; `*_lean_a0_*`/`*_lean_a1_*` runs) | smoothness "cost" was a **reward artifact**; **directional goals best** | Semi-lean (A0 still jerk-penalized, A1 LL never is) made A1 look ~5× jerkier; **true-lean** (action_rate/joint_acc zeroed both sides) flips it — flat A0 act_rate 20–35, A1-from-polished ~2.1–2.5 (~10× smoother). Caveat: **init dominates regardless of goal mode** (`a1_from_lean`/`a1_from_lean_delta` both inherit the wild `a0_scratch`, act ~22). Directional(delta)+tracking from polished → **near-perfect LL** (reach err vx 0.026–0.048) so the **HL becomes the wall** (end err ≈ HL err); best yaw (0.124–0.128) but large same-config spread (vx 0.091 vs 0.143). **Correction (2026-06-24):** this directional HL wall is **NOT saturation** — `|g|` is small/unsaturated (`gabs_vx` 0.065, `sat=0.000`); the HL **under-reaches** (HL err vx 0.124 with tiny `|g|` = asks for too little). The `|g|→1` saturation of the original `delta baseline (relabel)` row above was a *pre-tracking-reward* failure, cured by `tracking` and absent in all true-lean delta runs → don't cite saturation against delta. Full tables → `hierarchy_benefit_roadmap.md` Track F Results. |
 
 ## Milestones
@@ -34,6 +35,10 @@ Oracle emits the command as `V*`; the warm-started LL tracks it and **out-tracks
 Forced three fixes that became permanent: **A0 warm-start** (gap-aware partial copy),
 **`fell_over=time_out`** (A1 only — kills the suicide attractor from the negative
 goal-distance reward), **`entropy_coef=0.005`** (0.01 lets std blow up to ~2 and collapse).
+Also **discovered here**: the LL-intrinsic **action-rate penalty must be
+`ll_action_rate_coef=0.02`, NOT A0's 0.05** — matching A0's 0.05 over-penalizes the goal-only
+LL and spikes `fell_over` (~165); 0.02 gives `fell_over`≈0 (later re-confirmed in the
+2026-06-30 posture/velobs sweep, ledger row above).
 Velocity-only(3) vs default(7) ablation (full 10k each): survival identical; **7-dim tracks
 better** (yaw 0.47 vs 0.62, calmer std 0.87 vs 1.30) → orient+height are stabilizing
 regularizers. **Decision: keep 7-dim.** Inherited A0 weakness: poor yaw → circling
@@ -71,9 +76,11 @@ goals in [0.68,1.0], critic has no interior data, no inward gradient). Missing T
   impossible): run `a1_td3_frozenLL_5k` clean NEGATIVE — HL still failed (err_xy ~2.5). So
   the spiral wasn't the core problem either. (Velocity-only chosen so a HIRO-delta HL's
   goals stay in-distribution for the memoryless frozen LL.)
-- **F4 velocity observability** (add `base_lin_vel` to HL obs): A/B det-eval blind
-  (0.85,0.39,0.28) ≈ velocity-obs (0.85,0.38,0.25) → NO-OP, reverted. Falsified the
-  velocity-blindness hypothesis built on a misleading training-metric yaw/xy asymmetry.
+- **F4 velocity observability** (add `base_lin_vel` to HL obs): under the then-regime
+  (absolute/pre-tracking) A/B det-eval blind (0.85,0.39,0.28) ≈ velocity-obs
+  (0.85,0.38,0.25) → looked like a no-op. **Overturned 2026-06-30: under `delta` goals
+  velobs is a large linear-tracking win** (err_vx 0.137→0.062), replicated — the no-op was
+  regime-specific, not general. See the F4 ledger row + `a1_estimator_noise_8b`.
 
 ### M5 — HIRO relabeling + `c`-sweep ✅ implemented; wall shown STRUCTURAL
 Relabeling inline in `HighLevelTd3` (k=10 candidates: stored g, empirical
@@ -184,24 +191,27 @@ no lin-vel. Fix: `hl_obs_vel` feeds the HL the SAME deployable lin-vel estimate 
 Re-ran the delta matrix with `--agent.hl-obs-vel True` (runs `2026-06-29_*noise_delta_*_velobs_*`, **old
 pure-HIRO intrinsic**, the only agent.yaml delta vs the 06-23 baseline is `hl_obs_vel:true` — a clean A/B):
 
-| run | err_vx | err_vy | err_yaw | act | hl_err_vx | fwd_hl_vx | ll_err_vx |
-|---|---|---|---|---|---|---|---|
-| bias_velobs (s42, model_9900) | 0.057 | 0.056 | 0.137 | 1.98 | 0.039 | 0.037 | 0.043 |
-| full_velobs (s42) | 0.061 | 0.049 | 0.169 | 1.92 | 0.046 | 0.044 | 0.040 |
-| full_velobs (s123) | 0.068 | 0.049 | 0.132 | 1.74 | 0.075 | 0.072 | 0.052 |
-| **mean (3 good)** | **0.062** | **0.051** | 0.146 | **1.9** | **0.053** | ~0.051 | 0.044 |
-| bias_velobs (s123) — COLLAPSE | 0.254 | 0.164 | 0.526 | 7.29 | 0.348 | 0.379 | 0.590 |
-| baseline directional (no velobs) | 0.120 | 0.106 | 0.163 | 2.8 | 0.072 | ~0.106 | 0.057 |
+Full 2×2 (bias/full × s42/s123), all pure-HIRO, model_10000 (probe hl_err_vx where run):
 
-**Read.** The vx HL wall **moved down**: hl_err_vx 0.072→0.053 mean, **fwd_hl_vx ~0.106→0.051 (halved)** in the
-clean pairs (bias_s42 0.099→0.037, full_s42 0.113→0.044) — directional's documented forward weakness. End
-err_vx **halved 0.120→0.062**; act_rate 2.8→1.9 (smoother); LL also tightened (0.057→0.044). yaw HL wall
-**unchanged** (hl_err_yaw ~0.090) — expected, only lin-vel was fed; yaw rate is the remaining HL limiter.
-One collapse (`bias_velobs_s123`: |g| 0.79, the saturation wall) — transient (its s42 sibling is the *best*
-run; bias-only has collapsed once before in #8b). **Updated verdict: directional+velobs beats absolute on
-EVERY axis** (vx 0.062 vs 0.080, yaw 0.146 vs 0.185, act 1.9 vs 3.9) — velocity obs closes the one gap (vx)
-absolute used to win, so the axis trade-off is gone. **Directional+velobs is the best A1 config.** Next lever
-for the residual yaw wall: feed yaw-rate too (clean gyro read, also deployable). Logs `2026-06-29_*velobs*`.
+| run | err_vx | err_vy | err_yaw | act | hl_err_vx |
+|---|---|---|---|---|---|
+| bias_velobs s42 | 0.056 | 0.043 | 0.123 | 1.99 | 0.039 |
+| bias_velobs s123 | 0.059 | 0.055 | 0.187 | 3.23 | — |
+| full_velobs s42 | 0.060 | 0.047 | 0.163 | 1.92 | 0.046 |
+| full_velobs s123 | 0.068–0.077 | 0.049 | 0.137–0.170 | 1.7–2.1 | 0.075 |
+| **velobs mean (4 cells, 2 seeds)** | **0.063** | **0.049** | **0.161** | **2.3** | ~0.053 |
+| baseline directional (no velobs) | 0.120 | 0.106 | 0.163 | 2.8 | 0.072 |
+
+**Read.** The vx HL wall **moved down**: hl_err_vx 0.072→0.053, **fwd_hl_vx ~0.106→0.051 (halved)** in the clean
+pairs (bias_s42 0.099→0.037, full_s42 0.113→0.044) — directional's forward weakness. End **err_vx halved
+0.120→0.063**; act_rate 2.8→2.3 (smoother, s42 runs ~1.9); LL tightened (0.057→0.044). yaw HL wall
+**unchanged** (hl_err_yaw ~0.090) — expected, only lin-vel fed; yaw-rate is the remaining limiter (feed it
+next). `bias_velobs_s123` first collapsed (|g|0.79, err_vx 0.25) but **reran clean (0.059) → transient
+confirmed** (as predicted; do NOT report velobs instability). full_velobs_s123 same-config spread 0.068↔0.077.
+**Verdict: directional+velobs beats absolute on EVERY axis** (vx 0.063 vs 0.080, yaw 0.161 vs 0.185, act 2.3
+vs 3.9) — velocity obs closes the vx gap absolute used to win; the axis trade-off is gone. **Directional+velobs
+is the best A1 config.** Separate axis (excluded here): `*_pose0p5_*` add ADR-0002 upper-body reg (0.5/0.02) —
+the bias one failed (err_vx 1.38). Logs `2026-06-{29,30}_*velobs*`.
 
 ## Play/replay fix (F0, 2026-06-11) — all pre-fix qualitative replays are void
 `play.py` used `get_inference_policy()` which returned the bare LL actor — nothing fired the

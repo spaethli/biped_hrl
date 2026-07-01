@@ -60,7 +60,11 @@ def hrl_goal(env: ManagerBasedRlEnv, dim: int = 3) -> torch.Tensor:
 
 
 def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Tensor:
-    global_phase = (env.episode_length_buf * env.step_dt) % period / period
+    # A1a: if the HL commands a gait cadence, the per-env accumulated phase buffer
+    # (env.hrl_phase, already in [0,1)) overrides the fixed-period clock. Absent (A0 /
+    # non-cadence A1) -> the original fixed-period phase. Backward compatible.
+    hp = getattr(env, "hrl_phase", None)
+    global_phase = hp if hp is not None else (env.episode_length_buf * env.step_dt) % period / period
     phase = torch.zeros(env.num_envs, 2, device=env.device)
     phase[:, 0] = torch.sin(global_phase * torch.pi * 2.0)
     phase[:, 1] = torch.cos(global_phase * torch.pi * 2.0)

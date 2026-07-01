@@ -67,10 +67,13 @@ _Avoid_: goal, V* (those are the L2-reached state targets); step length (the rec
 cadence at a fixed speed, v = f*L, not an independent channel).
 
 **Cost of transport** (`CoT`):
-The high level's efficiency objective (A1a onward): window mechanical energy / window
-distance, gated to commanded motion (`command_threshold`). Added (negative) to the HL
-reward *only*, so the low level stays a pure tracker. That decoupling (efficiency at the
-HL, tracking at the LL) is what justifies the hierarchy against a flat A0+energy baseline.
+The high level's efficiency objective (A1a onward): window mechanical energy / *actual
+walked* distance (`Σ ‖v_xy‖·dt`), engaged only when the commanded linear speed exceeds A0's
+`command_threshold` (0.1). Actual (not commanded) distance so that spending energy while
+going nowhere is correctly expensive; a small denominator floor guards the stuck-robot
+blow-up (it is not the engagement gate, which is the command threshold). Added (negative) to
+the HL reward *only*, so the low level stays a pure tracker. That decoupling (efficiency at
+the HL, tracking at the LL) is what justifies the hierarchy against a flat A0+energy baseline.
 The HL trims CoT through the _Gait reference_ at the commanded velocity.
 _Avoid_: energy, power (CoT is energy normalized by distance; raw energy has a stand-still
 attractor, the failure that killed `hl_reward_mode=task`); "LL energy term" (CoT never

@@ -27,11 +27,14 @@ Add an **energy / cost-of-transport objective to the HL only**, acting through a
 gait reference** the flat command cannot express.
 
 - **Objective.** HL reward = tracking + (negative) **cost of transport**, where
-  `CoT = window mechanical energy / window distance`, mechanical power
-  `P = Σ_j |τ_j · q̇_j|`. CoT is gated to commanded motion via the existing
-  `command_threshold` idiom (the same gate `feet_gait` / `feet_swing_height` already use),
-  which removes the near-zero-command blow-up of `energy/distance`. Standing when commanded
-  to stand is handled by the tracking term, not CoT.
+  `CoT = window mechanical energy / (actual walked distance + floor)`, walked distance
+  `Σ ‖v_xy‖·dt` and mechanical power `P = Σ_j |qfrc_actuator_j · joint_vel_j|`. CoT is
+  *engaged* only when the commanded linear speed exceeds `command_threshold` (0.1), so
+  standstill / pure-spin commands don't trigger it (tracking handles those). The denominator
+  uses *actual* (not commanded) distance, so spending energy while going nowhere is correctly
+  expensive; a small floor keeps it finite when the robot is genuinely stuck. The earlier
+  `P / v_commanded` and commanded-distance variants are rejected (a commanded denominator
+  rewards standing still while under command).
 - **Decoupling (the hierarchy claim).** CoT lives in the **HL reward only**; the LL stays a
   pure tracker. A flat `A0+energy` policy must trade tracking against efficiency at one
   timescale and regresses tracking; A1a keeps tracking as the LL's sole job and trims
@@ -85,6 +88,42 @@ gait reference** the flat command cannot express.
 - **Roadmap fit.** The two-channel HL->LL interface is the stable seam across A1a → A2
   (A-RMA on the LL, interface unchanged) → A3 (a gait library produces the COM trajectory ≈
   goal and the footfall pattern ≈ cadence reference, plugging into the same socket).
-- **Next stages (CLAUDE.md workflow).** This ADR is the feature definition. A precise
-  implementation spec and a test plan (smoke + success criteria on the OOD proxy and the
-  A0/A0+energy/A1a scorecard) are required before coding.
+- **Next stages (CLAUDE.md workflow).** This ADR is the feature definition; the validation
+  plan is below and tracked operationally in `doc/hrl/A1a_plan.md`. Implementation follows on
+  approval.
+
+## Validation / test plan
+
+Defined up front (run after implementing, report honestly). Smokes use `WANDB_MODE=disabled`
+and delete local logs; comparisons hold `num_envs` fixed and use >=2 seeds.
+
+**Prerequisite metrics** added to the `play.py` benchmark `[BENCH]` json: `mech_power_w`
+(`Σ|qfrc_actuator·joint_vel|`), `cot` (Σenergy / Σwalked-distance, gated by commanded linear
+speed > 0.1, training floor), `stride_period_s` (measured same-foot touchdown interval = the
+*achieved* cadence).
+
+- **S0 precondition (no training).** A0's natural cadence + CoT across commanded speeds, and
+  `cot` sensitivity to a perturbed gait period within A0's walkable band. *Go/no-go:* if `cot`
+  is flat in period the lever is inert, stop. Sets the initial `cadence_period_range`. (The
+  definitive `CoT(period)` curve needs S2's cadence-capable LL; S0 is the cheap pre-check and
+  the metric prototype.)
+- **S1 smoke / backward-compat.** `hl_cadence=False, hl_cot_coef=0` is byte-identical to
+  current A1; phase continuity on a mid-window period change; `mdp.phase` / `feet_gait` consume
+  `hrl_phase`; CoT gate/floor numerics sane (standing-while-commanded high, gated-off exactly 0,
+  no NaN); HL action dim = `goal_dim + 1` only when enabled.
+- **S2 LL entrains.** Oracle/random HL sweeping the commanded period: achieved `stride_period_s`
+  tracks the command across the band at no worse velocity tracking than current A1.
+- **S3 learned HL finds the minimum (frozen LL).** `freeze_ll_path` + TD3 HL + `hl_cot_coef>0`:
+  the HL drives `cot` below the fixed-0.6 baseline at A1-level tracking; the converged period
+  matches the `CoT(period)` minimum and is speed-dependent.
+- **S4 comparison (the claim).** A0 / A0+energy / A1 / A1a, >=2 seeds. *Success:* A1a `cot` < A0
+  `cot` at A0-level tracking and fall_rate, **and** A0+energy regresses tracking to buy its CoT
+  cut. *Honest disconfirmer:* if A0+energy matches A1a on both, the hierarchy did not help for
+  in-sim efficiency, and we report that.
+- **S5 weight guard.** Sweep `hl_cot_coef`; fall_rate must stay flat (rising fall_rate = CoT
+  beating tracking = the suicide attractor; cap the weight below that point).
+- **S6 OOD proxy (secondary).** Narrow -> Wide DR / push / terrain. Exploratory: a large
+  survival edge is not expected until A2 supplies dynamics adaptation; S4 is the load-bearing
+  A1a result.
+
+Two data-set knobs: `cadence_period_range` (from S0), `hl_cot_coef` (bounded by S5).

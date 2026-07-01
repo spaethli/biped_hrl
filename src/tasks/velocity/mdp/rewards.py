@@ -193,10 +193,16 @@ def feet_gait(
         command_threshold: float,
         command_name: str,
         sensor_name: str,
+        use_commanded_phase: bool = False,
 ) -> torch.Tensor:
     sensor: ContactSensor = env.scene[sensor_name]
     is_contact = sensor.data.current_contact_time > 0
-    global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+    # A1a: when the HL commands cadence, key the schedule to the accumulated per-env phase
+    # (env.hrl_phase in [0,1)) instead of the fixed-period clock. Default off -> A0 unchanged.
+    if use_commanded_phase:
+        global_phase = env.hrl_phase.unsqueeze(1)
+    else:
+        global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
     offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
     leg_phase = (global_phase + offsets) % 1.0
     is_stance = (leg_phase < threshold)

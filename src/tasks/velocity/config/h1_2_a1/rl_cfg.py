@@ -230,15 +230,38 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``0.99**8`` silently mismatched any c != 8). Set explicitly to override."""
   ll_task_reward_coef: float = 0.0
   """Blend of task reward into the LL intrinsic reward. 0 = pure HIRO."""
-  ll_action_rate_coef: float = 0.05
-  """Weight on the whole-body action-rate penalty added to the LL intrinsic (ADR-0002).
-  Matches A0's ``action_rate_l2`` weight (0.05); the env term never reaches the goal-only
-  LL otherwise. 0 disables (clean A1-baseline ablation)."""
+  ll_action_rate_coef: float = 0.02
+  """Weight on the whole-body action-rate penalty added to the LL intrinsic (ADR-0002); the
+  env ``action_rate_l2`` never reaches the goal-only LL otherwise. **0.02, NOT A0's 0.05**:
+  matching A0's 0.05 over-penalized A1's goal-only LL and spiked ``fell_over`` (~165); 0.02
+  gives ``fell_over``≈0 (the keeper) — see ``doc/hrl/A1_findings.md`` (posture/ar row). The
+  small divergence from A0's 0.05 is a deliberate A0-vs-A1 reward difference (note it in RQ2).
+  0 disables (clean A1-baseline ablation)."""
   ll_posture_coef: float = 0.5
   """Weight on the arms+waist deviation-from-default penalty added to the LL intrinsic
   (ADR-0002), keeping the upper body deployable (no behind-the-back drift / wrist twist).
   No A0 analog (A0 uses the positive exp ``variable_posture``); 0.5 is a starting value to
   tune up until the arms settle. 0 disables."""
+  hl_cadence: bool = False
+  """A1a (ADR-0004): give the HL a gait-cadence channel. The HL commands a stride ``period``
+  (s) in ``cadence_period_range``; the LL observes the resulting phase clock (``mdp.phase``)
+  and entrains via the ``feet_gait`` intrinsic term. A *gait reference*, not a goal-space
+  component (no L2 achieved-state). Off -> byte-identical to current A1."""
+  cadence_period_range: tuple[float, float] = (0.35, 1.0)
+  """Stride-period bounds (s) the commanded cadence is sampled from, held **per episode**.
+  Progression: v1 wide (0.5..1.4) + per-*window* resample destroyed the warm-start; v2 narrow
+  (0.5..0.7) stayed healthy but did NOT entrain (too close to the ~0.58 s natural gait); v3
+  widens to (0.35..1.0) to force genuine cadence variation (resumed from the v2 walker).
+  (Set as the default: the tyro CLI tuple override is finicky.)"""
+  ll_cadence_coef: float = 0.5
+  """A1a (ADR-0004): weight on the ``feet_gait`` cadence-entrainment reward added to the LL
+  intrinsic, keyed to the HL-commanded stride period (``hrl_phase``). Matches A0's foot_gait
+  weight (0.5). Active only when ``hl_cadence``. 0 disables."""
+  hl_cot_coef: float = 0.0
+  """A1a (ADR-0004): weight on the (negative) dimensionless cost-of-transport penalty in the
+  HL reward (energy / (m g walked-distance), gated by commanded linear speed > 0.1). HL-only;
+  the LL stays a pure tracker (the decoupling claim). 0 disables. Consumed by the learned-HL
+  increment (S3); the LL-side cadence machinery above is independent of it."""
   warm_start_path: str | None = None
   """Path to an A0 checkpoint to warm-start the LL from. The shared proprio columns
   (and all deeper layers / output head / std) are copied; the goal input columns are
