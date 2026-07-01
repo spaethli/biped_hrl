@@ -32,8 +32,9 @@ cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 #nvidia-smi dmon -s u -d 1 > gpu_util.log &
 
 python scripts/train.py Unitree-H1_2-Flat \
-    --env.scene.num-envs ${NUM_ENVS:-16384} \
-    --agent.max-iterations ${MAX_ITER:-8001}
+    --env.scene.num-envs ${NUM_ENVS:-4096} \
+    --agent.max-iterations ${MAX_ITER:-10001} \
+    --agent.seed 42 --agent.run-name a0_baseline_seed42
 
 # Auto-sync after training
 wandb sync --sync-all
