@@ -45,6 +45,17 @@ class PlayConfig:
   eval_cadence_period: float | None = None
   """A1a: pin the HL-commanded stride period (s) during eval, for the CoT(period) sweep
   (requires an hl_cadence runner). None -> the runner's mid-range default."""
+  eval_cmd_vx: float | None = None
+  """A1a: pin the commanded forward velocity (m/s) for the fixed-velocity stride-period sweep /
+  replay. When set, the twist command is held constant (vy/wz default 0, standing+heading off),
+  so varying --eval-cadence-period isolates the commanded period from the natural v->period map."""
+  eval_cmd_vy: float | None = None
+  eval_cmd_wz: float | None = None
+  eval_cmd_heading: float | None = None
+  """Hold a world-frame heading (rad; 0 = world +x) via the env's heading P-controller, so
+  fixed-command replays walk STRAIGHT instead of slowly circling (the A0-inherited yaw drift
+  curves the path when wz is just pinned to 0). Requires --eval-cmd-vx; overrides eval_cmd_wz
+  (wz becomes the live heading correction, clipped to the task's ang_vel_z range)."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -159,7 +170,13 @@ def run_play(task_id: str, cfg: PlayConfig):
       saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
       structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
                         "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
-                        "hl_obs_vel")
+                        "hl_obs_vel",
+                        # A1a cadence channel: without hl_cadence restored, eval rebuilt the
+                        # runner with the channel OFF -> fixed 0.6 clock, --eval-cadence-period
+                        # silently inert (the 2026-07-02 "no entrainment" false verdicts).
+                        "hl_cadence", "cadence_period_range", "ll_cadence_coef",
+                        "hl_cot_coef", "hl_cadence_source", "cadence_swing_time",
+                        "cadence_duty_range")
       restored = {k: saved[k] for k in structure_keys
                   if k in saved and hasattr(agent_cfg, k)}
       for k, v in restored.items():
@@ -257,7 +274,36 @@ def run_play(task_id: str, cfg: PlayConfig):
 
     if cfg.eval_cadence_period is not None and hasattr(runner, "eval_cadence_period"):
       runner.eval_cadence_period = cfg.eval_cadence_period
+      print(f"[A1a] Fixed stride period = {cfg.eval_cadence_period} s.")
+
     policy = runner.get_inference_policy(device=device)
+
+    # A1a fixed-command eval/replay: pin the twist command so a stride-period sweep isolates the
+    # commanded period from the natural velocity->period mapping. Collapse ranges to a point +
+    # disable standing/heading, on the live term (works in benchmark, viewer, and diagnose loops).
+    if cfg.eval_cmd_vx is not None:
+      vx, vy, wz = cfg.eval_cmd_vx, (cfg.eval_cmd_vy or 0.0), (cfg.eval_cmd_wz or 0.0)
+      t = env.unwrapped.command_manager.get_term("twist")
+      t.cfg.ranges.lin_vel_x = (vx, vx)
+      t.cfg.ranges.lin_vel_y = (vy, vy)
+      t.cfg.rel_standing_envs = 0.0
+      t.vel_command_b[:, 0], t.vel_command_b[:, 1], t.vel_command_b[:, 2] = vx, vy, wz
+      t.is_standing_env[:] = False
+      if cfg.eval_cmd_heading is not None:
+        # Heading hold: wz becomes a live P-correction toward the world heading. Keep the
+        # ang_vel_z range OPEN — the controller clips its correction to it, so collapsing
+        # it to (0,0) would silently disable the hold.
+        h = cfg.eval_cmd_heading
+        t.cfg.heading_command = True
+        t.cfg.ranges.heading = (h, h)
+        t.heading_target[:] = h
+        t.is_heading_env[:] = True
+        print(f"[A1a] Fixed twist = ({vx} m/s, {vy} m/s, heading-hold {h} rad); walks straight.")
+      else:
+        t.cfg.ranges.ang_vel_z = (wz, wz)
+        t.cfg.heading_command = False
+        t.is_heading_env[:] = False
+        print(f"[A1a] Fixed twist command = ({vx}, {vy}, {wz}) m/s; resampling collapsed to a point.")
 
   # Headless deterministic benchmark: roll out `eval_steps` steps x `eval_seeds` seeds.
   if cfg.eval_steps > 0:
@@ -297,11 +343,17 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
-      ub_pose_devs, ub_arm_vels, powers = [], [], []
+      ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
       prev_actions: torch.Tensor | None = None
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
       prev_contact: torch.Tensor | None = None
       n_feet = 0
+      gait_offsets = torch.tensor([0.0, 0.5], device=env.device).view(1, -1)
+      # d(T) duty for gait_match: MUST mirror feet_gait's schedule, else a d(T) checkpoint
+      # reads as "drifting" against the fixed floor (the structure_keys lesson, eval side).
+      gait_swing = 0.0 if DUMMY_MODE else getattr(runner, "cadence_swing_time", 0.0)
+      duty_lo, duty_hi = (0.56, 0.70) if DUMMY_MODE else getattr(
+        runner, "cadence_duty_range", (0.56, 0.70))
 
       with torch.inference_mode():
         for _ in range(cfg.eval_steps):
@@ -360,6 +412,16 @@ def run_play(task_id: str, cfg: PlayConfig):
             if prev_contact is not None:
               td_count += (is_contact & ~prev_contact).float().sum().item()
             prev_contact = is_contact.clone()
+            # 8. Gait match vs the commanded clock (H2 lock-in diagnostic): fraction of feet
+            # whose contact agrees with the commanded stance schedule (same rule as feet_gait).
+            hp = getattr(uenv, "hrl_phase", None)
+            gait_thr = duty_lo
+            if hp is None:  # A0 / non-cadence A1: the fixed 0.6 s clock
+              hp = (uenv.episode_length_buf * step_dt) / 0.6
+            elif gait_swing > 0.0:  # d(T) schedule, same map as feet_gait
+              gait_thr = (1.0 - gait_swing / uenv.hrl_period).clamp(duty_lo, duty_hi).unsqueeze(1)
+            leg_phase = (hp.unsqueeze(1) + gait_offsets) % 1.0
+            gait_matches.append(((leg_phase < gait_thr) == is_contact).float().mean().item())
 
       def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
 
@@ -375,6 +437,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         "ub_pose_dev": _m(ub_pose_devs),
         "ub_arm_vel":  _m(ub_arm_vels),
         "mech_power_w": _m(powers) if powers else float("nan"),
+        "gait_match":   _m(gait_matches) if gait_matches else float("nan"),
         "cot":          energy_eng / (dist_eng * MASS_G + 1e-6),
         "stride_period_s": (cfg.eval_steps * step_dt)
                            / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
@@ -405,6 +468,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Energy    power_W   : {_fmt('mech_power_w')}")
     print(f"  Energy    CoT (norm): {_fmt('cot')}")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
+    print(f"  Gait      match     : {_fmt('gait_match')}")
     print("=" * 58)
     print()
 

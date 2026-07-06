@@ -242,26 +242,76 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   (ADR-0002), keeping the upper body deployable (no behind-the-back drift / wrist twist).
   No A0 analog (A0 uses the positive exp ``variable_posture``); 0.5 is a starting value to
   tune up until the arms settle. 0 disables."""
+  ll_goal_kernel: Literal["l2", "exp"] = "l2"
+  """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
+  distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =
+  A0-parity positive-bounded kernel for from-scratch training (M3 of the no-warm-start
+  track): velocity gets A0's two tracking exp kernels with V* in place of the command,
+  orientation A0's quadratic penalty, height a weight-10 quadratic (no A0 analog).
+  Pair with ``--env.terminations.fell-over.time-out False`` so death forfeits future
+  positive value (with ``time_out`` the critic bootstraps a fantasy continuation at
+  fallen states and dying stays ~free — the 2026-07-04/06 from-scratch basins:
+  L2 collapse@13, alive-bonus plateau@25, task-blend plateau@65)."""
+  ll_alive_coef: float = 0.0
+  """Constant per-step alive bonus added to the LL intrinsic. The A1 analog of A0's
+  survival economics (true terminal + ``is_terminated`` -200, both unusable here: a true
+  terminal + negative intrinsic is the suicide attractor): with ``fell_over=time_out`` and
+  a strictly negative intrinsic, a from-scratch LL converges to fall-at-spawn (2026-07-04
+  scratch diagnostic, ep_len 13 after 10k it). Size it above the competent-policy per-step
+  intrinsic magnitude (goal_rew ~-2.5) so walking is net positive while flailing (~-12)
+  stays negative. 0 disables (all warm-started baselines)."""
   hl_cadence: bool = False
   """A1a (ADR-0004): give the HL a gait-cadence channel. The HL commands a stride ``period``
   (s) in ``cadence_period_range``; the LL observes the resulting phase clock (``mdp.phase``)
   and entrains via the ``feet_gait`` intrinsic term. A *gait reference*, not a goal-space
   component (no L2 achieved-state). Off -> byte-identical to current A1."""
   cadence_period_range: tuple[float, float] = (0.35, 1.0)
-  """Stride-period bounds (s) the commanded cadence is sampled from, held **per episode**.
-  Progression: v1 wide (0.5..1.4) + per-*window* resample destroyed the warm-start; v2 narrow
-  (0.5..0.7) stayed healthy but did NOT entrain (too close to the ~0.58 s natural gait); v3
-  widens to (0.35..1.0) to force genuine cadence variation (resumed from the v2 walker).
-  (Set as the default: the tyro CLI tuple override is finicky.)"""
+  """Stride-period bounds (s) the commanded cadence is sampled from, held **per episode**
+  (random source) or spanned by the HL's period action (source='hl' — so this is also the S3
+  HL command envelope; keep it inside the frozen LL's followable band). Progression: v1 wide
+  (0.5..1.4) + per-*window* resample destroyed the warm-start; v2 narrow (0.5..0.7) entrained
+  (the "no entrainment" reads were the structure_keys eval bug); v3 widened to (0.35..1.0);
+  v5/v6 tried (0.35..1.3) for the d(T) slow band and both LOST entrainment (band is a
+  curriculum variable — the unfollowable 1.0–1.3 slice diluted the signal); v7 stages back to
+  (0.35..1.0). Old runs restore their own saved range via play.py structure_keys. (Set as the
+  default: the tyro CLI tuple override is finicky — confirmed 2026-07-03, "Unrecognized
+  options" under --agent.)"""
   ll_cadence_coef: float = 0.5
   """A1a (ADR-0004): weight on the ``feet_gait`` cadence-entrainment reward added to the LL
   intrinsic, keyed to the HL-commanded stride period (``hrl_phase``). Matches A0's foot_gait
   weight (0.5). Active only when ``hl_cadence``. 0 disables."""
+  cadence_swing_time: float = 0.0
+  """A1a d(T) duty schedule (slow-stride enabler, see A1a_plan "Gait geometry"): >0 makes the
+  ``feet_gait`` stance threshold period-dependent, ``d(T) = clamp(1 - swing_time/T,
+  *cadence_duty_range)`` — single-support time held ~= swing_time (s) like human walking,
+  double stance absorbs long periods. 0.31 keeps the fast band byte-identical (the floor binds
+  for T <= ~0.70 s) and lifts duty to the 0.70 cap by T ~= 1.06 s. Sim-only (reward schedule;
+  the phase obs is unchanged, so deploy is untouched). 0 (default) = the fixed floor duty
+  every pre-d(T) checkpoint trained with."""
+  cadence_duty_range: tuple[float, float] = (0.56, 0.70)
+  """Duty-factor clamp bounds for the d(T) schedule — the single source of truth for BOTH the
+  ``feet_gait`` training reward and play.py's ``gait_match`` eval metric (restored via
+  structure_keys so they can never diverge). The floor (0.56 = the trained A0/A1 stance
+  threshold) doubles as the fixed duty when ``cadence_swing_time`` is 0; the cap 0.70 = human
+  slow-walk duty. d <= 0.5 is the walk-run boundary (zero double support -> flight): lowering
+  the floor below 0.5 demands RUNNING at short periods, which also needs ~2 m/s commands
+  (Froude 0.5), a height-goal/termination tolerance review, and an LL retrain — not just this
+  knob."""
+  hl_cadence_source: Literal["random", "hl"] = "random"
+  """A1a S1c (ADR-0004): where the commanded stride period comes from. ``random`` (default):
+  held per episode, resampled uniformly from ``cadence_period_range`` on reset (the S2 setup,
+  and what every pre-S1c checkpoint saved). ``hl``: the TD3 HL emits the period as one extra
+  tanh action dim (HL action = goal_dim+1; the critics see it, so Q can rank periods for the
+  CoT term), mapped affinely from [-1,1] to ``cadence_period_range`` and held for the window
+  (phase integrates incrementally, so a period change never jumps the clock). Requires
+  ``hl_cadence=True`` and ``hl_algorithm='td3'`` (loud error otherwise). Old checkpoints
+  restore as ``random`` and keep their goal_dim-sized HL nets."""
   hl_cot_coef: float = 0.0
-  """A1a (ADR-0004): weight on the (negative) dimensionless cost-of-transport penalty in the
-  HL reward (energy / (m g walked-distance), gated by commanded linear speed > 0.1). HL-only;
-  the LL stays a pure tracker (the decoupling claim). 0 disables. Consumed by the learned-HL
-  increment (S3); the LL-side cadence machinery above is independent of it."""
+  """A1a (ADR-0004): weight on the (negative) dimensionless cost-of-transport penalty added
+  to the HL *window* reward (window energy / (m g window walked-distance), each step gated by
+  commanded linear speed > 0.1; a distance floor keeps stuck-under-command windows expensive
+  but finite, and an all-gated-off window is exactly 0). HL-only; the LL stays a pure tracker
+  (the decoupling claim). 0 disables (byte-identical HL reward). Set >0 in S3+."""
   warm_start_path: str | None = None
   """Path to an A0 checkpoint to warm-start the LL from. The shared proprio columns
   (and all deeper layers / output head / std) are copied; the goal input columns are

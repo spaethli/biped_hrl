@@ -74,13 +74,16 @@ analysis and the proposed change first.
 
 ## Load-bearing gotchas
 
-- A1 LL is **warm-started from a converged A0** — this is load-bearing, not optional.
-  The `command` obs term sits **mid-vector (actor cols 6:9), not last**, so the
-  warm-start copy is gap-aware (`HierarchicalRunner._partial_load`). Diagnostic it
-  worked: **high iter-0 ep_len**.
+- A1 LL is **warm-started from a converged A0** — load-bearing **for the default l2
+  kernel**; with `ll_goal_kernel=exp` + true-terminal `fell_over` A1 trains from scratch
+  (2026-07-06, `doc/hrl/A1_findings.md` from-scratch kernel row). The `command` obs term
+  sits **mid-vector (actor cols 6:9), not last**, so the warm-start copy is gap-aware
+  (`HierarchicalRunner._partial_load`). Diagnostic it worked: **high iter-0 ep_len**.
 - `fell_over` is a **true terminal for A0** but a **truncation (`time_out=True`) for A1
   only** (set in `config/h1_2_a1/env_cfgs.py`). A0 diverges if given `time_out`; A1's
   negative goal-distance reward needs the bootstrap to avoid a suicide attractor.
+  **Kernel pairing rule: l2 ↔ `time_out`, exp ↔ true terminal
+  (`--env.terminations.fell-over.time-out False`) — never mix.**
 - A1 `entropy_coef=0.005` (0.01 lets action std blow up to ~2 and collapse).
 - `goal_components` (in `config/h1_2_a1/rl_cfg.py`) is the **single source of truth**
   for the goal space; the env derives its goal obs dim from it. `goal_dim` is always

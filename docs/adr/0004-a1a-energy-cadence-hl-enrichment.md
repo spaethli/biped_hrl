@@ -1,6 +1,8 @@
 # A1a: give the HL a job beyond velocity passthrough (cost-of-transport objective via a cadence reference)
 
-**Status:** proposed
+**Status:** accepted (premise validated 2026-07-02; S1c machinery implemented + tested
+2026-07-02: `hl_cadence_source="hl"` gives the TD3 HL the period as +1 action dim, CoT enters
+the HL window reward via `hl_cot_coef` — see `doc/hrl/A1a_plan.md`; S3 = first learned-HL run)
 
 ## Context
 

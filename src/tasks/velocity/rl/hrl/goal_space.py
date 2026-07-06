@@ -187,13 +187,34 @@ class GoalSpace:
     ref = self.center(env) if mode == "absolute" else state
     return ((achieved - ref) / self.scale(env)).clamp(-1.0, 1.0)
 
-  def reward(self, target: torch.Tensor, achieved: torch.Tensor) -> torch.Tensor:
-    """HIRO intrinsic reward: -Σ_c w_c ||target_c - achieved_c||_2, shape [N]."""
+  def reward(
+    self, target: torch.Tensor, achieved: torch.Tensor, kernel: str = "l2"
+  ) -> torch.Tensor:
+    """LL intrinsic reward, shape [N].
+    ``l2`` (HIRO): -Σ_c w_c ||target_c - achieved_c||_2 (strictly negative; needs
+    ``fell_over=time_out`` or falling truncates the negative stream — suicide attractor).
+    ``exp`` (A0-parity, for from-scratch training; pair with a true-terminal
+    ``fell_over``): each component mirrors its A0 reward term with V* substituted for
+    the command — velocity = track_linear_velocity + track_angular_velocity exp kernels,
+    orientation = body_orientation_l2's quadratic penalty, height = quadratic (no A0
+    analog; weight keeps the height goal dim from being gradient-dead). Positive-bounded
+    (max 2), so death forfeits future value instead of ending a negative stream.
+    Component ``weight`` (goal_weights) applies to ``l2`` only."""
     diff = target - achieved
     r = torch.zeros(diff.shape[0], device=diff.device)
     i = 0
     for c in self.components:
-      r = r - c.weight * diff[:, i : i + c.dim].norm(dim=-1)
+      d = diff[:, i : i + c.dim]
+      if kernel == "l2":
+        r = r - c.weight * d.norm(dim=-1)
+      elif c.name == "velocity":
+        r = r + torch.exp(-d[:, :2].square().sum(-1) / 0.25) + torch.exp(-d[:, 2].square() / 0.5)
+      elif c.name == "orientation":
+        r = r - d.square().sum(-1)
+      elif c.name == "height":
+        r = r - 10.0 * d.square().sum(-1)
+      else:
+        raise ValueError(f"no exp-kernel form for goal component '{c.name}'")
       i += c.dim
     return r
 

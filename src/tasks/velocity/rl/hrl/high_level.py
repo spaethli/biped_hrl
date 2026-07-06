@@ -34,6 +34,10 @@ from .goal_space import GoalSpace
 class HighLevel(ABC):
   """Interface between the co-training loop and a high-level decision-maker."""
 
+  # A1a S1c: extra action dims for the stride-period channel (TD3 sets 1 when it
+  # commands the period; 0 = the runner's random per-episode source, the S2 setup).
+  cadence_dim: int = 0
+
   def __init__(self, goal_space: GoalSpace) -> None:
     self.goal_space = goal_space
 

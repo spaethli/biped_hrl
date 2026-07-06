@@ -57,12 +57,21 @@ class HighLevelTd3(HighLevel):
     ll_actor: torch.nn.Module | None = None,
     target_mode: str = "delta",
     obs_vel_dim: int = 0,
+    cadence_dim: int = 0,
+    cadence_period_range: tuple[float, float] = (0.35, 1.0),
   ) -> None:
     super().__init__(goal_space)
     self.device = device
     self.goal_dim = goal_dim
     self.gamma_hi = gamma_hi
     self.target_mode = target_mode
+    # A1a S1c (ADR-0004): +1 tanh action dim = the commanded stride period, mapped
+    # affinely to cadence_period_range and written to env.hrl_period at fire. The
+    # critics see the full action (Q must rank periods for the CoT reward term);
+    # to_target consumes only the goal dims. 0 -> byte-identical to the goal-only HL.
+    self.cadence_dim = cadence_dim
+    self.cadence_period_range = cadence_period_range
+    self.action_dim = goal_dim + cadence_dim
     # Optional extra HL input: the deployable base lin-vel estimate (vx,vy) the runner
     # writes to obs["hl_vel"]. 0 -> byte-identical to the proprio++command HL.
     self.obs_vel_dim = obs_vel_dim
@@ -93,9 +102,9 @@ class HighLevelTd3(HighLevel):
     c_act = cfg["critic"]["activation"]
 
     self.normalizer = EmpiricalNormalization(self._state_dim).to(device)
-    self.actor = MLP(self._state_dim, goal_dim, hidden, act).to(device)
-    self.q1 = MLP(self._state_dim + goal_dim, 1, c_hidden, c_act).to(device)
-    self.q2 = MLP(self._state_dim + goal_dim, 1, c_hidden, c_act).to(device)
+    self.actor = MLP(self._state_dim, self.action_dim, hidden, act).to(device)
+    self.q1 = MLP(self._state_dim + self.action_dim, 1, c_hidden, c_act).to(device)
+    self.q2 = MLP(self._state_dim + self.action_dim, 1, c_hidden, c_act).to(device)
     self.actor_target = copy.deepcopy(self.actor)
     self.q1_target = copy.deepcopy(self.q1)
     self.q2_target = copy.deepcopy(self.q2)
@@ -109,7 +118,7 @@ class HighLevelTd3(HighLevel):
     )
 
     self.buffer = HLReplayBuffer(
-      cfg["buffer_capacity"], self._state_dim, goal_dim, device, relabel=self.relabel
+      cfg["buffer_capacity"], self._state_dim, self.action_dim, device, relabel=self.relabel
     )
     self.training = True
     self._update_count = 0
@@ -139,6 +148,15 @@ class HighLevelTd3(HighLevel):
   def _q_forward(self, net: torch.nn.Module, state: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
     return net(torch.cat([self.normalizer(state), g], dim=-1))
 
+  def _command_period(self, env, g: torch.Tensor) -> None:
+    """Map the tanh-bounded cadence action dim to a stride period (s) and command it
+    (``env.hrl_period``, read by the runner's phase integration -> mdp.phase/feet_gait).
+    Held until the next fire. No-op without a cadence dim."""
+    if not self.cadence_dim:
+      return
+    lo, hi = self.cadence_period_range
+    env.hrl_period = lo + (g[:, self.goal_dim] + 1.0) * 0.5 * (hi - lo)
+
   # --- HighLevel interface --------------------------------------------------
 
   def act(self, env, obs, state: torch.Tensor) -> torch.Tensor:
@@ -147,21 +165,24 @@ class HighLevelTd3(HighLevel):
       self.normalizer.update(s_vec)
     if self.training and len(self.buffer) < self.warmup_transitions:
       # Random warmup (TD3 start_timesteps): uniform goals give the critic coverage
-      # of the whole goal box before the actor's output ever drives the env.
-      g = torch.rand(s_vec.shape[0], self.goal_dim, device=self.device) * 2.0 - 1.0
+      # of the whole goal box (incl. the period dim) before the actor drives the env.
+      g = torch.rand(s_vec.shape[0], self.action_dim, device=self.device) * 2.0 - 1.0
     else:
       g = self._actor_forward(self.actor, s_vec)
       if self.training and self.expl_noise > 0.0:
         g = (g + torch.randn_like(g) * self.expl_noise).clamp_(-1.0, 1.0)
     self._win_state = s_vec
     self._win_action = g
-    self._last_act_abs = g.abs().mean().item()
-    return self.goal_space.to_target(env, state, g, self.target_mode)
+    self._last_act_abs = g[:, : self.goal_dim].abs().mean().item()
+    self._command_period(env, g)
+    return self.goal_space.to_target(env, state, g[:, : self.goal_dim], self.target_mode)
 
   def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
     # Deterministic actor; no exploration noise, no window scratch, no normalizer update.
+    # (Commanding the period is a directive output, not a training side effect.)
     g = self._actor_forward(self.actor, self._state_vec(obs))
-    return self.goal_space.to_target(env, state, g, self.target_mode)
+    self._command_period(env, g)
+    return self.goal_space.to_target(env, state, g[:, : self.goal_dim], self.target_mode)
 
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
@@ -275,8 +296,11 @@ class HighLevelTd3(HighLevel):
     g_emp = ((batch.next_goal_state - ref) / scale).clamp(-1.0, 1.0)  # achieved as raw g
 
     # Candidate goals [B, k, goal_dim]: stored g, empirical g_emp, +(k-2) sampled.
+    # Only the goal dims are relabeled — the period dim has no achieved goal-space
+    # state to score against (the LL entrains via the phase obs, not the goal obs);
+    # it is carried through from the stored action unchanged.
     cand = torch.empty(B, k, self.goal_dim, device=self.device)
-    cand[:, 0] = batch.actions
+    cand[:, 0] = batch.actions[:, : self.goal_dim]
     cand[:, 1] = g_emp
     noise = torch.randn(B, k - 2, self.goal_dim, device=self.device) * self.candidate_std
     cand[:, 2:] = (g_emp.unsqueeze(1) + noise).clamp(-1.0, 1.0)
@@ -299,7 +323,8 @@ class HighLevelTd3(HighLevel):
     logp = logp.reshape(B, k, c, -1).sum(dim=(-1, -2))  # [B, k], Σ over window (+ any dim)
     best = logp.argmax(dim=1)  # [B]
     self._last_relabel_frac = (best != 0).float().mean().item()
-    return cand[torch.arange(B, device=self.device), best]
+    g_best = cand[torch.arange(B, device=self.device), best]
+    return torch.cat([g_best, batch.actions[:, self.goal_dim :]], dim=-1)
 
   def _soft_update(self, online: torch.nn.Module, target: torch.nn.Module) -> None:
     for p, tp in zip(online.parameters(), target.parameters()):

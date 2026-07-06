@@ -194,6 +194,8 @@ def feet_gait(
         command_name: str,
         sensor_name: str,
         use_commanded_phase: bool = False,
+        swing_time: float = 0.0,
+        duty_max: float = 0.70,
 ) -> torch.Tensor:
     sensor: ContactSensor = env.scene[sensor_name]
     is_contact = sensor.data.current_contact_time > 0
@@ -201,6 +203,13 @@ def feet_gait(
     # (env.hrl_phase in [0,1)) instead of the fixed-period clock. Default off -> A0 unchanged.
     if use_commanded_phase:
         global_phase = env.hrl_phase.unsqueeze(1)
+        if swing_time > 0.0:
+            # d(T) duty schedule (A1a): hold single-support ~= swing_time (the inverted-
+            # pendulum constant, like humans) and let double stance absorb long periods:
+            # d = 1 - swing_time/T, floored at the fixed threshold (fast band unchanged;
+            # departs above T = swing_time/(1-threshold)) and capped at duty_max (0.70 =
+            # human slow-walk duty; d <= 0.5 would be running). Per-env: T = hrl_period.
+            threshold = (1.0 - swing_time / env.hrl_period).clamp(threshold, duty_max).unsqueeze(1)
     else:
         global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
     offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)

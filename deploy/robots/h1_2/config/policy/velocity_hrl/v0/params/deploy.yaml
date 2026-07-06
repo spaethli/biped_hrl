@@ -12,10 +12,10 @@ default_joint_pos: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52
 
 # HIRO hierarchy parameters (read by State_RLHRL). MUST match the trained checkpoint.
 hrl:
-  hl_algorithm: default                          # oracle (analytic V*=command+nominal, no high_level.onnx)
+  hl_algorithm: oracle                         # oracle (analytic V*=command+nominal, no high_level.onnx)
                                                 # | learned (default; needs high_level.onnx)
   c: 8                                          # HL period (control steps); HL holds V* between fires
-  hl_target_mode: absolute                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
+  hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
                                                 # (ignored when hl_algorithm: oracle)
   goal_components: [velocity, orientation, height]  # the 7-dim goal space; goal_dim derived from this
   nominal_root_height: 1.3076                   # imu-site standing z (pelvis 1.03 + torso->imu 0.278);

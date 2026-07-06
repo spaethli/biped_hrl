@@ -35,11 +35,12 @@ A2 (A-RMA supplies adaptivity) and A3 (gait library plugs into the same cadence 
 | **S0** | A0 baseline cadence + CoT; CoT-vs-period probe | baseline captured; CoT(period) curve **deferred to S2** (A0 can't vary cadence) | 🟡 baseline done |
 | **S1a** | LL-side cadence machinery in the **training** loop (period/phase buffers, `mdp.phase` + `feet_gait` rewire, `ll_cadence` intrinsic, random-period source) | smoke: new path runs + `cadence_rew` active; defaults inert (`cadence_rew=0`, intrinsic unchanged) | ✅ 2026-06-30 |
 | **S1b** | Cadence in the **inference** path (`get_inference_policy` + benchmark) + `--eval-cadence-period` pin for the CoT(period) sweep | smoke: cadence ckpt benchmarks via inference path, period pin applied, no error (entrainment accuracy is S2's, untrained LL stride 0.76 vs cmd 0.60) | ✅ 2026-06-30 |
-| **S1c** | CoT HL reward + learned-cadence action dim (`goal_dim+1`) | phase continuity on mid-window period change; CoT gate/floor numerics; action dim grows only when on | ⬜ |
-| **S2** | Train A1a LL under **per-episode** random-period HL | achieved `stride_period_s` tracks commanded period; velocity tracking **and survival** ≥ current A1 | 🔴 v1 FAILED → 🟡 v2: healthy walker (err 0.11, 0 falls, CoT 0.96) but **no entrainment** (stride flat 0.573 = natural; range too narrow). → 🟢 v3 running (`a1a_s2_cadence_v3`, resume v2, wide 0.35–1.0, coef 0.5). |
-| **S3** | Frozen-LL learned HL (TD3) + `hl_cot_coef>0` | HL drives `cot` below fixed-0.6 baseline at A1-level tracking; converged period = `CoT(period)` min, speed-dependent | ⬜ |
-| **S4** | Co-trained A1a vs A0 / A0+energy / A1 (≥2 seeds) | A1a `cot` < A0 at A0-level tracking + fall_rate; A0+energy regresses tracking. Honest disconfirmer logged if A0+energy matches | ⬜ |
-| **S5** | Sweep `hl_cot_coef` | fall_rate flat as weight rises; cap below any rise (suicide-attractor guard) | ⬜ |
+| **S1c** | CoT HL reward + learned-cadence action dim (`goal_dim+1`) | phase continuity on mid-window period change; CoT gate/floor numerics; action dim grows only when on | ✅ 2026-07-02 (18/18 smoke + v2-ckpt compat; see S1c note) |
+| **S2d** | **d(T) duty schedule** (`cadence_swing_time=0.31`, `cadence_duty_range=(0.56,0.70)`) + slow-band retrain, range (0.35, 1.3) | slow-end ceiling moves past 0.8 s; fast band unregressed; tracking + survival ≥ v2 | 🟡 code ✅ (7/7 smoke). **v5 (scratch + wide band) FAILED** (clock-ignoring walker; curriculum failure). **v6 (resume v2 + τ=0.31 + (0.35,1.3)) FAILED** — d(T) re-scored v2's locked 0.7–0.8 gait (floor departs at 0.70) + 30% unfollowable episodes → lock LOST above 0.5 s (see v6 entry). → **v7 staged (τ=0.32, band (0.35, 1.0)): ceiling UNMOVED** — 0.35–0.65 lock preserved (v6's damage fixed), but 0.8 follows worse than the v3 control (stride 0.580 vs 0.700) and the slow band stays closed. Stage 2 not triggered. **d(T) parked after 3 attempts** (see v7 entry); keeper = **v2 `model_5000`**, envelope (0.35, 1.0). **v8 repro control ✅ (implementation exonerated)**: exact v2 recipe on the post-S1c/d(T) code reproduces v2's entrainment (stride 0.343/0.488/0.627/0.691 at cmd 0.35–0.8 vs v2 0.343/0.486/0.620/0.719; match ≤0.95; 0 falls; CoT slightly better). Cells ≥0.8 are extrapolation for BOTH runs (trained band (0.5, 0.7)): v8's achieved ceiling landed at ~0.69 vs v2's ~0.78 (v3, trained on the band, still lost 1.0 at 0.532) — **the followable envelope/ceiling is a per-checkpoint property**; re-measure it (and the CoT map) before freezing any other LL for S3. v5/v6/v7 failures = training-setup effects, NOT code bugs. |
+| **S2** | Train A1a LL to follow a commanded **stride period** | achieved `stride_period_s` tracks command; tracking + survival ≥ A1 | ✅ **entrained** (2026-07-02, post eval-bug fix): **v2 already follows 0.35→0.8 near-1:1** at fixed vx (err_vx ~0.06, 0 falls); CoT swings 1.11→0.60 with period → **GO**. The v2/v3/v4 "no entrainment" NO-GO verdicts were an **eval artifact** (`structure_keys` bug, see correction below); only v1's training collapse was real. |
+| **S3** | Frozen-LL learned HL (TD3) + `hl_cot_coef>0` | HL drives `cot` below fixed-0.6 baseline at A1-level tracking; converged period = `CoT(period)` min, speed-dependent | 🟡 **mechanism GO, optimum NOT reached** (2026-07-03, `a1a_s3_cadence_hl`, frozen v2 + `hl_target_mode=absolute` + `hl_cot_coef=1.0`): CoT < fixed-0.6 at every speed (−8…−22%), 0 falls, gait_match 0.94, tracking held — but the HL sat on a near-natural **flat ~0.65 stride** (NOT the map's long-stride-at-low-speed optimum) and tracks vel worse than the oracle (err_vx 0.17–0.30 vs 0.045–0.205). Coef too weak vs tracking → the S5 lever. See Results. |
+| **S4** | Co-trained A1a vs A0 / A0+energy / A1 (≥2 seeds) | A1a `cot` < A0 at A0-level tracking + fall_rate; A0+energy regresses tracking. Honest disconfirmer logged if A0+energy matches | 🔴 **co-trained learned-cadence FAILS** (2026-07-04, `a1a_s4_cotrain_cot1_*`, full arch: TD3+HIRO+delta+velobs). At `hl_cot_coef=1.0` the HL drifts to a short expensive cadence (~0.48), CoT **+30–47% ABOVE** its own fixed-0.6 baseline — ar 0.02 vs 0.05 identical (ar is NOT the lever). NB tracking is NOT regressed: err_vx ~0.3 at fixed-vx matches the A1 keeper (0.25) — the "5× regression" was a fixed-vx-vs-random-command benchmark artifact. A0/A0+energy controls not built (approach fails first). See Results + S5. |
+| **S5** | Sweep `hl_cot_coef` | fall_rate flat as weight rises; cap below any rise (suicide-attractor guard) | 🔴 **NEGATIVE — higher coef destabilizes, doesn't help** (2026-07-04, `a1a_s5_cot{2,4,8}_ar05`). Raising coef makes cadence *shorter* (0.30) not longer, **collapses entrainment** (gait_match 0.9→0.5, LL ignores clock), **degrades tracking** (eval err_vx→1.65, train err_vx~4 at coef 8), CoT never beats fixed-0.6. fall_rate stays 0 in eval (no suicide attractor) but ep_len/fell_over erode in train. **S3's frozen-LL win does NOT transfer to co-training at any coef** — penalty-domination-style collapse (ADR warned raw energy would; normalized CoT at high weight reintroduces it). See Results. |
 | **S6** | OOD proxy: Narrow→Wide DR / push / terrain (secondary) | exploratory; big edge not expected pre-A2. S4 is the load-bearing result | ⬜ |
 
 ## Results
@@ -70,7 +71,8 @@ is untested.** Fix (v2): resample period **per episode** (held constant within a
 start with a **narrow range (0.5, 0.7)** around A0's 0.58 s so the warm-start can entrain, then
 widen. Re-sweep eval within the trained band (0.5–0.7).
 
-**S2 v2 (2026-07-01)** — `a1a_s2_cadence_v2`, per-episode period, narrow (0.5, 0.7). Fixed v1's
+**S2 v2 (2026-07-01) [SUPERSEDED — the "no entrainment" read was the eval bug, see S2
+correction 2026-07-02]** — `a1a_s2_cadence_v2`, per-episode period, narrow (0.5, 0.7). Fixed v1's
 collapse: eval (deterministic) is a **healthy walker** — err_vx 0.11 / err_yaw 0.15 (≈A0), 0
 falls, full episodes, CoT 0.96. But **no real entrainment**: `stride_s` flat at 0.573 (= natural
 ~A0 gait) for every commanded period. The narrow band straddles the natural cadence, so the LL
@@ -79,6 +81,256 @@ training `error_vel_xy 0.745` was a stochastic-policy artifact; `action std 0.93
 tracks fine.) **Go/no-go still open** — CoT is flat only because actual cadence never moved. Fix
 (v3): widen the range (curriculum from v2) so the natural gait can't satisfy the extremes and
 entrainment is forced. Watch the `v=f·L` coupling (off-natural cadence may cost tracking).
+
+**S2 v3 (2026-07-01) [SUPERSEDED — same eval bug; the `v=f·L`-wall diagnosis and the v4
+coef-crank are retracted]** — `a1a_s2_cadence_v3`, resume v2, wide (0.35, 1.0), coef 0.5, +3000 it.
+Survival + tracking fully recovered (eval err_vx **0.08** < A0, 0 falls, full episodes), but
+**still no entrainment**: deterministic stride flat at **~0.55 s for every commanded period
+0.35→1.0** (Δ from +0.21 to −0.45), CoT flat ~1.05. Diagnosis: the `v=f·L` conflict — velocity
+tracking (goal weighted 3×) pins the LL to its inherited natural velocity→period mapping;
+`ll_cadence_coef=0.5` is outweighed, so the LL tracks velocity and eats the small period
+penalty. (Note: 0.55 s is the *average* of the natural mapping across the −0.5..1.0 m/s range,
+not a single optimum — so real CoT is reclaimable *if* the LL can be made to follow an override.)
+**v4 diagnostic:** resume v3, `ll_cadence_coef=2.0` (`a1a_s2_cadence_v4_coef2`) — does hard weight
+force entrainment (→ map the period-vs-tracking trade), or does it pin/march (→ pivot the HL job)?
+Clean read needs a **fixed-velocity** period sweep (aggregate averages the natural mapping).
+
+**S2 correction (2026-07-02) — eval bug found; ENTRAINMENT CONFIRMED, GO.** Every eval/replay
+of v2–v4 ran with the cadence channel **off**: `play.py` rebuilds the runner cfg from defaults
+and restores only whitelisted `structure_keys` from `params/agent.yaml`, and `hl_cadence` was
+missing from the list → no `hrl_period`/`hrl_phase` buffers, `mdp.phase` fell back to the fixed
+0.6 s clock, `--eval-cadence-period` silently inert behind `if self.hl_cadence`. Exposed by (i)
+`gait_match` identical to 3 decimals (0.812) across seven commanded periods (impossible if the
+schedule varied) and (ii) the phase-scramble test: **A0 is near-perfectly phase-slaved to its
+clock obs** (match 0.973; zero/random clock → err_vx 0.075→0.41/0.53, stride 0.57→0.23), so the
+clock input is load-bearing, not ignored. Fix: `hl_cadence`, `cadence_period_range`,
+`ll_cadence_coef`, `hl_cot_coef` added to `structure_keys` (`scripts/play.py:170`).
+
+**Corrected fixed-velocity sweep (vx=0.5, 64 envs × 600 steps, 1 seed):**
+
+| cmd period | v2 stride | v2 CoT | v2 err_vx | v3 stride | v3 CoT |
+|---|---|---|---|---|---|
+| 0.35 | **0.343** | 1.110 | 0.069 | **0.343** | 1.392 |
+| 0.50 | **0.486** | 1.051 | 0.064 | **0.485** | 1.139 |
+| 0.65 | **0.620** | 0.859 | 0.064 | **0.618** | 0.872 |
+| 0.80 | **0.719** | 0.684 | 0.065 | **0.700** | 0.626 |
+| 1.00 | 0.782 | 0.601 | 0.093 | 0.532 (lock lost) | 0.698 |
+
+Reads: (i) **near-1:1 entrainment 0.35→0.8** with tracking preserved and 0 falls — v2 (trained
+only 0.5–0.7) generalizes far outside its band, consistent with phase-slaving; v4's coef-crank
+was never needed. (ii) **CoT swings ~45% with period at constant speed** (1.11→0.60) — the
+natural 0.58 s gait is NOT energy-optimal at 0.5 m/s; the optimum sits at long strides near the
+entrainment edge (v3 loses lock at 1.0). The cadence lever moves energy → **S1c/S3 premise
+validated**. (iii) Caveat: A0 at the same fixed 0.5 m/s has CoT **0.577** — the A1a LL is not
+yet more efficient than A0 overall; frame the S4 claim within-architecture or improve LL
+efficiency. (iv) Lessons → `A1_findings.md` ledger (structure_keys coupling; effect-asserting
+smokes; a metric that cannot vary = broken plumbing).
+
+**CoT(period, vx) map (2026-07-02, v2, 64×600×1 seed, fixed-command eval).** Entrainment is
+robust across the whole speed range (stride ≈ command 0.35→0.8 at every vx; ceiling ~0.8 for a
+commanded 1.0; **0 falls in all 20 cells**). The two decision-relevant grids:
+
+| CoT: P \ vx | 0.2 | 0.5 | 0.8 | 1.0 |
+|---|---|---|---|---|
+| 0.35 | 1.813 | 1.098 | 0.924 | 0.892 |
+| 0.50 | 1.814 | 1.053 | 0.929 | 0.905 |
+| 0.65 | 1.406 | 0.854 | 0.763 | 0.762 |
+| 0.80 | 1.035 | 0.685 | 0.643 | 0.657 |
+| 1.00 | **0.751** | **0.587** | **0.608** | 0.649 |
+| 1.15 ⚠ | 0.740 | 0.703 | — | — |
+| 1.30 ⚠ | 0.908 | 0.808 | — | — |
+
+⚠ = past the entrainment ceiling (slow-end probe, 2026-07-02): lock degrades (match
+0.87→0.60), achieved stride regresses to 0.65–0.72, and CoT *rises* (power ~2×) as the
+phase-slaved LL fights the unfollowable clock. (The re-measured P=1.0 cells replicated the
+map within ~0.01 CoT — the eval is seed-robust at this magnitude.)
+
+| err_vx: P \ vx | 0.2 | 0.5 | 0.8 | 1.0 |
+|---|---|---|---|---|
+| 0.50 | 0.045 | 0.068 | 0.106 | **0.135** |
+| 0.65 | 0.044 | 0.062 | 0.111 | 0.166 |
+| 1.00 | 0.063 | 0.088 | 0.150 | **0.205** |
+
+Reads: (i) longer strides are cheaper at every speed, but the saving **shrinks with speed**
+(0.65→1.0 saves 47% CoT at 0.2 m/s, only 15% at 1.0 m/s) and the curve is ~flat 0.8→1.0 at
+high speed. (ii) The **tracking cost of long strides grows with speed** (at 1.0 m/s err_vx
+0.135→0.205 going P 0.5→1.0; at 0.2 m/s long strides are ~free). So the composite optimum
+(tracking + CoT) is **speed-dependent** — long strides at low speed, shorter at high speed —
+the human-like cadence–speed relation emerging from the trade, and a genuinely non-trivial
+speed-conditional mapping for the HL to learn (the richer-HL-job claim, now with data).
+(iii) `cadence_period_range` for S1c: (0.35, 1.0) is followable everywhere; achieved ceiling
+~0.8.
+
+**Slow-end probe (2026-07-02, v2, commanded 1.0/1.15/1.3 at vx 0.2/0.5).** The achieved-stride
+ceiling is **~0.8 s regardless of command**: past ~1.0 the lock degrades (match 0.87→0.60) and
+the stride regresses (0.79→0.65–0.72) — no falls, it just stops obeying. Crucially **CoT RISES
+past the ceiling** (0.59→0.81 at 0.5 m/s; power ~2×): a phase-slaved LL fighting an unfollowable
+clock burns energy, so the CoT(period) optimum is interior, at the entrainment edge (~0.8 s
+achieved). → **(0.35, 1.0) is the complete S1c command envelope; nothing to gain past 1.0** with
+this LL. **Caveat: the interior optimum is conditional on the fixed 0.56 duty** — the
+past-ceiling CoT rise measures the LL fighting an unfollowable clock, not an inherent cost of
+long strides; under a `d(T)` schedule the low-speed optimum could sit past 1.0 s, so a small
+`d(T)` pilot at vx=0.2 would either extend the CoT map or confirm the interior optimum honestly. Slow-stride enablers (period-dependent duty factor — the fixed 0.56 duty demands
+minimal double support at long T, the unnatural slow gait; possibly a slow-end curriculum;
+note training-length is NOT the lever: v3 = v2 + 3000 wide-band iters and its slow end got
+*worse*) are filed as future work, off the A1a critical path.
+
+**Gait geometry — why the slow end is hard (the user's step-cycle model, 2026-07-02).** Per step:
+`T_step = 1/f + s` (swing/single-support time + double-stance time), `x = v·T_step` →
+`s = x/v − 1/f`. At fixed speed, a longer commanded period forces a longer step `x`, which the
+gait must absorb as longer swing (`1/f`, one-legged balance — hard) or longer double stance
+(`s` — cheap). The `feet_gait` schedule (duty 0.56, offsets [0, 0.5]) **fixes the split**:
+`1/f = 0.44·T_stride`, `s = 0.06·T_stride`, so swing absorbs **88%** of any period increase —
+the hard way. At the achieved ceiling (~0.8 s stride) swing is ~0.35 s ≈ 1.2× the inverted-
+pendulum time constant (√(0.88/9.81) ≈ 0.3 s). Natural slow walking instead grows the double-
+stance share (duty ↑ with T) — hence the period-dependent duty factor `d(T)` as the future
+slow-stride enabler.
+
+**How humans do it (corroboration + a principled `d(T)` target).** Humans absorb slower walking
+almost entirely in **double stance, not swing**: duty rises from ~0.6 at normal speed to
+~0.65–0.7+ when slow, double-support share grows from ~20% to ~25–30%+, while **single-support
+(swing) time stays ~constant near 0.4 s** across a wide speed range (duty < 0.5 = the run
+transition, flight phase). So humans hold `1/f` fixed and let `s` take all the variation — the
+opposite of our fixed 0.44/0.06 split. Principled fix target: **hold swing ≈ const**, i.e.
+`d(T) ≈ 1 − τ_swing/T_stride` with `τ_swing ≈ 0.30–0.35 s` → d ≈ 0.56 at T=0.7 (matches the
+trained gait) rising to ~0.70 at T=1.1, keeping single-support near the pendulum time constant
+(√(0.88/9.81) ≈ 0.3 s) across the range instead of blowing past it. **Implemented 2026-07-03**
+(S2d): `cadence_swing_time=0.31` — the *continuity* calibration (swing of the trained duty-0.56
+gait at T=0.7, so the floor departs exactly at 0.70 s; the pendulum constant 0.30 was the
+runner-up, difference negligible) — with `cadence_duty_range=(0.56, 0.70)` as the shared clamp
+for `feet_gait` AND play's `gait_match` (single source of truth via structure_keys). v5
+(`a1a_s2_cadence_v5_duty`) trains from scratch (A0 warm start, range (0.35, 1.3), 5001 it,
+seed 42) as an independent measurement — not resumed from v2, so the d(T) effect isn't
+confounded by 5000 fixed-duty iterations. Success = ceiling past 0.8 s + fast band unregressed;
+then re-measure the CoT(period, vx) slow cells (the interior-optimum caveat above).
+
+**S1c implemented (2026-07-02).** New cfg field `hl_cadence_source: "random" | "hl"` (default
+`random` = the S2 per-episode source, so every pre-S1c checkpoint restores with unchanged HL
+shapes). With `"hl"` (requires `hl_algorithm=td3`, loud error otherwise) the TD3 HL emits the
+stride period as one extra tanh action dim: HL action = `goal_dim+1` (actor/critics/replay
+buffer sized accordingly; HIRO relabel only relabels the goal dims and carries the period column
+through), mapped affinely from [-1,1] to `cadence_period_range` and written to `hrl_period` at
+each fire. Phase integrates incrementally, so a per-window period change never jumps the clock;
+the per-episode random resample is disabled when the HL owns the period. CoT enters the HL
+*window* reward: per-env command-gated energy/distance accumulated per step; at window close
+`R_HL += -hl_cot_coef * E_win / (m g * max(d_win, d_floor))`, `d_floor = 0.1*c*dt` (a stuck
+robot under command is expensive but finite; an all-gated-off window is exactly 0). New logs
+`hl/cot_pen`, `hl/period_mean`; ONNX metadata gains `hl_cadence_source` + `cadence_period_range`
+(the C++ side mapping is S3+ work, once there is a trained cadence HL worth deploying).
+`hl_cadence_source` was added to the play.py `structure_keys` at creation (the S2 eval-bug
+lesson). Tests 18/18 + v2 compat: dims grow only when on; relabel passthrough; endpoint map
+(g=-1 -> 0.35, g=+1 -> 1.0); CoT gate exact-0 / finite-negative through the real `learn()`;
+phase continuity across a 0.4->0.9 pin change; v2 `model_5000` benchmarks cleanly through the
+updated play path (restored as `random`, gait_match 0.91).
+
+**S2d v5 (2026-07-03, FAILED entrainment)** — `a1a_s2_cadence_v5_duty`: from-scratch A0
+warm start + d(T) (swing 0.31) + the full (0.35, 1.3) band from iteration 0 (5001 it, seed 42;
+chosen deliberately as a v2-independent measurement). Training was healthy (ep_len 1000, 0
+falls, cadence_rew plateau raw ~0.64) but the fixed-vx sweep shows **no entrainment**: stride
+flat ~0.39 s for every command 0.5→1.3 (v2: 0.49→0.78), gait_match ~0.65, CoT flat ~0.74.
+NOT an eval artifact: training raw cadence reward (0.64) == eval gait_match (0.65) — the two
+independent measurements agree the clock was ignored (this cross-check is the standard now).
+Notably tracking is *better* than v2 (err_vx 0.041–0.051, 0 falls) and the natural gait it
+settled on is fast (~0.4 s) and fairly efficient (CoT 0.73 vs v2's 1.05 at P=0.5) — a good
+walker that treats the clock as noise. **Read: curriculum failure, not d(T)** — v2 entrained
+because its narrow band (0.5–0.7) straddled the warm-start's natural 0.58 s (following = small
+change, immediate reward), then widening preserved the lock (v3); giving the fresh walker
+mostly-unfollowable periods from step 0 leaves no entrainment gradient and clock-ignoring is
+the stable compromise. **Fix (v6)**: resume the entrained v2 `model_5000` with d(T) + (0.35,
+1.3), +3000 it — v3 (same resume/budget, fixed duty) is the clean control for d(T)'s effect on
+the slow cells.
+
+**S2d v6 (2026-07-03, FAILED — d(T) at resume LOST the mid-band lock)** —
+`a1a_s2_cadence_v6_duty_resume` (resume v2 `model_5000`, τ=0.31, (0.35, 1.3), +3000 it).
+Fixed-vx sweep: still locks 0.35–0.5 (stride 0.343/0.487) but **regresses to a ~0.42 s
+clock-ignoring gait from 0.65 up** (0.466/0.426/0.423 at cmd 0.65/0.8/1.0; v2 followed to
+0.78, v3 to 0.70). 0 falls, err_vx ~0.065, CoT flat ~0.80; training raw cadence_rew 0.64 ==
+eval match (real, not plumbing). **Diagnosis: the schedule re-scored the already-locked gait**
+— with τ=0.31 the floor departs at T=0.70, so v2's best-following 0.7–0.8 region went from
+rewarded (duty 0.56) to penalized (wants 0.60–0.61) the moment training resumed, while ~30%
+of episodes (the 1.0–1.3 slice) were unfollowable noise; the gradient chose the clock-ignoring
+compromise. Confound noted: v6 ≠ v3 in band too (1.3 vs 1.0), so attribution is d(T)-rescoring
+and/or the extra unfollowable slice — both point to the same fix. **v7 (staged, running)**:
+τ=**0.32** (floor departs at 0.32/0.44 ≈ 0.73 s; duty at 0.8 shifts only 0.56→0.60) + band
+back to **(0.35, 1.0)** (no unfollowable-beyond-ceiling dilution), resume v2, +3000 it.
+Stage 2 (widen to 1.3) only if the stage-1 ceiling moves past 0.8.
+
+**S2d v7 (2026-07-03, stage 1 — ceiling UNMOVED; d(T) program PARKED)** —
+`a1a_s2_cadence_v7_duty_staged` (resume v2, τ=0.32 → floor departs 0.73 s, band (0.35, 1.0),
++3000 it). Sweep (vx=0.5): locks 0.35–0.65 near-1:1 (0.342/0.488/0.609 — v6's damage fixed by
+the recalibration + clean band), 0 falls, healthy general bench (err_vx 0.087, match 0.88).
+But **0.8 follows worse than the v3 fixed-duty control** (stride 0.580 vs v3 0.700 / v2 0.719;
+caveat: match there is high 0.85 and CoT/power are the best 0.8-cell yet (0.64, 210 W) —
+consistent with partial following + contact chatter biasing the footfall interval down), and
+beyond-band regresses to ~0.44 (v2 extrapolated to 0.78). **Cross-attempt conclusion (v5, v6,
+v7):** the phase-slaved LL follows the clock *rate* readily but does not adopt a different
+*stance shape* when the reward schedule offers one — every duty re-grade costs some following
+(v6 badly, v7 mildly at 0.8) and none opened the slow band. The "swing-time is the binding
+constraint, duty absorbs it" hypothesis is behaviorally unconfirmed at these budgets/curricula
+(remaining untried: duty-annealing curriculum mid-run; longer budgets; explicit duty obs).
+**Keeper: v2 `model_5000`** (canonical cadence LL; followable envelope (0.35, 1.0); its
+CoT(period,vx) map = the S3 answer key). The interior-optimum caveat stands unresolved — the
+slow cells past 1.0 remain unmeasured under a followed d(T) gait.
+
+**S3 (2026-07-03, `a1a_s3_cadence_hl`, `logs/rsl_rl/h1_2_velocity_a1/2026-07-03_16-17-10_*`)** —
+frozen v2 `model_5000` + TD3 HL, `hl_cadence_source=hl`, `hl_target_mode=absolute` (the oracle-
+trained frozen LL only knows absolute command-range V\*; delta would feed it OOD targets),
+`hl_cot_coef=1.0`, seed 42, 5001 it. Converged clean: ep_len 1000, 0 falls, `hl/act_abs_mean`
+0.78 (unsaturated), `metrics/cot` 0.91→0.805. Fixed-vx sweep (64×600×2 seeds), HL's own period
+vs `--eval-cadence-period 0.6` (same frozen LL):
+
+| vx | HL CoT | HL stride | gait_match | HL err_vx | falls | fixed-0.6 CoT | ΔCoT |
+|---|---|---|---|---|---|---|---|
+| 0.2 | 2.239 | 0.615 | 0.944 | 0.166 | 0 | 2.758 | **−18.8%** |
+| 0.5 | 1.036 | 0.608 | 0.927 | 0.235 | 0 | 1.127 | **−8.0%** |
+| 0.8 | 0.711 | 0.697 | 0.928 | 0.301 | 0 | 0.915 | **−22.3%** |
+| 1.0 | 0.748 | 0.665 | 0.924 | 0.270 | 0 | 0.904 | **−17.3%** |
+
+Reads: (i) **mechanism GO** — the learned HL drives CoT below the fixed-0.6 clock at every speed
+(−8…−22%), tracking held/slightly better, 0 falls; entrainment real (gait_match 0.94 agrees with
+training `ll/cadence_rew`, the truth cross-check). (ii) **Optimum NOT reached** — the HL sat on a
+near-natural **flat ~0.61–0.70 stride at all speeds**, NOT the map's speed-dependent long-strides-
+at-low-speed structure (vx=0.2 could hit CoT ~0.75 at P=1.0; HL got 2.24). (iii) Absolute CoT sits
+well above the oracle map because the **learned TD3 HL tracks velocity worse than the oracle**
+(err_vx 0.17–0.30 vs the map's 0.045–0.205) — fewer metres per joule inflate CoT. **Diagnosis:**
+`hl_cot_coef=1.0` is too weak vs the window tracking term (~10–14 vs CoT ~0.8) → S5 coef sweep is
+the lever, deferred to the full arch. **Recipe note:** v2 (this frozen LL) trained at
+`ll_action_rate_coef=0.05` — an explicit launch override, NOT the rl_cfg/`train_h1_2_a1.sh`
+default (both 0.02) nor the documented keeper (0.02, the value that cured the `fell_over` spike).
+Inert here (LL frozen) but **load-bearing for S4** (co-trained LL): reconcile before S4.
+
+**S4 + S5 (2026-07-04) — the fully co-trained learned-cadence A1a FAILS; the working A1a is the
+staged/frozen one.** Full/correct arch (TD3+HIRO, delta/directional, velobs, warm-start A0, cadence
+source=hl, 10001 it). Runs: `a1a_s4_cotrain_cot1_ar05_s42`, `_ar02_s42`, `a1a_s5_cot{2,4,8}_ar05_s42`.
+Fixed-vx benchmark, HL period vs `--eval-cadence-period 0.6`:
+
+| coef (ar) | HL stride | gait_match | ΔCoT vs fixed-0.6 | err_vx | fall_rate |
+|---|---|---|---|---|---|
+| 1.0 (0.05) | 0.47 | 0.92 | **+33%** | 0.44 | 0 |
+| 1.0 (0.02) | 0.43 | 0.90 | **+40%** | 0.50 | 0 |
+| 2.0 (0.05) | 0.31 | 0.55 | −3% | 0.67 | 0 |
+| 4.0 (0.05) | 0.33 | 0.50 | 0% | 0.64 | 0 |
+| 8.0 (0.05) | 0.28 | 0.50 | 0% | 1.65 | 0 |
+
+Reads: (i) **at coef 1 the HL drifts to a short (~0.45) EXPENSIVE cadence** — CoT +30–47% above its own
+fixed-0.6 baseline (opposite of S3's −8…−22% frozen-LL win). (ii) **Raising coef makes it worse:**
+cadence shorter (→0.30, natural), **entrainment collapses** (gait_match 0.9→0.5 — LL ignores the
+clock, confirmed by train `cadence_rew` 0.30→0.24), **tracking degrades** (eval err_vx→1.65, train
+err_vx~4 at coef 8), CoT never beats fixed-0.6. No suicide attractor (eval fall_rate 0) but train
+ep_len/fell_over erode. (iii) **ar 0.02 ≈ 0.05** — ar is not the lever (and the earlier "5× tracking
+regression" was a fixed-vx-vs-random-command **benchmark artifact**: the A1 keeper itself gives
+err_vx 0.25 / err_yaw 0.82 at fixed-vx=0.5). **Root cause:** S3 worked because the FROZEN LL is a
+stable entraining tracker the HL just picks cadence against; in co-training the CoT pressure makes the
+JOINT policy abandon entrainment + tracking (penalty-domination, as the ADR warned raw energy would).
+**Conclusion: the A1a that works = the STAGED/frozen architecture (S2 random-cadence+oracle entrained
+LL → freeze → S3 learned-cadence HL), NOT fully-joint co-training.** Forward options open (rework the
+CoT reward vs adopt the staged frozen-LL A1a as the deliverable).
+
+**From-scratch track (2026-07-06).** `ll_goal_kernel=exp` + true-terminal `fell_over`
+trains the A1a LL from scratch (oracle HL, cadence on, random source) to better-than-A0
+tracking — warm-start no longer required; failure chain + numbers → `A1_findings.md`
+(from-scratch kernel row). Opens cluster TD3+relabel from-scratch arms and a possible
+from-scratch lineage for the staged S3 architecture.
 
 ## Open knobs (set by data, not guessed)
 - `cadence_period_range` — from S0 (A0 walkable band ∩ `CoT(period)` minimum). Start `(0.5, 1.4)`.
