@@ -238,10 +238,11 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   small divergence from A0's 0.05 is a deliberate A0-vs-A1 reward difference (note it in RQ2).
   0 disables (clean A1-baseline ablation)."""
   ll_posture_coef: float = 0.5
-  """Weight on the arms+waist deviation-from-default penalty added to the LL intrinsic
-  (ADR-0002), keeping the upper body deployable (no behind-the-back drift / wrist twist).
-  No A0 analog (A0 uses the positive exp ``variable_posture``); 0.5 is a starting value to
-  tune up until the arms settle. 0 disables."""
+  """Weight on the deviation-from-default penalty added to the LL intrinsic: arms+waist
+  (ADR-0002, deploy hygiene) **+ hip yaw/roll (2026-07-07)** — the goal space is heading-
+  invariant, so without the hip anchor from-scratch LLs walk with a ~20° hip twist (A0
+  pins the same joints via its tightest ``variable_posture`` stds). ~No-op for aligned
+  warm-started policies (deviation ≈ 0). 0 disables."""
   ll_goal_kernel: Literal["l2", "exp"] = "l2"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =
@@ -363,7 +364,7 @@ def unitree_h1_2_hrl_runner_cfg() -> HrlRunnerCfg:
       desired_kl=0.005, #original kl was 0.01, best A0 was 0.005
       max_grad_norm=1.0,
     ),
-    experiment_name="h1_2_velocity_a1",
+    experiment_name="h1_2_velocity_a1_v2",
     wandb_project="biped_hrl",
     save_interval=100,
     num_steps_per_env=24,

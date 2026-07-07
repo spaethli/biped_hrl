@@ -193,12 +193,14 @@ class GoalSpace:
     """LL intrinsic reward, shape [N].
     ``l2`` (HIRO): -Σ_c w_c ||target_c - achieved_c||_2 (strictly negative; needs
     ``fell_over=time_out`` or falling truncates the negative stream — suicide attractor).
-    ``exp`` (A0-parity, for from-scratch training; pair with a true-terminal
-    ``fell_over``): each component mirrors its A0 reward term with V* substituted for
-    the command — velocity = track_linear_velocity + track_angular_velocity exp kernels,
-    orientation = body_orientation_l2's quadratic penalty, height = quadratic (no A0
-    analog; weight keeps the height goal dim from being gradient-dead). Positive-bounded
-    (max 2), so death forfeits future value instead of ending a negative stream.
+    ``exp`` (for from-scratch training; pair with a true-terminal ``fell_over``):
+    velocity = A0's track_linear_velocity + track_angular_velocity exp kernels with V*
+    substituted for the command; orientation/height = exp kernels too (σ² 0.25 / 0.01).
+    **Strictly positive, bounded (0, 4]** — under ANY goal target, not just the oracle's
+    nominal-pinned ones: with the original quadratic orientation/height penalties an
+    infant learned HL's garbage targets drove the reward to ~-3.5/step, which with the
+    true-terminal fell_over re-created the suicide attractor (co-train collapse
+    2026-07-06, ep_len 7). Death forfeits a positive stream in every regime.
     Component ``weight`` (goal_weights) applies to ``l2`` only."""
     diff = target - achieved
     r = torch.zeros(diff.shape[0], device=diff.device)
@@ -210,9 +212,9 @@ class GoalSpace:
       elif c.name == "velocity":
         r = r + torch.exp(-d[:, :2].square().sum(-1) / 0.25) + torch.exp(-d[:, 2].square() / 0.5)
       elif c.name == "orientation":
-        r = r - d.square().sum(-1)
+        r = r + torch.exp(-d.square().sum(-1) / 0.25)
       elif c.name == "height":
-        r = r - 10.0 * d.square().sum(-1)
+        r = r + torch.exp(-d.square().sum(-1) / 0.01)
       else:
         raise ValueError(f"no exp-kernel form for goal component '{c.name}'")
       i += c.dim

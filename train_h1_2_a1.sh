@@ -18,6 +18,8 @@
 #   WARM_START     A0 ckpt path, or "none" for from-scratch (tags _scratch)
 #   HL_CADENCE     True|False (default False) -> tags _cad (random per-episode source)
 #   CADENCE_SOURCE random|hl (default random; hl needs td3, tags _cadhl)
+#   HL_ALGO        td3|oracle (default td3; oracle = no learned HL, no relabeling; tags _oracle)
+#   HL_COT         float (default 0.0) -> tags _cotXpX; needs CADENCE_SOURCE=hl to steer cadence
 #   NUM_ENVS, MAX_ITER
 #
 # Examples:
@@ -51,6 +53,8 @@ LL_ACTION_RATE=${LL_ACTION_RATE:-0.02}
 GOAL_KERNEL=${GOAL_KERNEL:-l2}
 HL_CADENCE=${HL_CADENCE:-False}
 CADENCE_SOURCE=${CADENCE_SOURCE:-random}
+HL_ALGO=${HL_ALGO:-td3}
+HL_COT=${HL_COT:-0.0}
 NUM_ENVS=${NUM_ENVS:-4096}
 MAX_ITER=${MAX_ITER:-10001}
 WARM_START=${WARM_START:-logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt}
@@ -82,7 +86,15 @@ if [[ "$HL_CADENCE" == "True" ]]; then
   CAD_TAG="_cad"; [[ "$CADENCE_SOURCE" == "hl" ]] && CAD_TAG="_cadhl"
 fi
 
-RUN_NAME="a1_td3_delta_tracking${VEL_TAG}${POSE_TAG}${AR_TAG}${KERNEL_TAG}${WS_TAG}${CAD_TAG}_s${SEED}"
+# HL algorithm: oracle drops the TD3/relabel flags entirely (M2-style LL isolation)
+HL_FLAG="--agent.hl-algorithm td3 --agent.relabeling hiro"; HL_TAG=""
+[[ "$HL_ALGO" == "oracle" ]] && HL_FLAG="--agent.hl-algorithm oracle" && HL_TAG="_oracle"
+
+COT_FLAG=""; COT_TAG=""
+(( $(echo "$HL_COT > 0" | bc -l) )) && COT_FLAG="--agent.hl-cot-coef ${HL_COT}" \
+  && COT_TAG="_cot$(echo $HL_COT | tr '.' 'p')"
+
+RUN_NAME="a1_td3_delta_tracking${VEL_TAG}${POSE_TAG}${AR_TAG}${KERNEL_TAG}${WS_TAG}${CAD_TAG}${HL_TAG}${COT_TAG}_s${SEED}"
 
 echo "[a1] RUN=$RUN_NAME  velobs=$HL_OBS_VEL  posture=$LL_POSTURE  action_rate=$LL_ACTION_RATE  kernel=$GOAL_KERNEL  warm_start=$WARM_START  cadence=$HL_CADENCE/$CADENCE_SOURCE  seed=$SEED"
 
@@ -90,12 +102,12 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS} \
     --agent.max-iterations ${MAX_ITER} \
     $WS_FLAG \
-    --agent.hl-algorithm td3 --agent.relabeling hiro \
+    $HL_FLAG \
     --agent.hl-target-mode delta --agent.hl-reward-mode tracking \
     --agent.seed ${SEED} \
     --agent.ll-posture-coef ${LL_POSTURE} \
     --agent.ll-action-rate-coef ${LL_ACTION_RATE} \
-    $VEL_FLAG $KERNEL_FLAG $CAD_FLAG \
+    $VEL_FLAG $KERNEL_FLAG $CAD_FLAG $COT_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

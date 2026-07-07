@@ -1,4 +1,5 @@
 #include "FSM/State_RLHRL.h"
+#include <algorithm>
 #include "unitree_articulation.h"
 #include "isaaclab/envs/mdp/observations/observations.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
@@ -155,6 +156,11 @@ void State_RLHRL::run()
 {
     auto action = env->action_manager->processed_actions();
 
+    // Split deploy (ADR-0005): joints listed in hold_joint_ids track default_joint_pos
+    // instead of the policy action (upper body held; obs still see all joints).
+    static const auto hold_ids = env->cfg["hold_joint_ids"]
+        ? env->cfg["hold_joint_ids"].as<std::vector<int>>() : std::vector<int>{};
+
 #if SAFETY_FILTER
     // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
     const auto& q = env->robot->data.root_quat_w;
@@ -205,6 +211,8 @@ void State_RLHRL::run()
         float q_meas = env->robot->data.joint_pos[i];
         // alpha=0: pure policy output  |  alpha=1: hold at current measured position
         float q_cmd = (1.0f - alpha) * action[i] + alpha * q_meas;
+        if (std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end())
+            q_cmd = env->robot->data.default_joint_pos[i];
         lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
     }
 
@@ -218,7 +226,9 @@ void State_RLHRL::run()
     }
 #else
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {
-        lowcmd->msg_.motor_cmd()[(int)env->robot->data.joint_ids_map[i]].q() = action[i];
+        int jid = (int)env->robot->data.joint_ids_map[i];
+        bool held = std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end();
+        lowcmd->msg_.motor_cmd()[jid].q() = held ? env->robot->data.default_joint_pos[i] : action[i];
     }
 #endif
 }

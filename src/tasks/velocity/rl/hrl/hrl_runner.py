@@ -92,8 +92,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
                              command_threshold=0.1, command_name="twist",
                              sensor_name="feet_ground_contact",
                              swing_time=self.cadence_swing_time)
+    # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
+    # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
+    # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
     ub_ids, _ = env.unwrapped.scene["robot"].find_joints(
-      [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"]
+      [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*", ".*hip_yaw.*", ".*hip_roll.*"]
     )
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
@@ -478,7 +481,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           cot_dist += _d_step.sum().item()
           if self.hl_cot_coef != 0.0:  # S1c: per-env window CoT for the HL reward
             win_energy += _e_step
-            win_dist += _d_step
+            # HL-reward distance = SIGNED displacement along the commanded direction
+            # (undirected |v| let the cot1 HL earn cheap meters walking sideways,
+            # 2026-07-07; signed so fwd/bwd oscillation nets ~0 — the window's
+            # d_floor clamp handles a negative total). Metric above stays undirected.
+            _cmd = uenv.command_manager.get_command("twist")[:, :2]
+            _d_par = ((rd_.root_link_lin_vel_b[:, :2] * _cmd).sum(dim=-1)
+                      / _cmd.norm(dim=-1).clamp(min=1e-6)) * _eng * uenv.step_dt
+            win_dist += _d_par
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.

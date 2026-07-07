@@ -39,7 +39,7 @@ def unitree_h1_2_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       desired_kl=0.005, # changed from 0.01 to prevent collapse
       max_grad_norm=1.0,
     ),
-    experiment_name="h1_2_velocity",
+    experiment_name="h1_2_velocity_v2",
     wandb_project="biped_hrl",
     save_interval=100,
     num_steps_per_env=24,

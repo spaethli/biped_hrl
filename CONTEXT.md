@@ -99,6 +99,32 @@ uncontrolled arm swing.
 _Avoid_: pose reward (`variable_posture` is a positive exp term; the LL uses a negative
 deviation penalty).
 
+**Nominal model**:
+The unrandomized simulation plant (actuator PD gains, joint friction, armature, effort
+limits) that every architecture trains on; DR samples around it, it is not itself
+randomized.
+_Avoid_: "the sim", "the env" (broader: those include rewards/observations); "model"
+alone (collides with the policy networks).
+
+**Model v2**:
+The corrected, versioned nominal model (hold-gain upper body, nonzero joint friction)
+that all A0-A4 runs use from its landing onward. Checkpoints and benchmark scores are
+not comparable across the v1/v2 boundary.
+_Avoid_: "new sim", "fixed env".
+
+**Split deploy**:
+The hardware deployment mode where the RL policy commands only the legs while a separate
+onboard controller holds the upper body at a fixed pose. The full 27-dof policy is still
+trained in sim; only its leg commands reach the robot.
+_Avoid_: "12-dof deploy" (the trained policy stays 27-dof); "lower-body policy" (there is
+one policy, partially forwarded).
+
+**Hold gains**:
+The stiff upper-body PD set used to pin the arms and waist at a fixed pose during split
+deploy, and (from Model v2) also the sim's upper-body actuator gains, so trained and
+held arm dynamics match.
+_Avoid_: "arm gains" (ambiguous with the old soft RL-arm gains); "safety gains".
+
 **Suicide attractor**:
 The failure where an always-negative reward makes early termination optimal (stop
 accruing negative reward). The reason A1 uses `fell_over = time_out` (a truncation that

@@ -29,6 +29,11 @@ A2 (A-RMA supplies adaptivity) and A3 (gait library plugs into the same cadence 
 
 ## Stages
 
+> **Model-v1 notice (ADR-0005, 2026-07-07):** every run, checkpoint, baseline table, and
+> CoT map in this section and in Results ran on the Model-v1 nominal plant. Per ADR-0005
+> they are **historical/mechanism evidence only** — no thesis-scorable A1a result may be
+> v1-based. The completion plan on Model v2 is the **Plan v2** section below.
+
 | Stage | Action | Success criterion | Status |
 |---|---|---|---|
 | **M0** | Add `mech_power_w` / `cot` / `stride_period_s` to the benchmark (`play.py`) | metrics print, no NaN, A0 baseline captured | ✅ 2026-06-30 |
@@ -39,9 +44,48 @@ A2 (A-RMA supplies adaptivity) and A3 (gait library plugs into the same cadence 
 | **S2d** | **d(T) duty schedule** (`cadence_swing_time=0.31`, `cadence_duty_range=(0.56,0.70)`) + slow-band retrain, range (0.35, 1.3) | slow-end ceiling moves past 0.8 s; fast band unregressed; tracking + survival ≥ v2 | 🟡 code ✅ (7/7 smoke). **v5 (scratch + wide band) FAILED** (clock-ignoring walker; curriculum failure). **v6 (resume v2 + τ=0.31 + (0.35,1.3)) FAILED** — d(T) re-scored v2's locked 0.7–0.8 gait (floor departs at 0.70) + 30% unfollowable episodes → lock LOST above 0.5 s (see v6 entry). → **v7 staged (τ=0.32, band (0.35, 1.0)): ceiling UNMOVED** — 0.35–0.65 lock preserved (v6's damage fixed), but 0.8 follows worse than the v3 control (stride 0.580 vs 0.700) and the slow band stays closed. Stage 2 not triggered. **d(T) parked after 3 attempts** (see v7 entry); keeper = **v2 `model_5000`**, envelope (0.35, 1.0). **v8 repro control ✅ (implementation exonerated)**: exact v2 recipe on the post-S1c/d(T) code reproduces v2's entrainment (stride 0.343/0.488/0.627/0.691 at cmd 0.35–0.8 vs v2 0.343/0.486/0.620/0.719; match ≤0.95; 0 falls; CoT slightly better). Cells ≥0.8 are extrapolation for BOTH runs (trained band (0.5, 0.7)): v8's achieved ceiling landed at ~0.69 vs v2's ~0.78 (v3, trained on the band, still lost 1.0 at 0.532) — **the followable envelope/ceiling is a per-checkpoint property**; re-measure it (and the CoT map) before freezing any other LL for S3. v5/v6/v7 failures = training-setup effects, NOT code bugs. |
 | **S2** | Train A1a LL to follow a commanded **stride period** | achieved `stride_period_s` tracks command; tracking + survival ≥ A1 | ✅ **entrained** (2026-07-02, post eval-bug fix): **v2 already follows 0.35→0.8 near-1:1** at fixed vx (err_vx ~0.06, 0 falls); CoT swings 1.11→0.60 with period → **GO**. The v2/v3/v4 "no entrainment" NO-GO verdicts were an **eval artifact** (`structure_keys` bug, see correction below); only v1's training collapse was real. |
 | **S3** | Frozen-LL learned HL (TD3) + `hl_cot_coef>0` | HL drives `cot` below fixed-0.6 baseline at A1-level tracking; converged period = `CoT(period)` min, speed-dependent | 🟡 **mechanism GO, optimum NOT reached** (2026-07-03, `a1a_s3_cadence_hl`, frozen v2 + `hl_target_mode=absolute` + `hl_cot_coef=1.0`): CoT < fixed-0.6 at every speed (−8…−22%), 0 falls, gait_match 0.94, tracking held — but the HL sat on a near-natural **flat ~0.65 stride** (NOT the map's long-stride-at-low-speed optimum) and tracks vel worse than the oracle (err_vx 0.17–0.30 vs 0.045–0.205). Coef too weak vs tracking → the S5 lever. See Results. |
-| **S4** | Co-trained A1a vs A0 / A0+energy / A1 (≥2 seeds) | A1a `cot` < A0 at A0-level tracking + fall_rate; A0+energy regresses tracking. Honest disconfirmer logged if A0+energy matches | 🔴 **co-trained learned-cadence FAILS** (2026-07-04, `a1a_s4_cotrain_cot1_*`, full arch: TD3+HIRO+delta+velobs). At `hl_cot_coef=1.0` the HL drifts to a short expensive cadence (~0.48), CoT **+30–47% ABOVE** its own fixed-0.6 baseline — ar 0.02 vs 0.05 identical (ar is NOT the lever). NB tracking is NOT regressed: err_vx ~0.3 at fixed-vx matches the A1 keeper (0.25) — the "5× regression" was a fixed-vx-vs-random-command benchmark artifact. A0/A0+energy controls not built (approach fails first). See Results + S5. |
-| **S5** | Sweep `hl_cot_coef` | fall_rate flat as weight rises; cap below any rise (suicide-attractor guard) | 🔴 **NEGATIVE — higher coef destabilizes, doesn't help** (2026-07-04, `a1a_s5_cot{2,4,8}_ar05`). Raising coef makes cadence *shorter* (0.30) not longer, **collapses entrainment** (gait_match 0.9→0.5, LL ignores clock), **degrades tracking** (eval err_vx→1.65, train err_vx~4 at coef 8), CoT never beats fixed-0.6. fall_rate stays 0 in eval (no suicide attractor) but ep_len/fell_over erode in train. **S3's frozen-LL win does NOT transfer to co-training at any coef** — penalty-domination-style collapse (ADR warned raw energy would; normalized CoT at high weight reintroduces it). See Results. |
-| **S6** | OOD proxy: Narrow→Wide DR / push / terrain (secondary) | exploratory; big edge not expected pre-A2. S4 is the load-bearing result | ⬜ |
+| **S4** | Co-trained A1a vs A0 / A0+energy / A1 (≥2 seeds) | A1a `cot` < A0 at A0-level tracking + fall_rate; A0+energy regresses tracking. Honest disconfirmer logged if A0+energy matches | 🔴 **co-trained learned-cadence FAILS** (2026-07-04, `a1a_s4_cotrain_cot1_*`, full arch: TD3+HIRO+delta+velobs). At `hl_cot_coef=1.0` the HL drifts to a short expensive cadence (~0.48), CoT **+30–47% ABOVE** its own fixed-0.6 baseline — ar 0.02 vs 0.05 identical (ar is NOT the lever). NB tracking is NOT regressed: err_vx ~0.3 at fixed-vx matches the A1 keeper (0.25) — the "5× regression" was a fixed-vx-vs-random-command benchmark artifact. A0/A0+energy controls not built (approach fails first). See Results + S5. From-scratch retry (2026-07-06/07, `expOH_cot{00,10}`): cot0 walks but is an energy hog with a self-narrowed band; cot1 = penalty domination again (see Results). **Redefined → Plan v2 stage S4′** (scored on Model v2; staged/frozen default via gate G). |
+| **S5** | Sweep `hl_cot_coef` | fall_rate flat as weight rises; cap below any rise (suicide-attractor guard) | 🔴 **NEGATIVE — higher coef destabilizes, doesn't help** (2026-07-04, `a1a_s5_cot{2,4,8}_ar05`). Raising coef makes cadence *shorter* (0.30) not longer, **collapses entrainment** (gait_match 0.9→0.5, LL ignores clock), **degrades tracking** (eval err_vx→1.65, train err_vx~4 at coef 8), CoT never beats fixed-0.6. fall_rate stays 0 in eval (no suicide attractor) but ep_len/fell_over erode in train. **S3's frozen-LL win does NOT transfer to co-training at any coef** — penalty-domination-style collapse (ADR warned raw energy would; normalized CoT at high weight reintroduces it). See Results. **Redefined → Plan v2 stage F**: the coef sweep that answers S3's "coef too weak" diagnosis runs against a FROZEN LL (where entrainment cannot collapse), not co-trained. |
+| **S6** | OOD proxy: Narrow→Wide DR / push / terrain (secondary) | exploratory; big edge not expected pre-A2. S4 is the load-bearing result | ⬜ unchanged, after S4′ |
+
+## Plan v2 — completing S4+S5 on Model v2 (grilled 2026-07-07)
+
+Decisions locked in the 2026-07-07 grill session (Liam), superseding the S4/S5 rows above:
+
+- **Sequencing: Model v2 strictly first** (ADR-0005). No further v1 training runs at all;
+  the pasted 4-arm cluster round re-launches on v2 after the validation gate. The
+  mechanism findings above (kernel chain, penalty domination, band self-narrowing, the
+  staged/frozen win) inform the v2 arms but are not re-scored.
+- **S4 subject (gated):** the **staged/frozen A1a is the default** deliverable;
+  co-training is promoted back only if an R3 coef holds tracking (bench err_vx ≈ R1's
+  ~0.10) AND cuts CoT clearly below R1 toward the fixed-0.6 reference.
+- **S4 claim (tiered):** primary = **within-architecture ΔCoT** (vs the same system on a
+  fixed-0.6 clock, at equal tracking — the authority a flat command cannot express);
+  stretch = absolute CoT ≤ A0-v2, scored only if the LL-efficiency gap closes en route.
+- **S5 redefined = stage F:** the `hl_cot_coef` sweep runs against a **frozen** LL (where
+  entrainment structurally cannot collapse; only HL tracking can erode) — the 2026-07-04
+  co-trained sweep answered a different, failed question.
+- **Frozen-LL target-mode rule** (S3 lesson): match the HL that trained the LL — `delta`
+  for R2's LL (TD3-delta-trained), `absolute` for oracle-produced LLs.
+- **ar reconciliation resolved by the rebase:** all v2 runs are from-scratch at the keeper
+  `ll_action_rate_coef=0.02` + `ll_posture_coef=0.5` (incl. the 2026-07-07 hip yaw/roll
+  anchor); the v2-LL's 0.05 launch override dies with the v1 lineage.
+- Followable envelope + CoT(period,vx) map are **per-checkpoint properties**: re-measure
+  on every v2 LL before freezing/scoring (v1 maps are historical).
+
+| Stage | Action | Success criterion | Status |
+|---|---|---|---|
+| **P0** | Commit+push the working tree (full-exp kernel `goal_space.py`, hip yaw/roll posture anchor, launcher `HL_ALGO`/`HL_COT` knobs, ADR-0005, doc syncs) | cluster pulls a repo containing everything the arms need | ⬜ blocks everything |
+| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | ⬜ blocks all training |
+| **R1** | cot0 config on v2 (from-scratch exp kernel, TD3+HIRO+delta+velobs, `source=hl`, `cot=0`), seeds 42+123 | walks ≈ v1-cot0 (err_vx ~0.10, 0 falls); the ≥2-seed co-train reference pair | ⬜ |
+| **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ⬜ |
+| **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | ⬜ |
+| **R4** | clean-kernel ablation (oracle HL, posture/ar off) | exp kernel alone suffices to walk from scratch | ⬜ |
+| **G** | Gate on R3 (criterion above) | co-train promoted as S4′ subject, else staged/frozen default | ⬜ |
+| **F** (=S5) | Freeze the best entrained v2-lineage LL (R2's if its band holds, else an oracle+random producer) → re-measure its CoT(period,vx) map → S3-style HL retrain at `hl_cot_coef` ∈ {1, 2, 4}, target mode per the rule above | HL leaves the flat stride and approaches the map's speed-dependent optimum at held tracking; cap the coef below any tracking erosion | ⬜ after G (skipped only if G promotes co-train) |
+| **S4′** | Scored comparison, ≥2 seeds, `num_envs=4096` fixed: A1a (gate winner) vs **A0-v2** vs **A0+energy** vs **A1-v2** (cot0 config minus cadence/CoT). A0+energy = new per-step command-gated CoT-analog term `-w·P/(m g·max(‖v_cmd‖, ε))` in `mdp/rewards.py` (fair pressure: same normalization the HL feels); 3-coef mini-grid at 1 seed, best coef gets seed 2. Protocol: deterministic bench + fixed-vx GRID + goal probe | primary: ΔCoT < 0 vs own fixed-0.6 at equal tracking, while A0+energy fails to match the saving or regresses tracking (**honest disconfirmer logged if it matches**); stretch: CoT ≤ A0-v2 | ⬜ after G/F |
+
+Parked/out of scope: d(T) stays parked (3 failed attempts, see S2d); S6 exploratory after S4′.
 
 ## Results
 
@@ -326,18 +370,59 @@ JOINT policy abandon entrainment + tracking (penalty-domination, as the ADR warn
 LL → freeze → S3 learned-cadence HL), NOT fully-joint co-training.** Forward options open (rework the
 CoT reward vs adopt the staged frozen-LL A1a as the deliverable).
 
-**From-scratch track (2026-07-06).** `ll_goal_kernel=exp` + true-terminal `fell_over`
+**From-scratch track (2026-07-06/07).** `ll_goal_kernel=exp` + true-terminal `fell_over`
 trains the A1a LL from scratch (oracle HL, cadence on, random source) to better-than-A0
-tracking — warm-start no longer required; failure chain + numbers → `A1_findings.md`
-(from-scratch kernel row). Opens cluster TD3+relabel from-scratch arms and a possible
-from-scratch lineage for the staged S3 architecture.
+tracking — warm-start no longer required; failure chain, the full-exp kernel fix, and the
+TD3+HIRO co-train pair (cot0 walks ≈A0 linear tracking; cot1 = penalty domination; band
+self-narrows to the HL's visited periods) → `A1_findings.md` (from-scratch rows).
+`CoT(period, vx)` grid of the from-scratch oracle LL (1 seed/cell, 0 falls in all 20;
+v2 map above is the comparator): **optimum P≈0.8 at every speed** (its entrainment edge),
+err_vx 0.020–0.073 grid-wide (v2: 0.045–0.205), in-band CoT ≤ v2 (e.g. 0.87 vs 1.05 @
+0.5/0.5) but the P=1.0 long-stride cells stay out of reach (lock lost at speed; only
+~0.78 achieved at vx 0.2, CoT there 1.66 vs v2's 0.75):
+
+| CoT: P \ vx | 0.2 | 0.5 | 0.8 | 1.0 |
+|---|---|---|---|---|
+| 0.35 | 2.07 | 1.08 | 0.92 | 0.91 |
+| 0.50 | 1.50 | 0.87 | 0.77 | 0.75 |
+| 0.65 | 1.37 | 0.81 | 0.73 | 0.73 |
+| 0.80 | **1.25** | **0.76** | **0.66** | **0.66** |
+| 1.00 | 1.66 | 0.96 | 0.70 | 0.78 |
+
+**From-scratch co-train pair, key rows (2026-07-06/07, `a1a_scratch_td3_expOH_cot{00,10}_s42`,
+Model v1 — historical).** Aggregate bench + fixed-vx GRID:
+
+| run | err_vx | fall | CoT | stride (unpinned) | match | GRID envelope |
+|---|---|---|---|---|---|---|
+| cot0 | **0.100** | 0.0 | **2.81** | 0.369 | 0.92 | follows to ~0.5 only; match ≤0.77 and falls rise past P=0.65 |
+| cot1 | 0.769 | 0.0 | 1.06 | 0.635 | 0.85 | flat ~0.60 stride at every speed; err_vx ≥0.72 everywhere |
+
+Replay observations (Liam): cot0 = very short steps, torso slightly twisted, legs not
+parallel; cot1 = no usable tracking, walks sideways (long side strides) even under a
+pinned forward command; the from-scratch oracle LL walks cleanly but with a **~20° hip
+twist** (upper body straight, legs not parallel to travel). The hip twist is why hip
+yaw/roll joined the posture anchor (2026-07-07, `hrl_runner.py` — the goal space is
+heading-invariant, nothing else aligned the legs). Reads: (i) cot0 is the first
+from-scratch co-trained A1a that walks, but nothing penalizes its energy (CoT ~3× the
+oracle LL) and (ii) its **cadence band = its HL's visited band** (the HL parked at ~0.36
+all run, so the LL never learned long periods) — the band-coverage lesson as
+*self*-curriculum; R2's random-period source is the fix under test. (iii) cot1 lowers CoT
+only by abandoning the command — penalty domination reproduces from scratch at coef 1.0.
 
 ## Open knobs (set by data, not guessed)
-- `cadence_period_range` — from S0 (A0 walkable band ∩ `CoT(period)` minimum). Start `(0.5, 1.4)`.
-- `hl_cot_coef` — bounded by S5 (highest weight that keeps fall_rate flat).
+- `cadence_period_range` — settled at `(0.35, 1.0)` on v1 (S2 envelope); re-confirm on the
+  first entrained v2 LL (per-checkpoint property).
+- `hl_cot_coef` — co-train boundary from R3 (0.2/0.5); frozen-arch value from F ({1,2,4},
+  capped below tracking erosion).
+- A0+energy coef — 3-point mini-grid at S4′, chosen favorably for the control.
 
 ## Honest caveats
 - The **definitive `CoT(period)` curve needs the cadence-capable LL (S2+)**; the warm-start LL
   only knows ~0.6 s, so S0's period probe is local/limited.
-- If `A0+energy` matches A1a in S4, the in-sim efficiency benefit is **not** from the hierarchy;
+- If `A0+energy` matches A1a in S4′, the in-sim efficiency benefit is **not** from the hierarchy;
   report it and lean on the OOD/A2 case. Stated up front to avoid motivated reading.
+- **v1/v2 boundary (ADR-0005):** nothing above the Plan v2 section is thesis-scorable; v1
+  numbers may be cited only as mechanism evidence, never compared against v2 runs.
+- The absolute-CoT gap vs A0 (v1: A0 0.577 vs cadence LLs ≥1.0 at fixed vx=0.5) is an
+  LL-efficiency limitation orthogonal to the hierarchy claim; if it persists on v2 it is
+  reported as future work, not hidden by the within-architecture framing.
