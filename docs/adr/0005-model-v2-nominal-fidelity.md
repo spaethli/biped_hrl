@@ -1,6 +1,7 @@
 # Model v2: versioned nominal-model correction (hold-gain upper body + joint friction)
 
-**Status:** accepted (grilled 2026-07-07; implementation pending, sequenced before A1a S3)
+**Status:** accepted, amended 2026-07-08 (see Amendment: frictionloss and torso hold
+gain removed from the training nominal after a 9-run bisect; final config below)
 
 ## Context
 
@@ -88,3 +89,47 @@ builds on v2 directly.
   `State_RLBase.cpp` / `State_RLHRL.cpp`; observations still see all 27 joints). The
   bridge gate runs full-forward vs split-forward on the same v2-A0 checkpoint; the
   difference measures the arm-freeze mismatch accepted by the split-deploy decision.
+
+## Amendment (2026-07-08): bisect findings and final configuration
+
+The original v2 stalled A0 gait discovery (stand-lean, tracking ~0.11 vs v1 ~0.70 at
+iter 1500). A 9-run bisect on identical code/recipe (4096 envs, seed 42, local RTX
+5070) isolated the causes. Tracking reward at the stated iteration, all runs:
+
+| torso | arms | arm scale | frictionloss | result |
+|---|---|---|---|---|
+| v1 200/2.5 | v1 7.9/0.5 | derived | 0 | 0.32 @800 (control, walks) |
+| v1 | v1, 7-group split | derived | 0 | 0.52 @1000 (walks; structure innocent) |
+| v1 | hold 120/80 | derived (0.04-0.08) | 0 | 0.51 @2000 (walks, lift-off ~1400) |
+| 300/3 | hold | derived | 0.1 | 0.12 @1846 (stuck) |
+| 300/3 | hold | derived | 0 | 0.20 @3200 (stuck-slow) |
+| 300/3 | hold | flat 0.25 | 0 | 0.14 @3500 (stuck) |
+| v1 | hold | flat 0.25 | 0 | 0.10 @2500 (stuck, plateaued) |
+
+Three corrections to the original decision:
+
+1. **frictionloss stays 0 in the training nominal.** The fric-vs-nofric pair differed
+   marginally (both stuck via the gain issue); the references' 0.1 lives only in their
+   deploy-sim XMLs, their training URDFs carry no joint friction at all (likely
+   pipeline artifact, not principle). Joint friction belongs to the deploy-sim
+   robustness eval and the A2 Wide DR set, where its unknown true value is randomized
+   over instead of guessed.
+2. **Torso hold gain 300/3 rejected; torso stays v1 200/2.5.** It stalls gait
+   discovery in both scale variants (waist counter-rotation is load-bearing for
+   stepping). Deploy still holds joint 12 via `hold_joint_ids`; the deploy hold gains
+   are set to 200/2.5 for lockstep.
+3. **Arm action scale stays derived (0.25*effort/kp), NOT the references' flat
+   0.25.** With kp 120/80 arms, flat 0.25 lets exploration noise destabilize the
+   robot (falls + action-std collapse) and never converges; the small derived
+   authority converges and additionally matches split deploy, where arm commands are
+   ignored. The references' flat 0.25 works with their lower arm kp (40-80) and
+   different reward stacks; it does not transplant.
+
+Final v2 nominal: legs v1, torso v1, shoulders 120/2, elbow+wrists 80/1, derived
+scales, frictionloss 0, viscous_damping 0.001, 7 actuator groups, conservative URDF
+effort limits (datasheet ceilings ~2-6x higher; noted in A2_ARMA.md §3). Known cost:
+gait lift-off ~1400 iters at 4096 envs (vs ~600 for v1); converged quality matches.
+Also learned: lift-off iteration scales with num_envs (the 06-09 v1 baseline used
+8192 envs and lifted off at ~330; all 4096-env runs cross 0.3 at 550-800) — hold
+num_envs fixed within any comparison and never judge stuck-vs-slow before ~2x the
+expected lift-off.

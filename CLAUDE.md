@@ -91,7 +91,12 @@ analysis and the proposed change first.
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
-  a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds.
+  a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds. Gait lift-off
+  iteration scales with num_envs — never judge stuck-vs-slow before ~2x the expected
+  lift-off (see `docs/adr/0005` amendment).
+- **Model v2** (2026-07-08, `docs/adr/0005`): arm hold gains + derived scales, torso/legs
+  v1, frictionloss 0. v1 checkpoints invalid for v2 work; v2 logs to `*_v2` experiments.
+  Replays need the constants the checkpoint trained with (scales are env-side).
 
 ## Where the deep context lives
 
@@ -107,7 +112,7 @@ analysis and the proposed change first.
   `.claude/docs/experiment-design.md`
 - HPC cluster (SLURM, NVRTC fix, versions) → `.claude/docs/cluster.md`
 - C++ deploy, ONNX export, replay → `.claude/docs/deployment.md`
-- A0 warm-start checkpoints: `logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt`.
+- A0 warm-start checkpoints (v1 env only): `logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt`; v2 replacement = `a0_v2_baseline` `model_10000.pt` once the run finishes.
 - W&B: project `biped_hrl` (A1 experiment `h1_2_velocity_a1`, A0 `h1_2_velocity`).
 
 ## Agent skills

@@ -75,6 +75,21 @@ exist). Fixed ordering (an `RmaEtSpec`, mjlab-native):
   not just tolerate it. e_t carries the per-env lag (1 dim; revisit per-actuator-group
   in S0).
 
+**Reference ranges (added 2026-07-07).** The OpenHomie-based H1-2 stack
+(`corelllab/h12_loco_manipulation`, HomieRL config in its wandb logs) is a working
+sim2real recipe for exactly our extrinsics; use it as the starting point for the wide
+ranges in S0: `kp_range [0.9, 1.1]`, `kd_range [0.9, 1.1]` (motor strength),
+`friction_range [0.1, 3.0]`, actuation delay ON, `actuation_offset [-0.05, 0.05] rad`,
+`joint_injection [-0.05, 0.05]` (torque noise), `link_mass ×[0.8, 1.2]`,
+`payload_mass [-10, +15] kg`, `com_displacement [-0.1, 0.1] m`. Their extras
+(payload/link mass, torque injection) are candidates for the later e_t extension, not
+baseline. Note for the normalization + any effort DR: the Unitree datasheet motor
+limits are hip ~220, knee ~360, waist ~220, ankle ~75x2, shoulder ~120, elbow ~120,
+wrist ~30 N.m; the URDF values we use as `effort_limit` (hip 200, knee 300, ankle 40,
+shoulder 40/18, elbow 18, wrist 19) are much more conservative. Effort stays a
+capacity knob, not a DR extrinsic (decided 2026-06-24), but the datasheet numbers are
+the ceiling if effort is ever revisited.
+
 Exact dims/ordering finalized in S0; `e_t` dim is **derived from the spec**, never
 hardcoded (mirrors how `goal_dim` is derived from `goal_components`). The encoder
 input is normalized to roughly `[-1,1]` per component using each DR range. All these

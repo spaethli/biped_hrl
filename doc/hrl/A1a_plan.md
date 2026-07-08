@@ -50,7 +50,7 @@ A2 (A-RMA supplies adaptivity) and A3 (gait library plugs into the same cadence 
 
 ## Plan v2 — completing S4+S5 on Model v2 (grilled 2026-07-07)
 
-Decisions locked in the 2026-07-07 grill session (Liam), superseding the S4/S5 rows above:
+Decisions locked in the 2026-07-07 grill session (user), superseding the S4/S5 rows above:
 
 - **Sequencing: Model v2 strictly first** (ADR-0005). No further v1 training runs at all;
   the pasted 4-arm cluster round re-launches on v2 after the validation gate. The
@@ -75,8 +75,8 @@ Decisions locked in the 2026-07-07 grill session (Liam), superseding the S4/S5 r
 
 | Stage | Action | Success criterion | Status |
 |---|---|---|---|
-| **P0** | Commit+push the working tree (full-exp kernel `goal_space.py`, hip yaw/roll posture anchor, launcher `HL_ALGO`/`HL_COT` knobs, ADR-0005, doc syncs) | cluster pulls a repo containing everything the arms need | ⬜ blocks everything |
-| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | ⬜ blocks all training |
+| **P0** | Commit+push the working tree (full-exp kernel `goal_space.py`, hip yaw/roll posture anchor, launcher `HL_ALGO`/`HL_COT` knobs, ADR-0005, doc syncs) | cluster pulls a repo containing everything the arms need | ✅ 2026-07-07 (`c21ee2d`, incl. the Model v2 implementation) |
+| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | 🟡 implementation in `c21ee2d`; **A0-v2 retrain `a0_v2_baseline` running** (local, 10001 it, 4096 envs, launched 2026-07-07 14:10); gate checks 2–4 pending |
 | **R1** | cot0 config on v2 (from-scratch exp kernel, TD3+HIRO+delta+velobs, `source=hl`, `cot=0`), seeds 42+123 | walks ≈ v1-cot0 (err_vx ~0.10, 0 falls); the ≥2-seed co-train reference pair | ⬜ |
 | **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ⬜ |
 | **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | ⬜ |
@@ -397,7 +397,7 @@ Model v1 — historical).** Aggregate bench + fixed-vx GRID:
 | cot0 | **0.100** | 0.0 | **2.81** | 0.369 | 0.92 | follows to ~0.5 only; match ≤0.77 and falls rise past P=0.65 |
 | cot1 | 0.769 | 0.0 | 1.06 | 0.635 | 0.85 | flat ~0.60 stride at every speed; err_vx ≥0.72 everywhere |
 
-Replay observations (Liam): cot0 = very short steps, torso slightly twisted, legs not
+Replay observations (user): cot0 = very short steps, torso slightly twisted, legs not
 parallel; cot1 = no usable tracking, walks sideways (long side strides) even under a
 pinned forward command; the from-scratch oracle LL walks cleanly but with a **~20° hip
 twist** (upper body straight, legs not parallel to travel). The hip twist is why hip

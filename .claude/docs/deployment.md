@@ -21,6 +21,12 @@ Observation assembly: `deploy/robots/h1_2/src/State_RLBase.cpp`
 
 - Sim: `config/policy/velocity/v0/params/deploy.yaml` (keyboard_velocity_commands)
 - Real: `config/policy/velocity/v0/params/deploy_real.yaml` (velocity_commands/joystick)
+- **Split deploy** (ADR-0005 step 3b, 2026-07-07): `hold_joint_ids: [12..26]` in the
+  `deploy_real` params makes torso+arms track `default_joint_pos` instead of the policy
+  action (`State_RLBase.cpp`/`State_RLHRL.cpp`, robot-local; obs still see all 27
+  joints). Absent key = full forward (sim yamls). Gains/scales in all 4 param yamls
+  MUST stay in lockstep with `h1_2_constants.py` (v2-final: torso 200/2.5, shoulders
+  120/2, elbow+wrists 80/1, derived scales).
 
 ## ONNX export (the correct path)
 

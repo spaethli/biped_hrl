@@ -40,7 +40,12 @@ from the LL obs, intrinsic LL reward, goal obs group, A0 warm-start,
 
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos).
 - `num_envs` is effectively a hyperparameter: hold it fixed within a comparison set.
+  Gait lift-off iteration scales with it (8192 envs: ~330 it; 4096: ~550-1400) — never
+  judge stuck-vs-slow before ~2x the expected lift-off (`docs/adr/0005` amendment).
 - Use ≥2 seeds for any claim.
+- **Model v2 boundary (2026-07-08)**: v1-vs-v2 runs are not comparable (`docs/adr/0005`);
+  v2 experiments log to `h1_2_velocity_v2` / `h1_2_velocity_a1_v2`. Replaying a
+  checkpoint needs the constants it trained with (action scales are env-side).
 - Compare checkpoints with the deterministic closed-loop eval (hierarchy-aware
   inference policy), not training-time stochastic metrics.
 

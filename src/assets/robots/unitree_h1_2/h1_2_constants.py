@@ -32,10 +32,13 @@ def get_spec() -> mujoco.MjSpec:
 
 ##
 # Actuator config.
-# Model v2 (ADR-0005): upper-body gains = deploy hold gains (split deploy),
-# frictionloss/viscous_damping nonzero on every joint (real joints have stiction;
-# reference XMLs use 0.1/0.001). Stiffness/damping MUST stay in lockstep with the
-# deploy YAML gain vectors (deploy/robots/h1_2/config/policy/*/params/*.yaml).
+# Model v2 (ADR-0005): upper-body gains = deploy hold gains (split deploy).
+# frictionloss is 0 in the training nominal: with 0.1 the policy settles into a deep
+# stand-still optimum (fric01 run 2026-07-07, tracking 0.11 vs v1 0.70 at iter 1500);
+# the reference pipelines also train friction-free (URDF has no <dynamics>) and carry
+# 0.1 only in their deploy-sim XMLs. Joint-friction fidelity belongs to the deploy-sim
+# eval and A2 Wide DR, not the training plant. Stiffness/damping MUST stay in lockstep
+# with the deploy YAML gain vectors (deploy/robots/h1_2/config/policy/*/params/*.yaml).
 ##
 
 H1_2_ACTUATOR_M107_24_2 = BuiltinPositionActuatorCfg(
@@ -48,17 +51,20 @@ H1_2_ACTUATOR_M107_24_2 = BuiltinPositionActuatorCfg(
   damping=2.5,
   effort_limit=200.0,
   armature=0.025,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_TORSO = BuiltinPositionActuatorCfg(
-  # M107_24_2 motor; hold gains 300/3 (torso leaves the hip group in v2).
+  # M107_24_2 motor; stays at v1 200/2.5: the 300/3 hold gain stalls gait discovery
+  # (bisect 2026-07-07: torso 300/3 stuck at 0.11-0.20 tracking @3200+ in both scale
+  # variants; torso 200/2.5 converged 0.51 @2000). Deploy holds joint 12 regardless;
+  # deploy hold gains set to 200/2.5 for lockstep.
   target_names_expr=("torso_joint",),
-  stiffness=300.0,
-  damping=3.0,
+  stiffness=200.0,
+  damping=2.5,
   effort_limit=200.0,
   armature=0.025,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_M107_24_1 = BuiltinPositionActuatorCfg(
@@ -67,7 +73,7 @@ H1_2_ACTUATOR_M107_24_1 = BuiltinPositionActuatorCfg(
   damping=4.0,
   effort_limit=300.0,
   armature=0.04,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_GO2HV_1 = BuiltinPositionActuatorCfg(
@@ -79,7 +85,7 @@ H1_2_ACTUATOR_GO2HV_1 = BuiltinPositionActuatorCfg(
   damping=2.0,
   effort_limit=40.0,
   armature=0.005,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_SHOULDER_PR = BuiltinPositionActuatorCfg(
@@ -92,7 +98,7 @@ H1_2_ACTUATOR_SHOULDER_PR = BuiltinPositionActuatorCfg(
   damping=2.0,
   effort_limit=40.0,
   armature=0.005,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_SHOULDER_YAW = BuiltinPositionActuatorCfg(
@@ -102,7 +108,7 @@ H1_2_ACTUATOR_SHOULDER_YAW = BuiltinPositionActuatorCfg(
   damping=2.0,
   effort_limit=18.0,
   armature=0.002,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_GO2HV_2 = BuiltinPositionActuatorCfg(
@@ -116,7 +122,7 @@ H1_2_ACTUATOR_GO2HV_2 = BuiltinPositionActuatorCfg(
   damping=1.0,
   effort_limit=18.0,
   armature=0.002,
-  frictionloss=0.1,
+  frictionloss=0.0,
   viscous_damping=0.001,
 )
 
@@ -204,14 +210,19 @@ def get_h1_2_robot_cfg() -> EntityCfg:
   )
 
 
+# Derived 0.25*effort/kp per joint, NOT the references' flat 0.25: with hold-gain arms
+# (kp 80-120) a flat 0.25 rad scale lets exploration noise hammer the torso and the
+# policy never finds a gait (bisect 2026-07-08: flat stuck at 0.10 tracking @2500 vs
+# derived 0.51 @2000, torso v1 in both). The small derived arm authority also matches
+# split deploy, where arm commands are ignored anyway. Effort limits stay at the
+# conservative URDF values as safety clamps.
 H1_2_ACTION_SCALE: dict[str, float] = {}
 for a in H1_2_ARTICULATION.actuators:
   assert isinstance(a, BuiltinPositionActuatorCfg)
   e = a.effort_limit
   s = a.stiffness
-  names = a.target_names_expr
   assert e is not None
-  for n in names:
+  for n in a.target_names_expr:
     H1_2_ACTION_SCALE[n] = 0.25 * e / s
 
 
