@@ -76,16 +76,70 @@ Decisions locked in the 2026-07-07 grill session (user), superseding the S4/S5 r
 | Stage | Action | Success criterion | Status |
 |---|---|---|---|
 | **P0** | Commit+push the working tree (full-exp kernel `goal_space.py`, hip yaw/roll posture anchor, launcher `HL_ALGO`/`HL_COT` knobs, ADR-0005, doc syncs) | cluster pulls a repo containing everything the arms need | ✅ 2026-07-07 (`c21ee2d`, incl. the Model v2 implementation) |
-| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | 🟡 implementation in `c21ee2d`; **A0-v2 retrain `a0_v2_baseline` running** (local, 10001 it, 4096 envs, launched 2026-07-07 14:10); gate checks 2–4 pending |
-| **R1** | cot0 config on v2 (from-scratch exp kernel, TD3+HIRO+delta+velobs, `source=hl`, `cot=0`), seeds 42+123 | walks ≈ v1-cot0 (err_vx ~0.10, 0 falls); the ≥2-seed co-train reference pair | ⬜ |
-| **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ⬜ |
-| **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | ⬜ |
-| **R4** | clean-kernel ablation (oracle HL, posture/ar off) | exp kernel alone suffices to walk from scratch | ⬜ |
-| **G** | Gate on R3 (criterion above) | co-train promoted as S4′ subject, else staged/frozen default | ⬜ |
-| **F** (=S5) | Freeze the best entrained v2-lineage LL (R2's if its band holds, else an oracle+random producer) → re-measure its CoT(period,vx) map → S3-style HL retrain at `hl_cot_coef` ∈ {1, 2, 4}, target mode per the rule above | HL leaves the flat stride and approaches the map's speed-dependent optimum at held tracking; cap the coef below any tracking erosion | ⬜ after G (skipped only if G promotes co-train) |
+| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | 🟡 checks 1–3 ✅ 2026-07-08 (final v2 config per `398e88a`: arm hold gains + derived scales, torso/legs v1, frictionloss 0 — narrower than the ADR draft). Gate 2: `a0_v2_baseline` `model_10000` within noise of v1-A0 (err_vx 0.097 vs 0.093, fall 0=0). Gate 3: v1-in-v2 cross-eval = tracking preserved, **+12% CoT / +14% power** (arm plant change only; v2-in-v1 direction moot, legs unchanged). New baseline table → Results. Check 4 ✅ 2026-07-08: v2 ONNX walks in the C++ bridge (arms held, gain/scale lockstep verified 27/27 vs both YAMLs); the observed w-from-stand fall + dirty gait are a **pre-existing bridge-plant mismatch** (`scene_h1_2.xml` joint defaults armature 0.1/frictionloss 0.2/damping 1 vs training nominal 0.025–0.002/0/0 — the policy passes the same vx=1.0-step-from-stand test in mjlab with fall_rate 0.0/128 eps), accepted as-is until deploy (Liam 2026-07-08; see `.claude/docs/deployment.md`). **V2 GATE CLOSED** |
+| **R1** | cot0 config on v2 (from-scratch exp kernel, TD3+HIRO+delta+velobs, `source=hl`, `cot=0`), seeds 42+123 | walks ≈ v1-cot0 (err_vx ~0.10, 0 falls); the ≥2-seed co-train reference pair | ✅ 2026-07-09: both seeds walk (err_vx 0.107/0.113, 0 falls), short stride again (0.41/0.35); **seed spread is large on energy** (CoT 1.42 vs 1.79) — energy claims need both seeds. Own period is WORSE than pinned 0.6 (ΔCoT +8.7%): without CoT pressure the HL's cadence is a liability |
+| **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ✅ 2026-07-09 **PASSES**: full-band entrainment (stride 0.346/0.490/0.614/0.738/0.827 at cmd 0.35→1.0, vx=0.5; match 0.72–0.86; 0 falls) — the random source fixes the self-narrowing. **Valid frozen-LL producer for F** (delta-trained → F uses delta) |
+| **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | 🟡 2026-07-09 **half-pass at 0.2**: CoT 1.139 = clearly < R1 (−20/−36%) AND beats its own fixed-0.6 (**−7.6%**, the first co-trained ΔCoT win; v1's penalty domination is gone at this coef) — but tracking err_vx 0.146 vs R1's 0.107/0.113 (+0.035): NOT ≈ R1. 0.5: err_vx 0.203, abs CoT no better than R1 → 0.5 is past the boundary |
+| **R4** | clean-kernel ablation (oracle HL, posture/ar off) | exp kernel alone suffices to walk from scratch | ✅ 2026-07-09: kernel alone gives the round's **best tracking** (err_vx 0.071, ll_err_vx 0.033) but a **wild, undeployable gait** (act_rate 33, power 2282 W, stride 0.13, match 0.52) → the kernel is load-bearing for from-scratch convergence; posture+ar are load-bearing for gait quality. Both halves confirmed |
+| **G** | Gate on R3 (criterion above) | co-train promoted as S4′ subject, else staged/frozen default | ✅ 2026-07-09 **strict criterion NOT met** (R3-0.2 tracking regression) → **staged/frozen default proceeds (F)**. Co-train@0.2 stays a live secondary: first-ever co-trained CoT win, one seed — revisit only if F disappoints |
+| **F** (=S5) | Freeze the best entrained v2-lineage LL (**R2's `model_10000`**, envelope validated) → re-measure its CoT(period,vx) map → S3-style HL retrain at `hl_cot_coef` ∈ {1, 2, 4}, **`hl_target_mode=delta`** (R2's LL is delta-trained) | HL leaves the flat stride and approaches the map's speed-dependent optimum at held tracking; cap the coef below any tracking erosion | ⬜ **next action** |
 | **S4′** | Scored comparison, ≥2 seeds, `num_envs=4096` fixed: A1a (gate winner) vs **A0-v2** vs **A0+energy** vs **A1-v2** (cot0 config minus cadence/CoT). A0+energy = new per-step command-gated CoT-analog term `-w·P/(m g·max(‖v_cmd‖, ε))` in `mdp/rewards.py` (fair pressure: same normalization the HL feels); 3-coef mini-grid at 1 seed, best coef gets seed 2. Protocol: deterministic bench + fixed-vx GRID + goal probe | primary: ΔCoT < 0 vs own fixed-0.6 at equal tracking, while A0+energy fails to match the saving or regresses tracking (**honest disconfirmer logged if it matches**); stretch: CoT ≤ A0-v2 | ⬜ after G/F |
 
 Parked/out of scope: d(T) stays parked (3 failed attempts, see S2d); S6 exploratory after S4′.
+
+**R-round launched on the cluster 2026-07-08** (all 6 runs, post-gate: R1 seeds 42+123,
+R2, R3 cot 0.2+0.5, R4).
+
+**A0-v2 baseline (2026-07-08, `h1_2_velocity_v2/2026-07-08_07-06-18_a0_v2_baseline/model_10000.pt`,
+64×600×2 seeds) — the S4′ reference:**
+
+| eval | err_vx | err_vy | err_yaw | fall | act_rate | power (W) | CoT | stride (s) | match |
+|---|---|---|---|---|---|---|---|---|---|
+| aggregate | 0.097 | 0.118 | 0.098 | 0.0 | 0.61 | 162 ± 6 | **0.532 ± 0.011** | 0.585 ± 0.003 | 0.946 |
+| fixed vx=0.5 | 0.083 | 0.085 | 0.093 | 0.0 | 0.64 | 172 | **0.524** | 0.573 | 0.964 |
+| v1-A0 ckpt in v2 plant (cross-eval) | 0.097 | 0.113 | 0.087 | 0.0 | 0.66 | 186 ± 5 | 0.595 | 0.583 | 0.948 |
+
+Reads: (i) gate 2 passes — v2-A0 matches v1-A0 tracking/falls (v1 table above: 0.093/0.112/
+0.090/0.0) with the same ~0.58 stride. (ii) The v1→v2 modeling gap for A0 is **energy-only**:
+the v1 checkpoint under the v2 plant keeps tracking but pays +12% CoT / +14% power (final v2
+kept legs + friction at v1, so only the upper-body gains/scales moved — consistent). (iii)
+v2-A0 is *more* efficient than v1-A0's fixed-0.5 CoT (0.524 vs 0.577) — the absolute-CoT
+stretch target for A1a moved down, not up.
+
+**R-round results (2026-07-09, `h1_2_velocity_a1_v2/2026-07-08_*`, all `model_10000`,
+64×600×2 seeds).** Aggregate bench (A0-v2 row above is the reference):
+
+| run | err_vx | err_vy | err_yaw | fall | act | power (W) | CoT | stride | match |
+|---|---|---|---|---|---|---|---|---|---|
+| R1 s42 (cot0) | 0.107 | 0.071 | 0.204 | 0.0 | 1.31 | 439 | 1.417 | 0.407 | 0.92 |
+| R1 s123 (cot0) | 0.113 | 0.086 | 0.194 | 0.0 | 1.49 | 537 | 1.789 | 0.351 | 0.90 |
+| R2 (random src) | 0.132 | 0.121 | 0.196 | 1e-5 | 1.27 | 354 | 1.198 | 0.624 | 0.85 |
+| R3 cot0.2 | 0.146 | 0.130 | 0.175 | 0.0 | 1.23 | 340 | **1.139** | 0.551 | 0.90 |
+| R3 cot0.5 | 0.203 | 0.130 | 0.226 | 0.0 | 1.43 | 511 | 1.406 | 0.647 | 0.91 |
+| R4 kernel-only | **0.071** | 0.046 | 0.451 | 0.0 | 33.0 | 2282 | 6.76 | 0.131 | 0.52 |
+
+Own-HL-period vs pinned `--eval-cadence-period 0.6` (same checkpoint — the within-arch ΔCoT):
+
+| run | own CoT | fixed-0.6 CoT | ΔCoT | own err_vx | pinned err_vx |
+|---|---|---|---|---|---|
+| R1 s42 | 1.417 | 1.304 | +8.7% | 0.107 | 0.143 |
+| R3 cot0.2 | 1.139 | 1.233 | **−7.6%** | 0.146 | 0.156 |
+| R3 cot0.5 | 1.406 | 1.740 | −19.2% | 0.203 | 0.222 |
+
+R2 fixed-vx=0.5 GRID (envelope check): stride 0.346/0.490/0.614/0.738/0.827 at cmd
+0.35/0.5/0.65/0.8/1.0 (match 0.72–0.86, CoT 1.71→1.14, 0 falls) — **no self-narrowing**;
+achieved ceiling ~0.83.
+
+Probe: every co-trained run is per-window sloppy vs the oracle (hl_err_vx 0.19–0.49,
+ll_err_vx 0.32–0.46 vs R4's ll 0.033) — the learned-HL window errors, not the LL kernel,
+bound tracking; consistent with the S3 finding that the HL is the wall. Reads: (i) R3-0.2 is
+the **first co-trained CoT win** (beats own fixed-0.6 by −7.6% with pinned-vs-own tracking
+equal) but gives up 0.035 err_vx vs R1 → gate G strict criterion not met; 0.5 is past the
+boundary (tracking degrades, absolute CoT gain gone). (ii) The v1 penalty-domination cliff at
+coef 1.0 has moved to a graded trade at 0.2–0.5 under the full-exp kernel — coef curve is
+tame now, not catastrophic. (iii) R1 seed spread on energy (CoT 1.42/1.79) → any co-train
+energy claim needs both seeds. (iv) All A1a CoT ≥ 1.14 vs A0-v2 0.53 — the absolute tier
+stays out of reach pre-F, as expected.
 
 ## Results
 

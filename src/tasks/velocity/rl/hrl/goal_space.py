@@ -148,10 +148,22 @@ class GoalSpace:
 
   def __init__(self, components: list[GoalComponent]) -> None:
     self.components = components
+    # task_only target maps rely on the task components forming a contiguous prefix
+    # (so learned goal columns are simply [:task_dim]). True for the canonical
+    # (velocity, orientation, height) order; assert loudly rather than mis-slice.
+    flags = [c.is_task for c in components]
+    if flags != sorted(flags, reverse=True):
+      raise ValueError("task goal components must precede non-task ones.")
 
   @property
   def dim(self) -> int:
     return sum(c.dim for c in self.components)
+
+  @property
+  def task_dim(self) -> int:
+    """Total dim of the command-targeted (task) components — the learned goal
+    columns when the HL emits task goals only (``hl_velocity_goals_only``)."""
+    return sum(c.dim for c in self.components if c.is_task)
 
   def extract(self, env) -> torch.Tensor:
     """Current state slice s, shape [N, dim]."""
@@ -171,15 +183,30 @@ class GoalSpace:
       [(c.center or c.nominal)(env) for c in self.components], dim=-1
     )
 
-  def to_target(self, env, state: torch.Tensor, g: torch.Tensor, mode: str) -> torch.Tensor:
+  def to_target(
+    self, env, state: torch.Tensor, g: torch.Tensor, mode: str, task_only: bool = False
+  ) -> torch.Tensor:
     """Map a bounded goal g in [-1,1]^dim to the absolute window target V*.
 
     ``delta`` (HIRO, default): ``V* = state + scale*g`` (target relative to the current
     state). ``absolute``: ``V* = center + scale*g`` (state-independent — g spans the
     command range; the oracle's target structure). The LL still observes V*-s_i either
-    way; only this map changes."""
-    ref = self.center(env) if mode == "absolute" else state
-    return ref + self.scale(env) * g
+    way; only this map changes.
+
+    ``task_only``: g has only the task columns (``task_dim``); the non-task components
+    (orientation/height) are pinned to their ``nominal`` targets — the oracle's path.
+    Rationale (2026-07-09): a tracking-rewarded HL has no incentive to command nominal
+    posture; in delta mode a sagged height with g=0 is a rewarded steady state, so the
+    co-trained walkers sank into bent knees (R-round: TD3 height_dev 0.18-0.29 vs the
+    oracle's 0.005 with the SAME kernel — the targets, not the kernel, were the cause)."""
+    if not task_only:
+      ref = self.center(env) if mode == "absolute" else state
+      return ref + self.scale(env) * g
+    td = self.task_dim
+    ref = (self.center(env) if mode == "absolute" else state)[:, :td]
+    task = ref + self.scale(env)[:td] * g
+    rest = torch.cat([c.nominal(env) for c in self.components if not c.is_task], dim=-1)
+    return torch.cat([task, rest], dim=-1)
 
   def to_g(self, env, state: torch.Tensor, achieved: torch.Tensor, mode: str) -> torch.Tensor:
     """Inverse of :meth:`to_target`: the raw g whose target equals ``achieved``

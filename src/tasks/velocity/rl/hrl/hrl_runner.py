@@ -81,6 +81,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.hl_cadence_source: str = train_cfg.get("hl_cadence_source", "random")
     if self.hl_cadence_source == "hl" and not (self.hl_cadence and self.hl_algorithm == "td3"):
       raise ValueError("hl_cadence_source='hl' requires hl_cadence=True and hl_algorithm='td3'.")
+    # 2026-07-09 posture-sag fix (default True): the HL learns only the velocity goal
+    # columns; orientation/height targets are pinned to nominal (the oracle path — see
+    # GoalSpace.to_target task_only). Inert for the oracle (it already targets nominal
+    # for non-task components); only ppo lacks the machinery.
+    self.hl_velocity_goals_only: bool = train_cfg.get("hl_velocity_goals_only", False)
+    if self.hl_velocity_goals_only and self.hl_algorithm == "ppo":
+      raise ValueError("hl_velocity_goals_only is not implemented for hl_algorithm='ppo'.")
     # Eval-only: pin the commanded stride period (for the CoT(period) sweep). None ->
     # mid-range constant (oracle/random-trained LL) or, later, the learned HL's action (S1c).
     self.eval_cadence_period: float | None = None
@@ -294,6 +301,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         obs_vel_dim=self._hl_vel_dim,
         cadence_dim=1 if self.hl_cadence_source == "hl" else 0,
         cadence_period_range=self.cadence_period_range,
+        task_only_goals=self.hl_velocity_goals_only,
       )
     raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
 
@@ -657,6 +665,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     metadata["hl_algorithm"] = self.hl_algorithm
     metadata["hl_target_mode"] = self.hl_target_mode
     metadata["goal_components"] = [c.name for c in self.goal_space.components]
+    # Deploy must know the HL output layout: velocity-only HL emits task_dim(+period)
+    # values and C++ fills orientation/height targets with their nominals.
+    metadata["hl_velocity_goals_only"] = self.hl_velocity_goals_only
     if self.hl_cadence:
       # S1c: deploy must map the HL's extra tanh dim -> stride period over this range
       # (source='hl'), or run the fixed/mid-range clock (source='random').

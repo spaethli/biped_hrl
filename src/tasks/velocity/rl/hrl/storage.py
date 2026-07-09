@@ -69,14 +69,17 @@ class HLReplayBuffer:
   def __len__(self) -> int:
     return self._size
 
-  def _alloc_relabel(self, policy_seq, goal_state_seq, action_seq, scale) -> None:
+  def _alloc_relabel(self, policy_seq, goal_state_seq, action_seq, scale, center) -> None:
     c = policy_seq.shape[1]
     self.policy_seq = torch.zeros(self.capacity, c, policy_seq.shape[-1], device=self.device)
     self.goal_state_seq = torch.zeros(self.capacity, c, goal_state_seq.shape[-1], device=self.device)
     self.action_seq = torch.zeros(self.capacity, c, action_seq.shape[-1], device=self.device)
     self.scale = torch.zeros(self.capacity, scale.shape[-1], device=self.device)
     self.next_goal_state = torch.zeros(self.capacity, goal_state_seq.shape[-1], device=self.device)
-    self.center = torch.zeros(self.capacity, scale.shape[-1], device=self.device)
+    # center stays FULL goal dim even when scale is sliced to the learned columns
+    # (hl_velocity_goals_only): its non-task tail carries the nominal targets _relabel
+    # needs to reconstruct the pinned goal-obs columns.
+    self.center = torch.zeros(self.capacity, center.shape[-1], device=self.device)
 
   def add(
     self,
@@ -102,7 +105,7 @@ class HLReplayBuffer:
     self.dones[idx] = dones
     if self.relabel:
       if self.policy_seq is None:
-        self._alloc_relabel(policy_seq, goal_state_seq, action_seq, scale)
+        self._alloc_relabel(policy_seq, goal_state_seq, action_seq, scale, center)
       self.policy_seq[idx] = policy_seq
       self.goal_state_seq[idx] = goal_state_seq
       self.action_seq[idx] = action_seq

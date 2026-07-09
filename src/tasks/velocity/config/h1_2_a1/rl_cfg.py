@@ -313,6 +313,18 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   commanded linear speed > 0.1; a distance floor keeps stuck-under-command windows expensive
   but finite, and an all-gated-off window is exactly 0). HL-only; the LL stays a pure tracker
   (the decoupling claim). 0 disables (byte-identical HL reward). Set >0 in S3+."""
+  hl_velocity_goals_only: bool = True
+  """Posture-sag fix (2026-07-09): the TD3 HL learns only the velocity goal columns
+  (action = task_dim(+period) instead of goal_dim(+period)); orientation/height targets are
+  pinned to their nominal values at every fire — the oracle's target path. Rationale: a
+  tracking-rewarded HL has no incentive to command nominal posture, and in delta mode a
+  sagged height with g=0 is a rewarded steady state — the v2 R-round co-trains all walked
+  bent-kneed (height_dev 0.18–0.29 vs the oracle's 0.005 with the same exp kernel). The LL
+  is untouched (goal obs stays goal_dim; it simply always sees nominal O/H targets, which
+  R4 shows it tracks to ~0.005). Requires ``hl_algorithm='td3'``. **Default True since
+  2026-07-09** (Liam: nominal posture references are the intended design); set False for
+  the legacy full-goal-authority HL. Checkpoints saved WITHOUT this key (pre-change) are
+  restored as False by play.py's structure merge — their HL nets are goal_dim-sized."""
   warm_start_path: str | None = None
   """Path to an A0 checkpoint to warm-start the LL from. The shared proprio columns
   (and all deeper layers / output head / std) are copied; the goal input columns are

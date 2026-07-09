@@ -101,6 +101,7 @@ iter 1500). A 9-run bisect on identical code/recipe (4096 envs, seed 42, local R
 | v1 200/2.5 | v1 7.9/0.5 | derived | 0 | 0.32 @800 (control, walks) |
 | v1 | v1, 7-group split | derived | 0 | 0.52 @1000 (walks; structure innocent) |
 | v1 | hold 120/80 | derived (0.04-0.08) | 0 | 0.51 @2000 (walks, lift-off ~1400) |
+| 300/3 | **v1** 7.9/0.5 | derived | 0 | 0.39 @800, 0.67 @2500 (walks, FAST) |
 | 300/3 | hold | derived | 0.1 | 0.12 @1846 (stuck) |
 | 300/3 | hold | derived | 0 | 0.20 @3200 (stuck-slow) |
 | 300/3 | hold | flat 0.25 | 0 | 0.14 @3500 (stuck) |
@@ -114,10 +115,19 @@ Three corrections to the original decision:
    pipeline artifact, not principle). Joint friction belongs to the deploy-sim
    robustness eval and the A2 Wide DR set, where its unknown true value is randomized
    over instead of guessed.
-2. **Torso hold gain 300/3 rejected; torso stays v1 200/2.5.** It stalls gait
-   discovery in both scale variants (waist counter-rotation is load-bearing for
-   stepping). Deploy still holds joint 12 via `hold_joint_ids`; the deploy hold gains
-   are set to 200/2.5 for lockstep.
+2. **Torso stays v1 200/2.5 (interaction, not torso alone).** Correction (2026-07-09,
+   `a0_torsov2_armsv1`): torso 300/3 with *soft v1 arms* walks fine and FAST (0.39 @800,
+   0.67 @2500) — faster than arm-hold/torso-v1. The stall is an **interaction**: torso-
+   hold and arm-hold are each individually tolerable (arm-hold slows lift-off to ~1400;
+   torso-hold alone barely matters), but *together* they stall (0.2 @3200). Earlier rows
+   that stalled all had BOTH holds, so they never isolated the torso. v2-final keeps
+   torso v1 to remove the interaction risk (deploy holds joint 12 via `hold_joint_ids`
+   regardless; hold gains 200/2.5 for lockstep). RESOLVED (2026-07-09, `a0_fullv2_kl01`):
+   the stall is a learning-rate artifact, not a barrier — full v2 (torso 300/3 + arm-hold)
+   converges under kl 0.01 (0.72 @3000, 0.743 @5000, 0 falls), it just lifts off slower
+   than a clean config. So if kl 0.01 is adopted, full v2 (torso holds at its true deploy
+   gain 300/3) becomes viable and is the cleaner deploy story; torso-v1 remains the safe
+   choice under kl 0.005.
 3. **Arm action scale stays derived (0.25*effort/kp), NOT the references' flat
    0.25.** With kp 120/80 arms, flat 0.25 lets exploration noise destabilize the
    robot (falls + action-std collapse) and never converges; the small derived

@@ -176,9 +176,15 @@ def run_play(task_id: str, cfg: PlayConfig):
                         # silently inert (the 2026-07-02 "no entrainment" false verdicts).
                         "hl_cadence", "cadence_period_range", "ll_cadence_coef",
                         "hl_cot_coef", "hl_cadence_source", "cadence_swing_time",
-                        "cadence_duty_range")
+                        "cadence_duty_range", "hl_velocity_goals_only")
       restored = {k: saved[k] for k in structure_keys
                   if k in saved and hasattr(agent_cfg, k)}
+      # hl_velocity_goals_only defaulted to True on 2026-07-09: checkpoints saved
+      # before the key existed trained full-goal HLs, so ABSENCE must restore False
+      # (the "keys absent keep the defaults" rule would silently rebuild a task_dim
+      # HL and crash/mis-load every pre-change TD3 checkpoint).
+      if "hl_velocity_goals_only" not in saved and hasattr(agent_cfg, "hl_velocity_goals_only"):
+        restored["hl_velocity_goals_only"] = False
       for k, v in restored.items():
         cur = getattr(agent_cfg, k)
         if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):

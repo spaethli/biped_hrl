@@ -20,6 +20,11 @@
 #   CADENCE_SOURCE random|hl (default random; hl needs td3, tags _cadhl)
 #   HL_ALGO        td3|oracle (default td3; oracle = no learned HL, no relabeling; tags _oracle)
 #   HL_COT         float (default 0.0) -> tags _cotXpX; needs CADENCE_SOURCE=hl to steer cadence
+#   HL_VELGOALS    True|False (default True since 2026-07-09) -> HL learns velocity goals only,
+#                  orientation/height targets pinned to nominal (posture-sag fix; needs HL_ALGO=td3).
+#                  False = legacy full-goal HL, tags _fullgoals
+#   DESIRED_KL     float (default 0.005, the LL PPO adaptive-LR target; TD3 HL unaffected)
+#                  -> tags _klXpXXX when != 0.005
 #   NUM_ENVS, MAX_ITER
 #
 # Examples:
@@ -55,6 +60,8 @@ HL_CADENCE=${HL_CADENCE:-False}
 CADENCE_SOURCE=${CADENCE_SOURCE:-random}
 HL_ALGO=${HL_ALGO:-td3}
 HL_COT=${HL_COT:-0.0}
+HL_VELGOALS=${HL_VELGOALS:-True}
+DESIRED_KL=${DESIRED_KL:-0.005}
 NUM_ENVS=${NUM_ENVS:-4096}
 MAX_ITER=${MAX_ITER:-10001}
 WARM_START=${WARM_START:-logs/rsl_rl/h1_2_velocity/2026-06-09_08-16-27/model_10000.pt}
@@ -64,10 +71,10 @@ VEL_FLAG=""; VEL_TAG=""
 [[ "$HL_OBS_VEL" == "True" ]] && VEL_FLAG="--agent.hl-obs-vel True" && VEL_TAG="_velobs"
 
 POSE_TAG=""
-(( $(echo "$LL_POSTURE > 0" | bc -l) )) && POSE_TAG="_pose$(echo $LL_POSTURE | tr '.' 'p')"
+awk "BEGIN{exit !($LL_POSTURE > 0)}" && POSE_TAG="_pose$(echo $LL_POSTURE | tr '.' 'p')"
 
 AR_TAG=""
-(( $(echo "$LL_ACTION_RATE == 0" | bc -l) )) && AR_TAG="_noar"
+awk "BEGIN{exit !($LL_ACTION_RATE == 0)}" && AR_TAG="_noar"
 
 # Kernel: exp auto-pairs with a true-terminal fell_over (never mix — see CLAUDE.md gotchas)
 KERNEL_FLAG=""; KERNEL_TAG=""
@@ -91,10 +98,17 @@ HL_FLAG="--agent.hl-algorithm td3 --agent.relabeling hiro"; HL_TAG=""
 [[ "$HL_ALGO" == "oracle" ]] && HL_FLAG="--agent.hl-algorithm oracle" && HL_TAG="_oracle"
 
 COT_FLAG=""; COT_TAG=""
-(( $(echo "$HL_COT > 0" | bc -l) )) && COT_FLAG="--agent.hl-cot-coef ${HL_COT}" \
+awk "BEGIN{exit !($HL_COT > 0)}" && COT_FLAG="--agent.hl-cot-coef ${HL_COT}" \
   && COT_TAG="_cot$(echo $HL_COT | tr '.' 'p')"
 
-RUN_NAME="a1_td3_delta_tracking${VEL_TAG}${POSE_TAG}${AR_TAG}${KERNEL_TAG}${WS_TAG}${CAD_TAG}${HL_TAG}${COT_TAG}_s${SEED}"
+VG_FLAG=""; VG_TAG=""
+[[ "$HL_VELGOALS" == "False" ]] && VG_FLAG="--agent.hl-velocity-goals-only False" && VG_TAG="_fullgoals"
+
+KL_FLAG=""; KL_TAG=""
+awk "BEGIN{exit !($DESIRED_KL != 0.005)}" && KL_FLAG="--agent.algorithm.desired-kl ${DESIRED_KL}" \
+  && KL_TAG="_kl$(echo $DESIRED_KL | tr '.' 'p')"
+
+RUN_NAME="a1_td3_delta_tracking${VEL_TAG}${POSE_TAG}${AR_TAG}${KERNEL_TAG}${WS_TAG}${CAD_TAG}${HL_TAG}${COT_TAG}${VG_TAG}${KL_TAG}_s${SEED}"
 
 echo "[a1] RUN=$RUN_NAME  velobs=$HL_OBS_VEL  posture=$LL_POSTURE  action_rate=$LL_ACTION_RATE  kernel=$GOAL_KERNEL  warm_start=$WARM_START  cadence=$HL_CADENCE/$CADENCE_SOURCE  seed=$SEED"
 
@@ -107,7 +121,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --agent.seed ${SEED} \
     --agent.ll-posture-coef ${LL_POSTURE} \
     --agent.ll-action-rate-coef ${LL_ACTION_RATE} \
-    $VEL_FLAG $KERNEL_FLAG $CAD_FLAG $COT_FLAG \
+    $VEL_FLAG $KERNEL_FLAG $CAD_FLAG $COT_FLAG $VG_FLAG $KL_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

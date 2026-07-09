@@ -59,10 +59,17 @@ class HighLevelTd3(HighLevel):
     obs_vel_dim: int = 0,
     cadence_dim: int = 0,
     cadence_period_range: tuple[float, float] = (0.35, 1.0),
+    task_only_goals: bool = False,
   ) -> None:
     super().__init__(goal_space)
     self.device = device
-    self.goal_dim = goal_dim
+    # task_only_goals (hl_velocity_goals_only): the HL learns only the task (velocity)
+    # goal columns; orientation/height targets are pinned to nominal via to_target's
+    # task_only path. self.goal_dim = the LEARNED goal columns everywhere below (actor
+    # output, candidate/relabel math, cadence column index); the full goal_dim survives
+    # only in the stored goal-STATE tensors (goal_state_seq / next_goal_state).
+    self.task_only = task_only_goals
+    self.goal_dim = goal_space.task_dim if task_only_goals else goal_dim
     self.gamma_hi = gamma_hi
     self.target_mode = target_mode
     # A1a S1c (ADR-0004): +1 tanh action dim = the commanded stride period, mapped
@@ -71,7 +78,7 @@ class HighLevelTd3(HighLevel):
     # to_target consumes only the goal dims. 0 -> byte-identical to the goal-only HL.
     self.cadence_dim = cadence_dim
     self.cadence_period_range = cadence_period_range
-    self.action_dim = goal_dim + cadence_dim
+    self.action_dim = self.goal_dim + cadence_dim
     # Optional extra HL input: the deployable base lin-vel estimate (vx,vy) the runner
     # writes to obs["hl_vel"]. 0 -> byte-identical to the proprio++command HL.
     self.obs_vel_dim = obs_vel_dim
@@ -175,14 +182,18 @@ class HighLevelTd3(HighLevel):
     self._win_action = g
     self._last_act_abs = g[:, : self.goal_dim].abs().mean().item()
     self._command_period(env, g)
-    return self.goal_space.to_target(env, state, g[:, : self.goal_dim], self.target_mode)
+    return self.goal_space.to_target(
+      env, state, g[:, : self.goal_dim], self.target_mode, task_only=self.task_only
+    )
 
   def act_inference(self, env, obs, state: torch.Tensor) -> torch.Tensor:
     # Deterministic actor; no exploration noise, no window scratch, no normalizer update.
     # (Commanding the period is a directive output, not a training side effect.)
     g = self._actor_forward(self.actor, self._state_vec(obs))
     self._command_period(env, g)
-    return self.goal_space.to_target(env, state, g[:, : self.goal_dim], self.target_mode)
+    return self.goal_space.to_target(
+      env, state, g[:, : self.goal_dim], self.target_mode, task_only=self.task_only
+    )
 
   def begin_window(self, env, obs, state: torch.Tensor) -> None:
     del env, obs, state
@@ -219,7 +230,10 @@ class HighLevelTd3(HighLevel):
     policy_seq = torch.stack(self._seq_policy, dim=1)
     goal_state_seq = torch.stack(self._seq_gstate, dim=1)
     action_seq = torch.stack(self._seq_action, dim=1)
-    scale = self.goal_space.scale(env).expand(next_s.shape[0], self.goal_dim)
+    # Learned-column slice: with task_only this is the velocity dims; the stored center
+    # stays FULL-dim (its non-task tail = the nominal targets, reused by _relabel to
+    # reconstruct the pinned goal-obs columns).
+    scale = self.goal_space.scale(env)[: self.goal_dim].expand(next_s.shape[0], self.goal_dim)
     # Store the absolute-target center too (state-independent ref for `absolute` mode);
     # in `delta` mode it is unused at relabel time. Captured here so a curriculum range
     # change can't desync it from the stored window.
@@ -288,27 +302,33 @@ class HighLevelTd3(HighLevel):
     """
     B, c, _ = batch.action_seq.shape
     k = self.num_candidates
-    s_t = batch.goal_state_seq[:, 0]  # [B, goal_dim], goal state at window start
-    scale = batch.scale  # [B, goal_dim]
+    gd = self.goal_dim  # learned goal columns (task-only: velocity dims)
+    s_t = batch.goal_state_seq[:, 0, :gd]  # [B, gd], goal state at window start
+    scale = batch.scale  # [B, gd] (stored pre-sliced to the learned columns)
     # Reference for the g<->V* map: window-start state (delta) or stored center (absolute).
     # V* = ref + scale*g, so g_emp recovering the achieved V* is (achieved - ref)/scale.
-    ref = batch.center if self.target_mode == "absolute" else s_t
-    g_emp = ((batch.next_goal_state - ref) / scale).clamp(-1.0, 1.0)  # achieved as raw g
+    ref = batch.center[:, :gd] if self.target_mode == "absolute" else s_t
+    g_emp = ((batch.next_goal_state[:, :gd] - ref) / scale).clamp(-1.0, 1.0)
 
-    # Candidate goals [B, k, goal_dim]: stored g, empirical g_emp, +(k-2) sampled.
+    # Candidate goals [B, k, gd]: stored g, empirical g_emp, +(k-2) sampled.
     # Only the goal dims are relabeled — the period dim has no achieved goal-space
     # state to score against (the LL entrains via the phase obs, not the goal obs);
     # it is carried through from the stored action unchanged.
-    cand = torch.empty(B, k, self.goal_dim, device=self.device)
-    cand[:, 0] = batch.actions[:, : self.goal_dim]
+    cand = torch.empty(B, k, gd, device=self.device)
+    cand[:, 0] = batch.actions[:, :gd]
     cand[:, 1] = g_emp
-    noise = torch.randn(B, k - 2, self.goal_dim, device=self.device) * self.candidate_std
+    noise = torch.randn(B, k - 2, gd, device=self.device) * self.candidate_std
     cand[:, 2:] = (g_emp.unsqueeze(1) + noise).clamp(-1.0, 1.0)
 
     # Reconstruct the LL goal obs the candidate would have produced each step:
     # V*_cand = ref + scale*g; delta_i = V*_cand - s_i. Flatten [B,k,c] for one forward.
-    v_star = ref.unsqueeze(1) + scale.unsqueeze(1) * cand  # [B, k, goal_dim]
-    delta = v_star.unsqueeze(2) - batch.goal_state_seq.unsqueeze(1)  # [B, k, c, goal_dim]
+    v_star = ref.unsqueeze(1) + scale.unsqueeze(1) * cand  # [B, k, gd]
+    delta = v_star.unsqueeze(2) - batch.goal_state_seq[..., :gd].unsqueeze(1)  # [B,k,c,gd]
+    if self.task_only:
+      # Pinned columns: target was nominal (= the stored center's non-task tail, which
+      # is candidate-independent), so their goal obs is nominal - s_i for every candidate.
+      rest = batch.center[:, gd:].unsqueeze(1) - batch.goal_state_seq[..., gd:]  # [B,c,rest]
+      delta = torch.cat([delta, rest.unsqueeze(1).expand(B, k, c, rest.shape[-1])], dim=-1)
     policy = batch.policy_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, policy_dim]
     actions = batch.action_seq.unsqueeze(1).expand(B, k, c, -1)  # [B, k, c, action_dim]
 

@@ -42,6 +42,13 @@ from the LL obs, intrinsic LL reward, goal obs group, A0 warm-start,
 - `num_envs` is effectively a hyperparameter: hold it fixed within a comparison set.
   Gait lift-off iteration scales with it (8192 envs: ~330 it; 4096: ~550-1400) — never
   judge stuck-vs-slow before ~2x the expected lift-off (`docs/adr/0005` amendment).
+- **A0 lift-off is ~2x later since `desired_kl` 0.01 -> 0.005** (`rl_cfg.py:39`, changed
+  post-2026-05-26 "to prevent collapse"). rsl_rl's adaptive LR holds each update near
+  `desired_kl`, so a smaller target = smaller steps = slower early learning (05-26 vs a
+  today control at identical 4096 envs + identical env config: tracking @400 = 0.31 vs
+  0.04). Verified as the *only* config delta between the eras (rewards/commands/curriculum
+  byte-identical). Deliberate trade-off, not a regression; revert to 0.01 for speed at
+  the risk of the collapse it prevents.
 - Use ≥2 seeds for any claim.
 - **Model v2 boundary (2026-07-08)**: v1-vs-v2 runs are not comparable (`docs/adr/0005`);
   v2 experiments log to `h1_2_velocity_v2` / `h1_2_velocity_a1_v2`. Replaying a

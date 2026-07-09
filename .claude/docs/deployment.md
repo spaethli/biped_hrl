@@ -17,6 +17,20 @@ Config: `deploy/robots/h1_2/config/config.yaml` (`keyboard_transitions`).
 Observation assembly: `deploy/robots/h1_2/src/State_RLBase.cpp`
 (`keyboard_velocity_commands`).
 
+## Bridge-plant mismatch (known, accepted 2026-07-08)
+
+The `simulate/` MuJoCo bridge loads the **raw** `scene_h1_2.xml`, whose joint defaults
+(`damping="1" armature="0.1" frictionloss="0.2"`) are much harsher than the training
+nominal (per-motor armature 0.025/0.04/0.005/0.002, frictionloss 0, no passive damping —
+mjlab injects these via `h1_2_constants.py`, which the bridge never reads). Consequence:
+policies look dirtier in the bridge than in play.py and can fall at the max
+vx=1.0-step-from-stand command even when mjlab shows fall_rate 0.0 for the identical
+condition (measured 2026-07-08, `a0_v2_baseline`). Pre-existing (v1 identical), NOT a
+policy or export bug — the ONNX/obs/gain path itself validated clean. Accepted as-is for
+now; **revisit before real deploy**: either align the scene XML joint defaults with the
+training nominal (faithful bridge) or with the vendor reference (0.01/0.1/0.001, mild
+sim2real proxy) — decide which job the bridge is doing.
+
 ## Deploy configs
 
 - Sim: `config/policy/velocity/v0/params/deploy.yaml` (keyboard_velocity_commands)
