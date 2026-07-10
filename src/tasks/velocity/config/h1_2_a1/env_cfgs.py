@@ -76,10 +76,11 @@ def unitree_h1_2_flat_a1_env_cfg(
   if lean:
     apply_lean_reward(cfg)
   _restructure_obs_groups(cfg, goal_dim=compute_goal_dim(goal_components))
-  # Treat falling as a truncation (bootstrap), not a true terminal: the LL's
-  # always-negative goal-distance reward would otherwise be gamed by terminating
-  # early (suicide). A0 keeps fell_over as a true terminal (shared base cfg).
-  cfg.terminations["fell_over"].time_out = True
+  # Kernel pairing (default = exp): exp is all-positive so a TRUE terminal is safe and
+  # correct (no suicide attractor). The old l2 kernel needed time_out=True (truncation)
+  # to avoid gaming the always-negative reward — if switching back to l2, also set this
+  # to True. Never mix (CLAUDE.md gotcha). exp+terminal validated 2026-07-09.
+  cfg.terminations["fell_over"].time_out = False
     # Upweight velocity tracking in the reward the HL optimizes (A1 only; A0 untouched).
   # With weight 1.0, tracking (~+0.6/ep) is swamped by the penalty terms (joint_pos_limits
   # ~-3.6, action_rate ~-3.4), so the learned HL's dominant gradient is "reduce penalties"

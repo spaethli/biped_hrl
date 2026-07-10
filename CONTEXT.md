@@ -107,8 +107,8 @@ _Avoid_: "the sim", "the env" (broader: those include rewards/observations); "mo
 alone (collides with the policy networks).
 
 **Model v2**:
-The corrected, versioned nominal model (hold-gain arms; waist, legs and joint friction
-unchanged after the bisect amendment) that all A0-A4 runs use from its landing onward.
+The corrected, versioned nominal model (hold-gain arms + waist at 300/3, legs unchanged,
+joint friction 0; trained with desired_kl=0.01) that all A0-A4 runs use from its landing on.
 Checkpoints and benchmark scores are not comparable across the v1/v2 boundary.
 _Avoid_: "new sim", "fixed env".
 
@@ -122,8 +122,8 @@ one policy, partially forwarded).
 **Hold gains**:
 The stiff arm PD set used to pin the arms at a fixed pose during split deploy, and
 (from Model v2) also the sim's arm actuator gains, so trained and held arm dynamics
-match. The waist is held too, but at its regular gains (a stiffer waist hold stalls
-gait learning in sim).
+match. The waist is held at 300/3 too (option B); the torso+arm hold only trains under
+desired_kl=0.01 (stalls at 0.005).
 _Avoid_: "arm gains" (ambiguous with the old soft RL-arm gains); "safety gains".
 
 **Suicide attractor**:

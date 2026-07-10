@@ -55,13 +55,12 @@ H1_2_ACTUATOR_M107_24_2 = BuiltinPositionActuatorCfg(
   viscous_damping=0.001,
 )
 H1_2_ACTUATOR_TORSO = BuiltinPositionActuatorCfg(
-  # M107_24_2 motor; stays at v1 200/2.5: the 300/3 hold gain stalls gait discovery
-  # (bisect 2026-07-07: torso 300/3 stuck at 0.11-0.20 tracking @3200+ in both scale
-  # variants; torso 200/2.5 converged 0.51 @2000). Deploy holds joint 12 regardless;
-  # deploy hold gains set to 200/2.5 for lockstep.
+  # M107_24_2 motor; hold gains 300/3 (option B, chosen 2026-07-09 for deploy fidelity:
+  # torso held at its true deploy hold gain). REQUIRES desired_kl=0.01 — the torso+arm
+  # hold combination stalls under 0.005 but converges under 0.01 (ADR-0005 amendment).
   target_names_expr=("torso_joint",),
-  stiffness=200.0,
-  damping=2.5,
+  stiffness=300.0,
+  damping=3.0,
   effort_limit=200.0,
   armature=0.025,
   frictionloss=0.0,

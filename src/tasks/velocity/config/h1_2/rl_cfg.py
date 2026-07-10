@@ -36,7 +36,7 @@ def unitree_h1_2_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       schedule="adaptive",
       gamma=0.99,
       lam=0.95,
-      desired_kl=0.005, # changed from 0.01 to prevent collapse
+      desired_kl=0.01, # 0.01 (2026-07-09): ~3x faster, stable to 10k, and required by full-v2 (torso+arm hold stalls at 0.005). ADR-0005.
       max_grad_norm=1.0,
     ),
     experiment_name="h1_2_velocity_v2",

@@ -76,7 +76,7 @@ Decisions locked in the 2026-07-07 grill session (user), superseding the S4/S5 r
 | Stage | Action | Success criterion | Status |
 |---|---|---|---|
 | **P0** | Commit+push the working tree (full-exp kernel `goal_space.py`, hip yaw/roll posture anchor, launcher `HL_ALGO`/`HL_COT` knobs, ADR-0005, doc syncs) | cluster pulls a repo containing everything the arms need | ✅ 2026-07-07 (`c21ee2d`, incl. the Model v2 implementation) |
-| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | 🟡 checks 1–3 ✅ 2026-07-08 (final v2 config per `398e88a`: arm hold gains + derived scales, torso/legs v1, frictionloss 0 — narrower than the ADR draft). Gate 2: `a0_v2_baseline` `model_10000` within noise of v1-A0 (err_vx 0.097 vs 0.093, fall 0=0). Gate 3: v1-in-v2 cross-eval = tracking preserved, **+12% CoT / +14% power** (arm plant change only; v2-in-v1 direction moot, legs unchanged). New baseline table → Results. Check 4 ✅ 2026-07-08: v2 ONNX walks in the C++ bridge (arms held, gain/scale lockstep verified 27/27 vs both YAMLs); the observed w-from-stand fall + dirty gait are a **pre-existing bridge-plant mismatch** (`scene_h1_2.xml` joint defaults armature 0.1/frictionloss 0.2/damping 1 vs training nominal 0.025–0.002/0/0 — the policy passes the same vx=1.0-step-from-stand test in mjlab with fall_rate 0.0/128 eps), accepted as-is until deploy (Liam 2026-07-08; see `.claude/docs/deployment.md`). **V2 GATE CLOSED** |
+| **V2** | Implement Model v2 + run the ADR-0005 validation gate: smoke → A0-v2 retrain → tracking/falls within noise of v1-A0 → v1↔v2 cross-eval (thesis-reportable modeling gap) → v2-A0 ONNX through the C++ bridge. Re-capture the A0 baseline table (CoT/stride) as the new S4′ reference | all four gate checks pass | 🟡 checks 1–3 ✅ 2026-07-08 (final v2 config per `398e88a`: arm hold gains + derived scales, torso/legs v1, frictionloss 0 — narrower than the ADR draft). Gate 2: `a0_v2_baseline` `model_10000` within noise of v1-A0 (err_vx 0.097 vs 0.093, fall 0=0). Gate 3: v1-in-v2 cross-eval = tracking preserved, **+12% CoT / +14% power** (arm plant change only; v2-in-v1 direction moot, legs unchanged). New baseline table → Results. Check 4 ✅ 2026-07-08: v2 ONNX walks in the C++ bridge (arms held, gain/scale lockstep verified 27/27 vs both YAMLs); the observed w-from-stand fall + dirty gait are a **pre-existing bridge-plant mismatch** (`scene_h1_2.xml` joint defaults armature 0.1/frictionloss 0.2/damping 1 vs training nominal 0.025–0.002/0/0 — the policy passes the same vx=1.0-step-from-stand test in mjlab with fall_rate 0.0/128 eps), accepted as-is until deploy (user decision 2026-07-08; see `.claude/docs/deployment.md`). **V2 GATE CLOSED** |
 | **R1** | cot0 config on v2 (from-scratch exp kernel, TD3+HIRO+delta+velobs, `source=hl`, `cot=0`), seeds 42+123 | walks ≈ v1-cot0 (err_vx ~0.10, 0 falls); the ≥2-seed co-train reference pair | ✅ 2026-07-09: both seeds walk (err_vx 0.107/0.113, 0 falls), short stride again (0.41/0.35); **seed spread is large on energy** (CoT 1.42 vs 1.79) — energy claims need both seeds. Own period is WORSE than pinned 0.6 (ΔCoT +8.7%): without CoT pressure the HL's cadence is a liability |
 | **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ✅ 2026-07-09 **PASSES**: full-band entrainment (stride 0.346/0.490/0.614/0.738/0.827 at cmd 0.35→1.0, vx=0.5; match 0.72–0.86; 0 falls) — the random source fixes the self-narrowing. **Valid frozen-LL producer for F** (delta-trained → F uses delta) |
 | **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | 🟡 2026-07-09 **half-pass at 0.2**: CoT 1.139 = clearly < R1 (−20/−36%) AND beats its own fixed-0.6 (**−7.6%**, the first co-trained ΔCoT win; v1's penalty domination is gone at this coef) — but tracking err_vx 0.146 vs R1's 0.107/0.113 (+0.035): NOT ≈ R1. 0.5: err_vx 0.203, abs CoT no better than R1 → 0.5 is past the boundary |
@@ -140,6 +140,52 @@ coef 1.0 has moved to a graded trade at 0.2–0.5 under the full-exp kernel — 
 tame now, not catastrophic. (iii) R1 seed spread on energy (CoT 1.42/1.79) → any co-train
 energy claim needs both seeds. (iv) All A1a CoT ≥ 1.14 vs A0-v2 0.53 — the absolute tier
 stays out of reach pre-F, as expected.
+
+**kl 0.01 + velocity-goals-only + directed-distance follow-up (2026-07-09/10, all
+`model_10000`, 64×600×2 seeds; all A1a runs torso-200 so kl reads are plant-clean).**
+
+*(a) kl lever + directed/undirected, full-goal HL (cluster `..._s42kl01[_unproj]`):*
+
+| run (full-goal) | vx | vy | yaw | act | cot | stride | orient | height |
+|---|---|---|---|---|---|---|---|---|
+| R3a cot0.2 **kl005** dir | 0.146 | 0.130 | 0.175 | 1.23 | 1.139 | 0.551 | 0.282 | 0.257 |
+| cot0.2 **kl01** dir | 0.063 | 0.065 | 0.429 | 1.33 | 1.233 | 0.371 | 0.094 | 0.045 |
+| cot0.3 kl01 dir | 0.069 | 0.067 | 0.198 | 1.24 | 0.921 | 0.400 | 0.080 | 0.013 |
+| cot0.5 kl01 dir | 0.077 | 0.086 | 0.322 | 1.39 | 0.902 | 0.413 | 0.091 | 0.188 |
+| cot0.2 kl01 **UNDIR** | 0.069 | 0.072 | 0.350 | 1.18 | 0.830 | 0.434 | 0.070 | 0.022 |
+
+**kl 0.005→0.01 is the dominant lever** (R3a→cot0.2-kl01, everything else fixed): err_vx
+**0.146→0.063**, height_dev **0.257→0.045** — dwarfs the distance question; confirms the
+optB "kl 0.01 required" call reaches A1a too.
+
+*(b) directed vs undirected, velocity-goals-only local (`..._cot0p2_kl0p01[_undir]_s42`):*
+
+| run (velgoal) | vx | vy | yaw | act | cot | stride | match | orient | height | ubdev |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cot0.2 **DIR** | 0.080 | 0.076 | 0.221 | 1.18 | 0.812 | **0.625** | 0.93 | 0.050 | 0.006 | 0.033 |
+| cot0.2 **UNDIR** | 0.061 | 0.078 | 0.150 | 1.14 | 0.855 | 0.353 | 0.95 | 0.035 | 0.005 | 0.022 |
+
+Reads: (i) **velocity-goals-only fixes the posture sag** — height_dev **0.005–0.006** vs
+full-goal 0.045–0.257; the biggest walk-quality gain in the set. (ii) Directed's robust
+signature is **longer strides** (0.55–0.63 vs undirected 0.35–0.43, since it rewards
+distance-along-command/joule); its tracking edge is inconsistent (wins vx by 0.006 full-goal,
+loses by 0.019 velgoal). No sideways exploit in either UNDIR run (vy ~0.07) at cot 0.2.
+**Decision (user, 2026-07-10): keep DIRECTED distance** — the longer stride is theoretically
+the better-CoT gait, and the small tracking cost is acceptable. Follow-up: directed already
+buys efficiency, so **lower the CoT coef** (the LL-side energy pressure) next rather than
+raise it.
+
+*(c) A0 plant, torso-v1(200) vs full-v2 optB(300) — the deploy-fidelity gain is free:*
+
+| A0 run | vx | vy | yaw | act | cot | stride | orient | height |
+|---|---|---|---|---|---|---|---|---|
+| torso200 kl005 (`a0_v2_baseline`) | 0.097 | 0.118 | 0.098 | 0.61 | 0.532 | 0.585 | 0.035 | 0.024 |
+| torso300 kl01 (`a0_v2_optB_baseline`) | 0.090 | 0.109 | 0.098 | 0.63 | 0.526 | 0.589 | 0.029 | 0.025 |
+
+Torso 200→300 (true deploy hold gain) costs **nothing** in sim — all within noise. **DECIDED
+2026-07-10 (ADR-0005 finalized): full-v2 optB (`a0_v2_optB_baseline` `model_10000`) is THE
+default A0-v2 baseline** that all A1a/A2 work rebases on; torso-v1 200/2.5 retired. Constants
++ all 4 deploy YAMLs + A0/A1 `desired_kl=0.01` are in lockstep in the working tree.
 
 ## Results
 

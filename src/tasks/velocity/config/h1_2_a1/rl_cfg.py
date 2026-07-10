@@ -186,22 +186,26 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   orientation (3) + height (1) = 7 dims."""
   goal_weights: dict[str, float] | None = None
   """Per-component reward weights (None -> all 1.0)."""
-  hl_algorithm: Literal["oracle", "ppo", "td3"] = "oracle"
-  """High-level learner. M1/2 ship 'oracle'; M3 adds 'ppo'; M4 adds 'td3'."""
+  hl_algorithm: Literal["oracle", "ppo", "td3"] = "td3"
+  """High-level learner. **Default 'td3'** — the final A1 structure (TD3 + HIRO relabel).
+  Historical milestones: M1/2 shipped 'oracle', M3 added 'ppo', M4 added 'td3'. Set
+  'oracle' for the clean LL-isolation baseline (no learned HL, no relabeling)."""
   hl_ppo: HlPpoCfg = field(default_factory=HlPpoCfg)
   """High-level PPO config (used when hl_algorithm == 'ppo')."""
   hl_td3: HlTd3Cfg = field(default_factory=HlTd3Cfg)
   """High-level TD3 config (used when hl_algorithm == 'td3')."""
   goal_state_noise: GoalStateNoiseCfg = field(default_factory=GoalStateNoiseCfg)
   """Estimator-noise on the LL goal channel (#8b sim2real DR). Off by default."""
-  relabeling: Literal["none", "hiro"] = "none"
-  """HIRO off-policy correction (td3 only; ignored otherwise)."""
-  hl_reward_mode: Literal["task", "tracking"] = "task"
-  """What the learned HL accumulates as its per-window reward (ppo/td3 only). ``task``
-  (default): the full env task reward summed over the window — but it is PENALTY-DOMINATED
+  relabeling: Literal["none", "hiro"] = "hiro"
+  """HIRO off-policy correction (td3 only; ignored otherwise). **Default 'hiro'** — part of
+  the final A1 (TD3) structure. Only meaningful with ``hl_algorithm='td3'``."""
+  hl_reward_mode: Literal["task", "tracking"] = "tracking"
+  """What the learned HL accumulates as its per-window reward (ppo/td3 only). ``task``:
+  the full env task reward summed over the window — but it is PENALTY-DOMINATED
   (joint/action penalties swamp the exp tracking term), so the probe (2026-06-16) showed the
-  HL collapses to g≈0 ("ask for ~neutral velocity") and won't command forward. ``tracking``:
-  velocity command-tracking only (``track_linear_velocity + track_angular_velocity``, the
+  HL collapses to g≈0 ("ask for ~neutral velocity") and won't command forward. ``tracking``
+  (**default**, the A1 structure lever since M4): velocity command-tracking only
+  (``track_linear_velocity + track_angular_velocity``, the
   proven A0 exp terms) — the outcome the HL controls, with the LL-execution penalties removed
   (they are the LL's concern). The env reward is UNCHANGED (no RQ2 confound); only what the HL
   optimizes internally changes. Safe with ``hl_target_mode=absolute`` (V* is bounded to the
@@ -216,9 +220,10 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``V*=center+scale*g`` with ``center``=command-range midpoint (velocity) / nominal
   (orient,height) — a STATIC command->g map; only *refines* delta+tracking (~0.14->0.098).
   The LL is unchanged either way (still observes V*-s_i)."""
-  hl_obs_vel: bool = False
+  hl_obs_vel: bool = True
   """Feed the HL the deployable base lin-vel estimate (vx,vy) as extra obs (td3 only).
-  Off (default) -> HL input is ``policy ++ command`` (byte-identical; RQ2-safe). On ->
+  Off -> HL input is ``policy ++ command`` (byte-identical; RQ2-safe). On (**default** since
+  2026-07-10, the final A1 structure) ->
   ``policy ++ command ++ v_est``, where v_est is the SAME noisy estimate the LL conditions
   on (``state_n`` vx,vy under #8b noise, clean at eval). Motivated for ``hl_target_mode=delta``:
   the directional target ``V*=state+scale*g`` needs current velocity to pick g=(command-v)/scale,
@@ -243,7 +248,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   invariant, so without the hip anchor from-scratch LLs walk with a ~20° hip twist (A0
   pins the same joints via its tightest ``variable_posture`` stds). ~No-op for aligned
   warm-started policies (deviation ≈ 0). 0 disables."""
-  ll_goal_kernel: Literal["l2", "exp"] = "l2"
+  ll_goal_kernel: Literal["l2", "exp"] = "exp"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =
   A0-parity positive-bounded kernel for from-scratch training (M3 of the no-warm-start
@@ -322,7 +327,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   bent-kneed (height_dev 0.18–0.29 vs the oracle's 0.005 with the same exp kernel). The LL
   is untouched (goal obs stays goal_dim; it simply always sees nominal O/H targets, which
   R4 shows it tracks to ~0.005). Requires ``hl_algorithm='td3'``. **Default True since
-  2026-07-09** (Liam: nominal posture references are the intended design); set False for
+  2026-07-09** (user decision: nominal posture references are the intended design); set False for
   the legacy full-goal-authority HL. Checkpoints saved WITHOUT this key (pre-change) are
   restored as False by play.py's structure merge — their HL nets are goal_dim-sized."""
   warm_start_path: str | None = None
@@ -373,7 +378,7 @@ def unitree_h1_2_hrl_runner_cfg() -> HrlRunnerCfg:
       schedule="adaptive",
       gamma=0.99,
       lam=0.95,
-      desired_kl=0.005, #original kl was 0.01, best A0 was 0.005
+      desired_kl=0.01, # 0.01 default (2026-07-09, exp-kernel scratch run validated it)
       max_grad_norm=1.0,
     ),
     experiment_name="h1_2_velocity_a1_v2",

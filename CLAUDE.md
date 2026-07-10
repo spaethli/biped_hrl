@@ -74,29 +74,39 @@ analysis and the proposed change first.
 
 ## Load-bearing gotchas
 
-- A1 LL is **warm-started from a converged A0** — load-bearing **for the default l2
-  kernel**; with `ll_goal_kernel=exp` + true-terminal `fell_over` A1 trains from scratch
-  (2026-07-06, `doc/hrl/A1_findings.md` from-scratch kernel row). The `command` obs term
+- **A1 default (2026-07-09): `ll_goal_kernel=exp` + true-terminal `fell_over`**, trains
+  from scratch (no warm-start needed). Warm-start from a converged A0 is still load-bearing
+  for the old `l2` kernel (which also needs `fell_over.time_out=True`). The `command` obs term
   sits **mid-vector (actor cols 6:9), not last**, so the warm-start copy is gap-aware
   (`HierarchicalRunner._partial_load`). Diagnostic it worked: **high iter-0 ep_len**.
-- `fell_over` is a **true terminal for A0** but a **truncation (`time_out=True`) for A1
-  only** (set in `config/h1_2_a1/env_cfgs.py`). A0 diverges if given `time_out`; A1's
-  negative goal-distance reward needs the bootstrap to avoid a suicide attractor.
-  **Kernel pairing rule: l2 ↔ `time_out`, exp ↔ true terminal
-  (`--env.terminations.fell-over.time-out False`) — never mix.**
+- **`Unitree-H1_2-Flat-A1` config = the FULL final A1 structure (2026-07-10):** the
+  `rl_cfg.py` field defaults now carry `hl_algorithm=td3`, `relabeling=hiro`,
+  `hl_reward_mode=tracking`, `hl_obs_vel=True` (were oracle/none/task/False; the shell
+  script used to force them). So the **bare task trains a learned TD3 HL, not oracle** —
+  set `--agent.hl-algorithm oracle` for the clean LL-isolation baseline. Old checkpoints
+  restore their own saved structure via play.py, so replays are unaffected.
+- **Kernel pairing rule (never mix): exp ↔ true terminal (A1 default now), l2 ↔
+  `time_out=True` truncation.** Set in `config/h1_2_a1/env_cfgs.py`. exp is all-positive so
+  a true terminal is safe; l2's always-negative reward needs the truncation bootstrap to
+  avoid a suicide attractor. A0 always uses a true terminal (diverges under `time_out`).
 - A1 `entropy_coef=0.005` (0.01 lets action std blow up to ~2 and collapse).
 - `goal_components` (in `config/h1_2_a1/rl_cfg.py`) is the **single source of truth**
   for the goal space; the env derives its goal obs dim from it. `goal_dim` is always
   derived, never hardcoded.
+- **`hl_velocity_goals_only=True` is the A1a default (2026-07-09):** the TD3 HL emits
+  only the velocity goal columns (+period); orientation/height targets are pinned to
+  nominal (oracle path). Fixes the posture sag (tracking-rewarded HL had no reason to
+  command upright). HL action = `task_dim(+1)`, not `goal_dim(+1)`; pre-change checkpoints
+  restore as `False` (play.py absence-shim). See `A1_findings.md`.
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
   a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds. Gait lift-off
   iteration scales with num_envs — never judge stuck-vs-slow before ~2x the expected
   lift-off (see `docs/adr/0005` amendment).
-- **Model v2** (2026-07-08, `docs/adr/0005`): arm hold gains + derived scales, torso/legs
-  v1, frictionloss 0. v1 checkpoints invalid for v2 work; v2 logs to `*_v2` experiments.
-  Replays need the constants the checkpoint trained with (scales are env-side).
+- **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
+  derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid;
+  v2 logs to `*_v2`. Replays need the constants the checkpoint trained with (env-side scales).
 
 ## Where the deep context lives
 

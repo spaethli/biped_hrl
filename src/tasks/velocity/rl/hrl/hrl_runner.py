@@ -497,6 +497,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             _d_par = ((rd_.root_link_lin_vel_b[:, :2] * _cmd).sum(dim=-1)
                       / _cmd.norm(dim=-1).clamp(min=1e-6)) * _eng * uenv.step_dt
             win_dist += _d_par
+            #win_dist += _d_step
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.

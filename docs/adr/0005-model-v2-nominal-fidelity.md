@@ -1,7 +1,8 @@
 # Model v2: versioned nominal-model correction (hold-gain upper body + joint friction)
 
-**Status:** accepted, amended 2026-07-08 (see Amendment: frictionloss and torso hold
-gain removed from the training nominal after a 9-run bisect; final config below)
+**Status:** accepted, amended 2026-07-08, finalized 2026-07-10 (Model v2 = OPTION B,
+full-body hold gains incl. torso 300/3 at desired_kl=0.01; confirmed as the default A0
+baseline at a full 10k budget by `a0_v2_optB_baseline` — see Amendment and final config below)
 
 ## Context
 
@@ -125,9 +126,13 @@ Three corrections to the original decision:
    regardless; hold gains 200/2.5 for lockstep). RESOLVED (2026-07-09, `a0_fullv2_kl01`):
    the stall is a learning-rate artifact, not a barrier — full v2 (torso 300/3 + arm-hold)
    converges under kl 0.01 (0.72 @3000, 0.743 @5000, 0 falls), it just lifts off slower
-   than a clean config. So if kl 0.01 is adopted, full v2 (torso holds at its true deploy
-   gain 300/3) becomes viable and is the cleaner deploy story; torso-v1 remains the safe
-   choice under kl 0.005.
+   than a clean config. **DECIDED 2026-07-10: kl 0.01 is adopted and full v2 (option B,
+   torso at its true deploy gain 300/3) is THE default nominal** — the cleaner deploy story
+   with no measurable tracking cost. Confirmed at a full 10k budget by `a0_v2_optB_baseline`
+   (benchmark err_vx 0.089 / vy 0.109 / yaw 0.100, act_rate 0.63, 0 falls — indistinguishable
+   from the v1-A0 target), with `a0_fullv2_kl01` (5k, err_vx 0.096) as the same-config
+   sibling (tight spread → stable config, not a lucky seed). torso-v1 200/2.5 is retired
+   as the interim safe choice (it only existed as a kl-0.005 hedge).
 3. **Arm action scale stays derived (0.25*effort/kp), NOT the references' flat
    0.25.** With kp 120/80 arms, flat 0.25 lets exploration noise destabilize the
    robot (falls + action-std collapse) and never converges; the small derived
@@ -135,10 +140,15 @@ Three corrections to the original decision:
    ignored. The references' flat 0.25 works with their lower arm kp (40-80) and
    different reward stacks; it does not transplant.
 
-Final v2 nominal: legs v1, torso v1, shoulders 120/2, elbow+wrists 80/1, derived
+Final v2 nominal (OPTION B, chosen 2026-07-09 for deploy fidelity): legs v1, torso
+**300/3**, shoulders 120/2, elbow+wrists 80/1, trained with **desired_kl=0.01** (required:
+torso+arm hold stalls at 0.005, converges at 0.01), derived
 scales, frictionloss 0, viscous_damping 0.001, 7 actuator groups, conservative URDF
-effort limits (datasheet ceilings ~2-6x higher; noted in A2_ARMA.md §3). Known cost:
-gait lift-off ~1400 iters at 4096 envs (vs ~600 for v1); converged quality matches.
+effort limits (datasheet ceilings ~2-6x higher; noted in A2_ARMA.md §3). Under kl 0.01
+the full-v2 baseline reaches 0.72 @3000 / 0.74 @5000, 0 falls (`a0_fullv2_kl01`); the
+canonical baseline is the full 10k run **`a0_v2_optB_baseline` (`model_10000`)**: benchmark
+err_vx 0.089 / vy 0.109 / yaw 0.100, act_rate 0.63, orient_dev 0.030, height_dev 0.024,
+cot 0.531, 0 falls — on the v1-A0 target. All A1/A1a/A2 work rebases on this run.
 Also learned: lift-off iteration scales with num_envs (the 06-09 v1 baseline used
 8192 envs and lifted off at ~330; all 4096-env runs cross 0.3 at 550-800) — hold
 num_envs fixed within any comparison and never judge stuck-vs-slow before ~2x the
