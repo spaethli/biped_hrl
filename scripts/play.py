@@ -185,6 +185,11 @@ def run_play(task_id: str, cfg: PlayConfig):
       # HL and crash/mis-load every pre-change TD3 checkpoint).
       if "hl_velocity_goals_only" not in saved and hasattr(agent_cfg, "hl_velocity_goals_only"):
         restored["hl_velocity_goals_only"] = False
+      # Same absence rule for hl_obs_vel (defaulted to True 2026-07-10): checkpoints saved
+      # before the key existed trained HLs without the +2 vel obs -> absence must restore
+      # False or every pre-velobs TD3 checkpoint mis-builds 94-dim nets vs its saved 92.
+      if "hl_obs_vel" not in saved and hasattr(agent_cfg, "hl_obs_vel"):
+        restored["hl_obs_vel"] = False
       for k, v in restored.items():
         cur = getattr(agent_cfg, k)
         if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):
@@ -350,6 +355,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
       ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
+      achieved_vxs = []  # per-step env-mean achieved vx (ramp metric for --eval-cmd-vx holds)
       prev_actions: torch.Tensor | None = None
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
       prev_contact: torch.Tensor | None = None
@@ -375,6 +381,7 @@ def run_play(task_id: str, cfg: PlayConfig):
           errs_vx.append(ae[:, 0].mean().item())
           errs_vy.append(ae[:, 1].mean().item())
           errs_yaw.append(ae[:, 2].mean().item())
+          achieved_vxs.append(achieved[:, 0].mean().item())
 
           # 2. Survival: fall flag and episode length.
           if has_fell:
@@ -431,10 +438,26 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
 
+      # Hold-eval split (stage D, 2026-07-14): steady-state errs over the last 2/3 of the
+      # rollout separate the from-stand acceleration ramp from held tracking (the table-e
+      # full-window numbers conflate them); t90 = time to first reach 90% of the commanded
+      # vx (NaN when never reached, or for random-command aggregates where it's undefined).
+      ss0 = cfg.eval_steps // 3
+      if cfg.eval_cmd_vx is not None and abs(cfg.eval_cmd_vx) > 1e-6:
+        sgn = 1.0 if cfg.eval_cmd_vx > 0 else -1.0
+        thr = 0.9 * abs(cfg.eval_cmd_vx)
+        t90 = next((i * step_dt for i, v in enumerate(achieved_vxs) if sgn * v >= thr),
+                   float("nan"))
+      else:
+        t90 = float("nan")
+
       seed_results.append({
         "err_vx":      _m(errs_vx),
         "err_vy":      _m(errs_vy),
         "err_yaw":     _m(errs_yaw),
+        "ss_err_vx":   _m(errs_vx[ss0:]),
+        "ss_err_vy":   _m(errs_vy[ss0:]),
+        "t90_s":       t90,
         "fall_rate":   _m(fall_flags),
         "mean_ep_len": _m(ep_lens),
         "action_rate": _m(action_rates) if action_rates else float("nan"),
@@ -475,6 +498,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Energy    CoT (norm): {_fmt('cot')}")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print(f"  Gait      match     : {_fmt('gait_match')}")
+    if cfg.eval_cmd_vx is not None:
+      print(f"  Hold      ss_err_vx : {_fmt('ss_err_vx')}  (last 2/3)")
+      print(f"  Hold      ss_err_vy : {_fmt('ss_err_vy')}")
+      print(f"  Hold      t90_s     : {_fmt('t90_s')}")
     print("=" * 58)
     print()
 
@@ -514,6 +541,7 @@ def run_play(task_id: str, cfg: PlayConfig):
 
     # Per-(window,env) buffers accumulated across seeds; masked by within-window done.
     cmd_a, vstar_a, gabs_a, sfire_a, ach_a, keep_a = [], [], [], [], [], []
+    period_a = []  # HL stride periods (cadence runs)
     for seed_idx in range(cfg.eval_seeds):
       torch.manual_seed(42 + seed_idx)
       with torch.inference_mode():
@@ -530,6 +558,11 @@ def run_play(task_id: str, cfg: PlayConfig):
           done_in_window = torch.zeros(n_envs, dtype=torch.bool, device=env.device)
           for k in range(c):
             cur = gs.extract(uenv)
+            # Advance the cadence phase clock exactly like get_inference_policy does —
+            # the phase obs reads env.hrl_phase, and a frozen clock de-entrains the LL
+            # (pre-2026-07-15 probes on cadence checkpoints ran frozen: probe artifact).
+            if getattr(runner, "hl_cadence", False):
+              uenv.hrl_phase = (uenv.hrl_phase + uenv.step_dt / uenv.hrl_period) % 1.0
             delta = v_star - cur
             uenv.hrl_goal = delta
             obs["goal"] = delta
@@ -539,6 +572,9 @@ def run_play(task_id: str, cfg: PlayConfig):
           cmd_a.append(cmd.cpu()); vstar_a.append(v_star.cpu()); gabs_a.append(g_raw.cpu())
           sfire_a.append(s_fire.cpu()); ach_a.append(achieved.cpu())
           keep_a.append((~done_in_window).cpu())             # drop reset-contaminated windows
+          # A1a: HL-commanded stride period per window (cadence runs)
+          hp = getattr(uenv, "hrl_period", None)
+          period_a.append(hp.clone().cpu() if hp is not None else torch.zeros(n_envs))
 
     cmd_t = torch.cat(cmd_a)            # [W, 3]  (W = windows*envs*seeds, flattened)
     vstar_t = torch.cat(vstar_a)        # [W, D]
@@ -597,6 +633,29 @@ def run_play(task_id: str, cfg: PlayConfig):
       print(f"    {ax:<4} requested {req[j]:+.4f}  realized {real[j]:+.4f}  ratio {r:+.3f}")
     print("=" * 70)
     print()
+
+    # Pinned-command group diff (2026-07-15): split envs by late-window achieved vx and
+    # print signed goals + period per group — the probe that exposed the velocity-hold HL.
+    if cfg.eval_cmd_vx is not None:
+      W0 = n_windows
+      ach_w = torch.stack(ach_a[:W0])     # [W, B, D]
+      vst_w = torch.stack(vstar_a[:W0])
+      gab_w = torch.stack(gabs_a[:W0])
+      per_w = torch.stack(period_a[:W0])  # [W, B]
+      vx_ss = ach_w[-max(W0 // 3, 1):, :, vs].mean(0)  # [B] late-window achieved vx
+      for nm, m in (("bwd(vx<0)", vx_ss < 0.0), ("fwd(vx>0.1)", vx_ss > 0.1)):
+        if int(m.sum()) == 0:
+          continue
+        print(f"[HOLDDIAG] {nm} n={int(m.sum())}: goal_vx {vst_w[:, m, vs].mean():+.3f} "
+              f"goal_vy {vst_w[:, m, vs + 1].mean():+.3f} "
+              f"|g|vx {gab_w[:, m, vs].mean():.2f} |g|vy {gab_w[:, m, vs + 1].mean():.2f} "
+              f"period {per_w[:, m].mean():.3f}s")
+        traj_a = ach_w[:, m, vs].mean(1)
+        traj_g = vst_w[:, m, vs].mean(1)
+        print(f"[HOLDDIAG] {nm} ach_vx/win : "
+              + " ".join(f"{v:+.2f}" for v in traj_a[:12].tolist()))
+        print(f"[HOLDDIAG] {nm} goal_vx/win: "
+              + " ".join(f"{v:+.2f}" for v in traj_g[:12].tolist()))
 
     diag_out = {"label": str(resume_path) if resume_path is not None else "unknown",
                 "c": c, "kept_windows": int(keep.sum()), "total_windows": int(keep.numel())}

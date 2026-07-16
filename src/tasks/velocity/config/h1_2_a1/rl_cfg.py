@@ -248,6 +248,16 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   invariant, so without the hip anchor from-scratch LLs walk with a ~20° hip twist (A0
   pins the same joints via its tightest ``variable_posture`` stds). ~No-op for aligned
   warm-started policies (deviation ≈ 0). 0 disables."""
+  ll_posture_weights: dict[str, float] | None = None
+  """Per-joint multipliers on the posture penalty (regex pattern -> weight), resolved
+  against the anchored joint names at runner init; joints no pattern matches stay at 1.0.
+  ``dev = (w * err^2).mean`` — NOT renormalized, so ``None``/all-ones reproduces the
+  uniform penalty and raising one group does not dilute the hip yaw/roll anchor. Stage D
+  arm-calm lever (2026-07-14): the uniform mean gives each of the 19 anchored joints
+  ~coef/19 pull vs A0's per-joint-std pressure (~50-100x more on the shoulders) -> the
+  A1a shoulder flail. Set via rl_cfg edit (structured tyro CLI overrides untrusted, the
+  fix0p8 lesson); promote the validated vector to this default. RQ2: A1-only reward
+  change, log next to the ar 0.02-vs-0.05 note."""
   ll_goal_kernel: Literal["l2", "exp"] = "exp"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =

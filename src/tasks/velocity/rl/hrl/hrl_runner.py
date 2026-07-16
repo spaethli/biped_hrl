@@ -27,6 +27,7 @@ import wandb
 
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
+from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
@@ -102,10 +103,21 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
-    ub_ids, _ = env.unwrapped.scene["robot"].find_joints(
+    ub_ids, ub_names = env.unwrapped.scene["robot"].find_joints(
       [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*", ".*hip_yaw.*", ".*hip_roll.*"]
     )
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
+    # Stage D (2026-07-14): per-joint posture multipliers (pattern -> weight; unmatched
+    # joints stay 1.0). NOT renormalized, so all-ones = the uniform penalty and raising
+    # the shoulders does not dilute the hip yaw/roll anchor.
+    self._ub_weights = torch.ones(len(ub_names), device=device)
+    pw = train_cfg.get("ll_posture_weights")
+    if pw:
+      w_idx, w_names, w_vals = resolve_matching_names_values(dict(pw), ub_names)
+      self._ub_weights[torch.as_tensor(w_idx, device=device)] = torch.as_tensor(
+        w_vals, dtype=torch.float32, device=device)
+      print("[HRL] Posture weights: "
+            + ", ".join(f"{n}={v:g}" for n, v in zip(w_names, w_vals)))
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
     self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
     self.freeze_ll: bool = self.freeze_ll_path is not None
@@ -457,12 +469,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           if self.ll_posture_coef != 0.0:
             rd = uenv.scene["robot"].data
             dev = (rd.joint_pos[:, self._ub_joint_ids]
-                   - rd.default_joint_pos[:, self._ub_joint_ids]).square().mean(dim=1)
-            # Clamp per-env deviation: unbounded L2 otherwise lets a rare sim blow-up
-            # (joints -> huge) spike this to ~-5e5 and detonate the LL PPO update in one
-            # step (2026-06-30 crash @ it9624). Healthy dev ~0.36 rad^2; 9.0 = all
-            # upper-body joints ~pi off default, so this only bites physical blow-ups.
-            dev = dev.clamp(max=9.0)
+                   - rd.default_joint_pos[:, self._ub_joint_ids]).square()
+            # Clamp per-joint err^2 (pre-weighting): unbounded L2 otherwise lets a rare
+            # sim blow-up (joints -> huge) spike this to ~-5e5 and detonate the LL PPO
+            # update in one step (2026-06-30 crash @ it9624). 9.0 = a joint ~pi off
+            # default, so this only bites physical blow-ups; identical to the old
+            # post-mean clamp for healthy states, weight-independent under ll_posture_weights.
+            dev = (dev.clamp(max=9.0) * self._ub_weights).mean(dim=1)
             pose_pen = self.ll_posture_coef * dev
             r_lo = r_lo - pose_pen
             posture_sum += -pose_pen.mean().item()  # signed reward contribution (<= 0)

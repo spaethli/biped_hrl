@@ -10,6 +10,7 @@
 #include "FSM/FSMState.h"
 #include "isaaclab/envs/mdp/terminations.h"
 #include "hrl/goal_space.h"
+#include "hrl/hrl_telemetry.h"
 
 #include <unitree/dds_wrapper/robots/go2/go2.h>  // go2::subscription::SportModeState
 
@@ -22,7 +23,8 @@
 // [SAFETY FILTER] master switch for the HRL state (mirrors State_RLBase). When 1,
 // the position-hold filter is active AND the flight recorder logs automatically if
 // H1_2_SAFETY_LOG is set (the launch script sets it). When 0, neither is compiled in.
-#define SAFETY_FILTER 0
+// ON since 2026-07-14 (deploy plan): every bridge gate runs the hardware build.
+#define SAFETY_FILTER 1
 #if SAFETY_FILTER
 #  include "safety_logger.h"
 #endif
@@ -51,6 +53,11 @@ public:
 
         env->robot->update();
         step_ = 0;
+
+        // Deploy-gate telemetry (W3); same output base as the flight recorder.
+        if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
+            telemetry_.init(sp, goal_space_->dim());
+        last_action_.clear();
 
 #if SAFETY_FILTER
         // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set (launch script).
@@ -86,6 +93,7 @@ public:
         if (policy_thread.joinable()) {
             policy_thread.join();
         }
+        telemetry_.flush();
 #if SAFETY_FILTER
         safety_logger_.flush(); // write any buffered rows to disk
 #endif
@@ -108,6 +116,13 @@ private:
     int c_{8};
     std::string hl_target_mode_{"absolute"};
     bool oracle_{false};  // hl_algorithm==oracle: V* computed analytically, no high_level.onnx
+    // Keeper-structure knobs (deploy.yaml `hrl:` block; absent key = old behavior, so
+    // pre-velgoal 7-dim checkpoints run unchanged). Mirror config/h1_2_a1/rl_cfg.py names.
+    bool hl_obs_vel_{false};   // HL input = policy ++ command ++ (vx,vy estimate)
+    bool velgoal_{false};      // hl_velocity_goals_only: HL emits the velocity goal cols only
+    int cadence_dim_{0};       // 1 = HL owns the stride period (hl_cadence, source=hl, learned)
+    float period_lo_{0.35f}, period_hi_{1.0f};  // cadence_period_range (tanh affine map)
+    float pin_period_{0.0f};   // >0 = freeze the LL phase clock at this period (bring-up pin)
     Eigen::VectorXf target_;  // held window target V* (refreshed by the HL every c steps)
     long step_{0};
 
@@ -115,6 +130,11 @@ private:
     // mimic the real-robot estimator noise on velocity/height in sim (where s is exact).
     Eigen::VectorXf state_noise_std_;
     std::mt19937 rng_{std::random_device{}()};
+
+    // Deploy-gate telemetry (plan W3): 50 Hz cmd/s/V*/period CSV, on when
+    // H1_2_SAFETY_LOG is set (independent of SAFETY_FILTER). Flushed in exit().
+    hrl::Telemetry telemetry_;
+    std::vector<float> last_action_;  // for the logged action-rate scalar
 
     std::thread policy_thread;
     bool policy_thread_running = false;

@@ -54,6 +54,11 @@ from the LL obs, intrinsic LL reward, goal obs group, A0 warm-start,
 - **Model v2 boundary (2026-07-08)**: v1-vs-v2 runs are not comparable (`docs/adr/0005`);
   v2 experiments log to `h1_2_velocity_v2` / `h1_2_velocity_a1_v2`. Replaying a
   checkpoint needs the constants it trained with (action scales are env-side).
+- **rs20 boundary (2026-07-14)**: training `resampling_time_range` moved (3,8)→(3,20)
+  (A0+A1 alike, held commands in-distribution); the play/bench command process stays
+  pinned (3,8) so ALL aggregate-bench tables remain cross-generation comparable (keeper
+  invariance verified 0.0797 vs 0.080). Training-side comparisons are within-generation
+  only; new-generation A0 reference = `a0_v2_optB_rs20_baseline` `model_10000`.
 - Compare checkpoints with the deterministic closed-loop eval (hierarchy-aware
   inference policy), not training-time stochastic metrics.
 

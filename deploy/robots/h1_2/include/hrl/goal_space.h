@@ -55,6 +55,17 @@ public:
         return d;
     }
 
+    // Learned (task) goal columns for hl_velocity_goals_only — the velocity component,
+    // which the training side requires to be the contiguous prefix (goal_space.py).
+    int task_dim() const
+    {
+        if (comps_.empty() || comps_[0] != VELOCITY)
+            throw std::runtime_error(
+                "hrl::GoalSpace: velocity must be the first goal component "
+                "(training assumes the task prefix).");
+        return comp_dim(VELOCITY);
+    }
+
     // Current goal-space state s. lin_vel_b = base linear velocity in the BODY frame (xy
     // used); ang_vel_b.z + projected_gravity_b come from the IMU (robot->data); height is
     // the base world z (from the sim HighState). Caller supplies lin_vel_b/height so this
@@ -126,11 +137,19 @@ public:
     // Map the bounded goal g to the absolute window target V*.
     //   delta    (HIRO default): V* = state  + scale .* g
     //   absolute               : V* = center + scale .* g
+    // task_only (hl_velocity_goals_only): g carries only the task (velocity) prefix;
+    // orientation/height targets are pinned to nominal — mirrors goal_space.py to_target.
     Eigen::VectorXf to_target(isaaclab::ManagerBasedRLEnv* env, const Eigen::VectorXf& state,
-                              const Eigen::VectorXf& g, const std::string& mode) const
+                              const Eigen::VectorXf& g, const std::string& mode,
+                              bool task_only = false) const
     {
         const Eigen::VectorXf ref = (mode == "absolute") ? center(env) : state;
-        return ref + scale(env).cwiseProduct(g);
+        if (!task_only) return ref + scale(env).cwiseProduct(g);
+        const int td = task_dim();
+        // oracle_target(0) = nominal non-task targets (velocity cols overwritten below).
+        Eigen::VectorXf v = oracle_target(Eigen::Vector3f::Zero());
+        v.head(td) = ref.head(td) + scale(env).head(td).cwiseProduct(g.head(td));
+        return v;
     }
 
     // Oracle (no-network) target: the commanded twist for the velocity (task) component,

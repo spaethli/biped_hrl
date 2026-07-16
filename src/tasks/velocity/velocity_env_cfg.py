@@ -165,7 +165,13 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
   commands: dict[str, CommandTermCfg] = {
     "twist": UniformVelocityCommandCfg(
       entity_name="robot",
-      resampling_time_range=(3.0, 8.0),
+      # (3.0, 20.0) since 2026-07-14 (was (3.0, 8.0)): upper bound = episode length, so
+      # full-episode held commands (the treadmill/deploy case) are in-distribution. Under
+      # 3-8 s holds the A1 HL's bad-transient loops were unreachable in training (the
+      # resampler always broke them) -> absorbing backwards/stuck modes under held
+      # commands at eval. Play mode pins the OLD (3.0, 8.0) (h1_2 env_cfgs play block)
+      # so historical aggregate benches stay comparable.
+      resampling_time_range=(3.0, 20.0),
       rel_standing_envs=0.05,
       heading_command=True,
       heading_control_stiffness=0.5,

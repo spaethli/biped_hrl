@@ -191,6 +191,11 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.lin_vel_x = (-0.5, 1.0)
     twist_cmd.ranges.lin_vel_y = (-0.5, 0.5)
     twist_cmd.ranges.ang_vel_z = (-0.5, 0.5)
+    # Keep the bench command process at the pre-2026-07-14 training value: training moved
+    # to (3.0, 20.0), but changing the eval distribution would break comparability of
+    # every historical aggregate bench. Sustained-command behavior is scored by the
+    # --eval-cmd-vx holds, which pin the command and never resample.
+    twist_cmd.resampling_time_range = (3.0, 8.0)
 
   return cfg
 

@@ -44,6 +44,29 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     float nominal_h = hrl["nominal_root_height"].as<float>();
     goal_space_ = std::make_unique<hrl::GoalSpace>(goal_components, nominal_h);
     target_ = Eigen::VectorXf::Zero(goal_space_->dim());
+
+    // Keeper structure (2026-07-14): velocity-goals-only HL, HL lin-vel input, HL-owned
+    // cadence. All default off -> pre-velgoal checkpoints run byte-identical.
+    hl_obs_vel_ = hrl["hl_obs_vel"] && hrl["hl_obs_vel"].as<bool>();
+    velgoal_ = hrl["hl_velocity_goals_only"] && hrl["hl_velocity_goals_only"].as<bool>();
+    const bool cadence = hrl["hl_cadence"] && hrl["hl_cadence"].as<bool>();
+    const std::string cad_src =
+        hrl["hl_cadence_source"] ? hrl["hl_cadence_source"].as<std::string>() : "hl";
+    cadence_dim_ = (cadence && cad_src == "hl" && !oracle_) ? 1 : 0;
+    if (cadence) {
+        auto r = hrl["cadence_period_range"];
+        period_lo_ = r[0].as<float>();
+        period_hi_ = r[1].as<float>();
+    }
+    pin_period_ = hrl["pin_period"] ? hrl["pin_period"].as<float>() : 0.0f;
+    if (hl_obs_vel_ || velgoal_) goal_space_->task_dim();  // enforce velocity-first prefix
+    // The LL entrains to its gait_phase obs clock. The C++ term integrates
+    // global_phase += dt/period from its YAML params node, which aliases env->cfg
+    // (yaml-cpp handles share storage) — so writing this key retunes the clock
+    // phase-continuously, exactly like training's hrl_period buffer. Pin now if asked;
+    // the HL rewrites it per window unless pinned (see policy_step).
+    if (pin_period_ > 0.0f)
+        env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"] = pin_period_;
     // Optional goal-state noise (default off) to emulate real-robot estimator noise in sim.
     state_noise_std_ = goal_space_->noise_std(hrl["state_noise"]);
     if (state_noise_std_.cwiseAbs().sum() > 0.0f) {
@@ -58,8 +81,11 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     // neither). Provided by the MuJoCo sim bridge's SportModeState publisher
     // (rt/sportmodestate). SIM-ONLY privileged signal; a real robot needs a state estimator.
     highstate_ = std::make_shared<unitree::robot::go2::subscription::SportModeState>();
-    spdlog::info("[HRL] hl_algorithm={} c={} hl_target_mode={} goal_dim={} (HighState=rt/sportmodestate)",
-                 oracle_ ? "oracle" : "learned", c_, hl_target_mode_, goal_space_->dim());
+    spdlog::info("[HRL] hl_algorithm={} c={} hl_target_mode={} goal_dim={} velgoal={} "
+                 "hl_obs_vel={} cadence_dim={} period_range=[{},{}] pin_period={} "
+                 "(HighState=rt/sportmodestate)",
+                 oracle_ ? "oracle" : "learned", c_, hl_target_mode_, goal_space_->dim(),
+                 velgoal_, hl_obs_vel_, cadence_dim_, period_lo_, period_hi_, pin_period_);
 
     this->registered_checks.emplace_back(
         std::make_pair(
@@ -67,6 +93,20 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
             FSMStringMap.right.at("Passive")
         )
     );
+}
+
+// One-time probe of an ONNX file's flattened input dim. OrtRunner::act builds its input
+// tensor from the MODEL's size, so feeding a short obs vector reads out of bounds
+// silently — this hard check at load is the only place a wiring mismatch fails loudly.
+static int64_t onnx_input_dim(const std::filesystem::path& path)
+{
+    Ort::Env ort_env(ORT_LOGGING_LEVEL_ERROR, "hrl_dim_probe");
+    Ort::SessionOptions so;
+    Ort::Session session(ort_env, path.c_str(), so);
+    auto shape = session.GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+    int64_t n = 1;
+    for (auto d : shape) n *= d;  // [1, obs_dim]
+    return n;
 }
 
 void State_RLHRL::ensure_models_loaded()
@@ -83,6 +123,18 @@ void State_RLHRL::ensure_models_loaded()
     }
     ll_runner_ = std::make_unique<isaaclab::OrtRunner>(ll_path.string());
 
+    // Input-dim guards (see onnx_input_dim). Obs sizes from a live compute.
+    const auto obs = env->observation_manager->compute();
+    const int policy_dim = (int)obs.at("policy").size();
+    const int command_dim = (int)obs.at("command").size();
+    const int64_t ll_in = onnx_input_dim(ll_path);
+    if (ll_in != policy_dim + goal_space_->dim()) {
+        throw std::runtime_error(
+            "[HRL] low_level.onnx input dim " + std::to_string(ll_in) + " != policy(" +
+            std::to_string(policy_dim) + ") + goal_dim(" +
+            std::to_string(goal_space_->dim()) + ") — obs/goal_components mismatch.");
+    }
+
     if (oracle_) {
         spdlog::info("[HRL] Oracle HL (analytic V*); loaded low_level.onnx from {}",
                      exported_dir_.string());
@@ -96,12 +148,25 @@ void State_RLHRL::ensure_models_loaded()
     }
     hl_runner_ = std::make_unique<isaaclab::OrtRunner>(hl_path.string());
 
-    // Sanity: the exported HL output dim must equal the configured goal dim.
-    if ((int)hl_runner_->get_action().size() != goal_space_->dim()) {
+    const int64_t hl_in = onnx_input_dim(hl_path);
+    const int hl_in_expect = policy_dim + command_dim + (hl_obs_vel_ ? 2 : 0);
+    if (hl_in != hl_in_expect) {
+        throw std::runtime_error(
+            "[HRL] high_level.onnx input dim " + std::to_string(hl_in) + " != policy+" +
+            "command" + (hl_obs_vel_ ? "+hl_vel(2)" : "") + " = " +
+            std::to_string(hl_in_expect) + " — check hrl.hl_obs_vel in deploy yaml.");
+    }
+
+    // The exported HL emits the learned goal cols (all, or velocity-only) + the
+    // period dim when it owns the cadence.
+    const int hl_out_expect =
+        (velgoal_ ? goal_space_->task_dim() : goal_space_->dim()) + cadence_dim_;
+    if ((int)hl_runner_->get_action().size() != hl_out_expect) {
         throw std::runtime_error(
             "[HRL] high_level.onnx output dim " +
-            std::to_string(hl_runner_->get_action().size()) + " != goal_dim " +
-            std::to_string(goal_space_->dim()) + " (goal_components/deploy.yaml mismatch).");
+            std::to_string(hl_runner_->get_action().size()) + " != expected " +
+            std::to_string(hl_out_expect) +
+            " (check hrl.hl_velocity_goals_only / hl_cadence / goal_components).");
     }
     spdlog::info("[HRL] Loaded high_level.onnx + low_level.onnx from {}", exported_dir_.string());
 }
@@ -136,10 +201,21 @@ void State_RLHRL::policy_step()
         } else {
             std::vector<float> hl_in = policy;
             hl_in.insert(hl_in.end(), command.begin(), command.end());
+            // Same (noised) estimate the LL's goal uses — training feeds the HL the
+            // identical reading (td3._state_vec order: policy, command, hl_vel).
+            if (hl_obs_vel_) { hl_in.push_back(s[0]); hl_in.push_back(s[1]); }
             const auto g_vec = hl_runner_->act({{"obs", hl_in}});
-            const Eigen::VectorXf g =
-                Eigen::Map<const Eigen::VectorXf>(g_vec.data(), (int)g_vec.size());
-            target_ = goal_space_->to_target(env.get(), s, g, hl_target_mode_);
+            const int gd = velgoal_ ? goal_space_->task_dim() : goal_space_->dim();
+            const Eigen::VectorXf g = Eigen::Map<const Eigen::VectorXf>(g_vec.data(), gd);
+            target_ = goal_space_->to_target(env.get(), s, g, hl_target_mode_, velgoal_);
+            // HL-owned stride period: extra tanh dim -> affine map to the range, written
+            // to the gait_phase clock for this window (phase-continuous; the term
+            // integrates incrementally). Pinned clock was set once in the ctor.
+            if (cadence_dim_ && pin_period_ <= 0.0f) {
+                const float period =
+                    period_lo_ + (g_vec[gd] + 1.0f) * 0.5f * (period_hi_ - period_lo_);
+                env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"] = period;
+            }
         }
     }
     ++step_;
@@ -150,6 +226,21 @@ void State_RLHRL::policy_step()
     ll_in.insert(ll_in.end(), delta.data(), delta.data() + delta.size());
     const auto action = ll_runner_->act({{"obs", ll_in}});
     env->action_manager->process_action(action);
+
+    if (telemetry_.enabled()) {
+        float ar = 0.0f;  // mean |Δaction| vs the previous policy step
+        if (last_action_.size() == action.size()) {
+            for (size_t i = 0; i < action.size(); ++i)
+                ar += std::abs(action[i] - last_action_[i]);
+            ar /= action.size();
+        }
+        last_action_ = action;
+        // The live phase clock in every mode (yaml default / ctor pin / HL-written).
+        const float period =
+            env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"].as<float>();
+        telemetry_.record(step_ * (float)env->step_dt, command.data(), s, target_, period,
+                          env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar);
+    }
 }
 
 void State_RLHRL::run()
@@ -170,18 +261,12 @@ void State_RLHRL::run()
     if (tilt_safety)
         spdlog::warn("[Safety] Tilt: pitch={:.2f} roll={:.2f} rad", pitch, roll);
 
-    // Joint limit check — any policy-controlled joint out of range triggers whole-robot hold
-    bool joint_hold = false;
-    for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
-        int jid = (int)env->robot->data.joint_ids_map[i];
-        float q_meas = env->robot->data.joint_pos[i];
-        if (q_meas < h1_2_joint_limits[jid].min || q_meas > h1_2_joint_limits[jid].max) {
-            joint_hold = true;
-            spdlog::warn("[Safety] Hold: joint {} q={:.3f} out of [{:.3f}, {:.3f}]",
-                jid, q_meas, h1_2_joint_limits[jid].min, h1_2_joint_limits[jid].max);
-            break;
-        }
-    }
+    // Joint limits: per-joint COMMAND CLAMP, not a whole-body hold (changed 2026-07-16).
+    // The A1a gait rides its ankle/hip/knee stops by 0.01-0.2 rad every stride; the old
+    // any-joint->freeze response held all 27 joints mid-step and CAUSED the fall it
+    // guarded against (bridge session 2026-07-16: alpha=1.0 at tilt 0.196, fall after).
+    // Real firmware clamps the offending command; tilt/fall below keep the ramped hold.
+    bool joint_hold = false;  // joint violations no longer feed the hold ramp
 
     // Vertical acceleration fall detection — catches pelvis sinking while body stays upright.
     Eigen::Vector3f lin_acc_b;
@@ -206,15 +291,21 @@ void State_RLHRL::run()
     else             hold_counter_ = std::max(hold_counter_ - 1, 0);
     float alpha = static_cast<float>(hold_counter_) / H1_2_RAMP_CYCLES;
 
+    bool any_clamp = false;
     for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
         int jid = (int)env->robot->data.joint_ids_map[i];
         float q_meas = env->robot->data.joint_pos[i];
         // alpha=0: pure policy output  |  alpha=1: hold at current measured position
         float q_cmd = (1.0f - alpha) * action[i] + alpha * q_meas;
+        // per-joint safety clamp (commands past the mechanical stop are pointless and
+        // trip the real firmware; measured grazes are the plant's business, not ours)
+        const float lo = h1_2_joint_limits[jid].min, hi = h1_2_joint_limits[jid].max;
+        if (q_cmd < lo || q_cmd > hi) { q_cmd = std::clamp(q_cmd, lo, hi); any_clamp = true; }
         if (std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end())
             q_cmd = env->robot->data.default_joint_pos[i];
         lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
     }
+    joint_hold = any_clamp;  // recorded as trig_joint in the flight log (no hold effect)
 
     if (safety_logger_.enabled()) {
         float quat[4] = { q.w(), q.x(), q.y(), q.z() };

@@ -81,8 +81,9 @@ Decisions locked in the 2026-07-07 grill session (user), superseding the S4/S5 r
 | **R2** | `source=random` co-train on v2 (band-open fix; doubles as the staged-lineage frozen-LL producer) | LL envelope covers ≥ (0.35, 0.8) on the fixed-vx GRID — band does NOT self-narrow to the HL's visited periods | ✅ 2026-07-09 **PASSES**: full-band entrainment (stride 0.346/0.490/0.614/0.738/0.827 at cmd 0.35→1.0, vx=0.5; match 0.72–0.86; 0 falls) — the random source fixes the self-narrowing. **Valid frozen-LL producer for F** (delta-trained → F uses delta) |
 | **R3** | co-train `hl_cot_coef` 0.2 and 0.5, seed 42 | tracks (err_vx ≈ R1) AND CoT clearly < R1 toward fixed-0.6 → gate G promotes co-training | 🟡 2026-07-09 **half-pass at 0.2**: CoT 1.139 = clearly < R1 (−20/−36%) AND beats its own fixed-0.6 (**−7.6%**, the first co-trained ΔCoT win; v1's penalty domination is gone at this coef) — but tracking err_vx 0.146 vs R1's 0.107/0.113 (+0.035): NOT ≈ R1. 0.5: err_vx 0.203, abs CoT no better than R1 → 0.5 is past the boundary |
 | **R4** | clean-kernel ablation (oracle HL, posture/ar off) | exp kernel alone suffices to walk from scratch | ✅ 2026-07-09: kernel alone gives the round's **best tracking** (err_vx 0.071, ll_err_vx 0.033) but a **wild, undeployable gait** (act_rate 33, power 2282 W, stride 0.13, match 0.52) → the kernel is load-bearing for from-scratch convergence; posture+ar are load-bearing for gait quality. Both halves confirmed |
-| **G** | Gate on R3 (criterion above) | co-train promoted as S4′ subject, else staged/frozen default | ✅ 2026-07-09 **strict criterion NOT met** (R3-0.2 tracking regression) → **staged/frozen default proceeds (F)**. Co-train@0.2 stays a live secondary: first-ever co-trained CoT win, one seed — revisit only if F disappoints |
-| **F** (=S5) | Freeze the best entrained v2-lineage LL (**R2's `model_10000`**, envelope validated) → re-measure its CoT(period,vx) map → S3-style HL retrain at `hl_cot_coef` ∈ {1, 2, 4}, **`hl_target_mode=delta`** (R2's LL is delta-trained) | HL leaves the flat stride and approaches the map's speed-dependent optimum at held tracking; cap the coef below any tracking erosion | ⬜ **next action** |
+| **G** | Gate on R3 (criterion above) | co-train promoted as S4′ subject, else staged/frozen default | ✅ 2026-07-09 strict criterion NOT met (R3-0.2 tracking regression) → staged/frozen default. **OVERRIDDEN by user 2026-07-13: co-training IS the A1a line** (the hierarchy is the architecture's point); tracking re-prioritized in A2 |
+| **F** (=S5) | Freeze the best entrained v2-lineage LL (**R2's `model_10000`**, envelope validated) → re-measure its CoT(period,vx) map → S3-style HL retrain at `hl_cot_coef` ∈ {1, 2, 4}, **`hl_target_mode=delta`** (R2's LL is delta-trained) | HL leaves the flat stride and approaches the map's speed-dependent optimum at held tracking; cap the coef below any tracking erosion | ⏸️ **parked 2026-07-13** (user: co-train is the line; revisit only if the co-train deploy stalls) |
+| **D** | **Real-robot deployment prep** on the co-train keeper (cot0.2 velgoal DIR): (1) calm the arm swing — `ub_arm_vel` 2.7–3.5× A0, lever = per-joint LL posture weights (`ll_posture_weights`, shoulders 16 / elbow+wrist 4); (2) gait shaping (deferred until a replay names a defect; menu: `ll_cadence_coef` → mirror an A0 term into the intrinsic → duty/swing last); then ONNX → C++ bridge → H1-2 (battery: dual-scene, parity, held-command walk ≥30 s, command steps, safety-envelope + safety-filter audit) | deployable walk: arms calm, gait clean; held-command direction must hold; tracking magnitude secondary until A2 | 🟡 2026-07-14/15: **arms ✅** (D1+D2, table f: pose_dev 10× down, arm_vel 0.35–0.41, replay-confirmed); **held commands ❌ — root-caused to a velocity-hold HL degeneracy** (table f reads; duration/heading/zero-point/dither all falsified). Next: verify the HIRO-relabeling suspect in `td3.py` before more training arms |
 | **S4′** | Scored comparison, ≥2 seeds, `num_envs=4096` fixed: A1a (gate winner) vs **A0-v2** vs **A0+energy** vs **A1-v2** (cot0 config minus cadence/CoT). A0+energy = new per-step command-gated CoT-analog term `-w·P/(m g·max(‖v_cmd‖, ε))` in `mdp/rewards.py` (fair pressure: same normalization the HL feels); 3-coef mini-grid at 1 seed, best coef gets seed 2. Protocol: deterministic bench + fixed-vx GRID + goal probe | primary: ΔCoT < 0 vs own fixed-0.6 at equal tracking, while A0+energy fails to match the saving or regresses tracking (**honest disconfirmer logged if it matches**); stretch: CoT ≤ A0-v2 | ⬜ after G/F |
 
 Parked/out of scope: d(T) stays parked (3 failed attempts, see S2d); S6 exploratory after S4′.
@@ -186,6 +187,81 @@ Torso 200→300 (true deploy hold gain) costs **nothing** in sim — all within 
 2026-07-10 (ADR-0005 finalized): full-v2 optB (`a0_v2_optB_baseline` `model_10000`) is THE
 default A0-v2 baseline** that all A1a/A2 work rebases on; torso-v1 200/2.5 retired. Constants
 + all 4 deploy YAMLs + A0/A1 `desired_kl=0.01` are in lockstep in the working tree.
+
+**cot0.1 + fixed-0.8 clock control + fixed-command failure (2026-07-11/13, all `model_10000`,
+64×600×2; local `h1_2_velocity_a1_v2/2026-07-11_*`).**
+
+*(d) velgoal+kl01 aggregate bench (extends table b; fix0p8 = `source=random` pinned
+`(0.8, 0.8)` via temporary rl_cfg edit — the tyro tuple CLI override is broken — `cot=0`,
+so it is the same architecture minus learned cadence + CoT; cot0.1 W&B `tj8ft6me`):*
+
+| run (velgoal) | vx | vy | yaw | act | power | cot | stride | match | height |
+|---|---|---|---|---|---|---|---|---|---|
+| cot0.1 DIR | 0.064 | 0.061 | 0.146 | 1.16 | 318 | 0.945 | 0.418 | 0.94 | 0.007 |
+| cot0.2 DIR (table b) | 0.080 | 0.076 | 0.221 | 1.18 | — | 0.812 | 0.625 | 0.93 | 0.006 |
+| fix0p8 control | 0.094 | 0.105 | 0.143 | 1.17 | **208** | **0.662** | 0.783 | 0.94 | 0.005 |
+
+cot0.1 own-vs-pinned-0.6: CoT 0.945 vs 0.844 (**own +11.9% worse**, the R1-cot0 pattern):
+coef 0.1 is too weak to hold the long stride (0.418 vs cot0.2's 0.625); tracking returns to
+the kl01 level. **Coef axis mapped: 0.1 tracks-but-wastes, 0.2 = the trade sweet spot, 0.5
+past the boundary.** Probe (cot0.1): hl_vx 0.142 / ll_vx 0.224, no saturation. Pinned-0.8 on
+cot0.2 DIR: CoT 0.769 @ achieved stride 0.657 (band-limited follow, −5.3% vs own) — the
+gradient pointing past 0.625 is what motivated the control.
+
+*(e) fixed-command evals (`--eval-cmd-vx`, the treadmill/deploy case) — the aggregate bench
+HIDES a sustained-command failure (err_vx):*
+
+| run @ fixed cmd | vx@0.5 | vy@0.5 | vx@1.0 | vy@1.0 | aggregate vx |
+|---|---|---|---|---|---|
+| fix0p8 | **0.674** | 0.270 | **1.106** | 0.243 | 0.094 |
+| cot0.2 DIR | **0.360** | 0.082 | **0.878** | 0.138 | 0.080 |
+| A0 optB | — | — | 0.127 | 0.079 | 0.090 |
+
+Reads: (i) **fix0p8 wins aggregate CoT decisively (0.662, −18% vs cot0.2) at near-commanded
+stride 0.783, but does not walk under a sustained command** (achieved vx ≈ −0.17 at cmd 0.5;
+replay = sideways crab walk at gait_match 0.96, user-observed 2026-07-13) — NOT a valid
+best-constant-clock control until root-caused. (ii) cot0.2 DIR degrades too (0.360/0.878):
+the learned HL supplies forward drive the fixed clock lacks, but the whole velgoal line
+under-tracks sustained commands while A0 is fine (0.127 @1.0) — asterisks the old "A1
+fixed-vx ~0.25–0.3 is a benchmark artifact" read (it is real behavior). (iii) Upper-body
+energy signature (user hypothesis, motion-proxy support): A1a `ub_arm_vel` 0.50–0.64 vs A0
+0.18 (2.7–3.5×), `ub_pose_dev` ~70×; fix0p8's 208 W is still the set's lowest power.
+**Decision (user, 2026-07-13): co-training stays the A1a line** (the hierarchy is the
+architecture's point) — **next = real-robot deployment prep** (stage D): calm the arm swing
++ shape the gait on the cot0.2 velgoal keeper; tracking is secondary until A2 (RMA
+re-prioritizes it). Fixed-command eval joins the bench protocol; the sustained-command
+under-tracking is a known deploy risk (held commands ARE the deploy regime).
+
+**Stage D: arm-calm runs + held-command root cause (2026-07-14/15, all `model_10000`,
+64×600×2; D1 = `2026-07-14_11-39-53_..._pose0p5shw16-4...s42` W&B `qcxbn7yt`, D2 =
+`2026-07-14_16-03-57_..._shw16-4_..._rs20_s42`, A0 ref = `h1_2_velocity_v2/2026-07-15_08-29-26_a0_v2_optB_rs20_baseline`).**
+
+*(f) arm weights (shoulders ×16, elbow+wrist ×4 in the LL posture anchor) ± the
+`resampling_time_range` (3,20) training change (rs20; bench stays pinned (3,8)).
+Holds report steady-state err (last 2/3) since 2026-07-14:*
+
+| run | agg vx | agg CoT | stride | pose_dev | arm_vel | fall | ss@0.5 | ss@1.0 |
+|---|---|---|---|---|---|---|---|---|
+| keeper (table b/e ref) | 0.080 | 0.812 | 0.625 | 0.033 | 0.50–0.64 | 0 | 0.354 | 0.869 |
+| D1 (weights) | 0.066 | 1.037 | 0.404 | **0.0031** | 0.352 | 0 | 0.376 | 1.033 |
+| D2 (weights+rs20) | **0.063** | 0.897 | 0.351 | 0.0033 | 0.412 | 0 | 0.470 | 0.851 |
+| A0-optB-rs20 | 0.085 | 0.537 | 0.592 | 0.0004 | 0.143 | 0 | **0.055** (t90 0.6 s) | **0.077** (t90 0.9 s) |
+
+Reads: (i) **arm lever validated** — pose_dev 10× down, arm_vel −30–40%, aggregate tracking
+*improves*, replay-confirmed calmer (user); cost = stride/CoT regress toward the short-stride
+regime (arm-momentum vs run-chaos unresolved, 1 seed). (ii) **rs20 costs A0 nothing and
+does NOT fix A1 holds** → hold-duration hypothesis dead. (iii) **Held-command root cause
+(probe, 64 envs, phase-fixed): the TD3 HL degenerates to a velocity-hold policy** —
+`goal_vx[k] ≈ achieved_vx[k−1]` (no pull toward the command), period pinned at the band
+floor (~0.37 s), LL executes near-perfectly (`ll_err_vx` 0.025) → the composed system is a
+driftless random walk; gait-initiation noise picks the sign and the mode absorbs (25–27/64
+envs backwards; 24 s entrenches, does not heal). Same HL under resampled commands pulls
+fine (`hl_err_vx` 0.06). A0-rs20's near-perfect holds isolate the defect to the hierarchy.
+Falsified en route: heading-off (0.332 vs 0.354), exact-zero vy/wz (0.05 identical),
+clean-eval dither (27→17/64, minor). **Prime suspect (unverified): HIRO relabeling fills
+the HL replay with achieved-consistent deltas → critic favors "hold" actions; verify in
+`td3.py` next.** Probe caveat: all pre-2026-07-15 `[GOALDIAG]` numbers on cadence-HL
+checkpoints ran with a frozen phase clock + 1 env (see A1_findings row).
 
 ## Results
 

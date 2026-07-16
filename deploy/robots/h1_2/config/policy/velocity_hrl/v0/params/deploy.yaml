@@ -14,8 +14,11 @@ damping:   [2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 3.0,
 default_joint_pos: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0]
 
 # HIRO hierarchy parameters (read by State_RLHRL). MUST match the trained checkpoint.
+# Values below = the A1a keeper line (velgoal + HL-owned cadence, 2026-07-14). The new
+# keys (hl_obs_vel .. pin_period) default OFF when absent, so pre-velgoal checkpoints
+# keep their old yaml unchanged.
 hrl:
-  hl_algorithm: oracle                         # oracle (analytic V*=command+nominal, no high_level.onnx)
+  hl_algorithm: learned                         # oracle (analytic V*=command+nominal, no high_level.onnx)
                                                 # | learned (default; needs high_level.onnx)
   c: 8                                          # HL period (control steps); HL holds V* between fires
   hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
@@ -23,6 +26,12 @@ hrl:
   goal_components: [velocity, orientation, height]  # the 7-dim goal space; goal_dim derived from this
   nominal_root_height: 1.3076                   # imu-site standing z (pelvis 1.03 + torso->imu 0.278);
                                                 # imu-vs-root offset cancels in the height delta at this value
+  hl_obs_vel: true                              # HL input = policy ++ command ++ (vx,vy estimate)
+  hl_velocity_goals_only: true                  # HL emits velocity goal cols only; orient/height -> nominal
+  hl_cadence: true                              # checkpoint trained with the cadence channel
+  hl_cadence_source: hl                         # hl = HL owns the period (+1 action dim) | random (fixed clock)
+  cadence_period_range: [0.35, 1.0]             # tanh -> period affine map; MUST match agent.yaml
+  pin_period: 0.0                               # >0 freezes the LL phase clock (bring-up); 0 = HL-owned
   # Synthetic Gaussian noise added to the goal-space state s each step (per-component std,
   # 0 = off). Sim s is ground truth; this emulates the real-robot state-estimator noise on
   # the LL's goal feedback, to test whether A1 would transfer. Suggested real-ish values:

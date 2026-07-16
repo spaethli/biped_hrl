@@ -17,19 +17,38 @@ Config: `deploy/robots/h1_2/config/config.yaml` (`keyboard_transitions`).
 Observation assembly: `deploy/robots/h1_2/src/State_RLBase.cpp`
 (`keyboard_velocity_commands`).
 
-## Bridge-plant mismatch (known, accepted 2026-07-08)
+## Bridge plant (RESOLVED 2026-07-15 — faithful + stress variant)
 
-The `simulate/` MuJoCo bridge loads the **raw** `scene_h1_2.xml`, whose joint defaults
-(`damping="1" armature="0.1" frictionloss="0.2"`) are much harsher than the training
-nominal (per-motor armature 0.025/0.04/0.005/0.002, frictionloss 0, no passive damping —
-mjlab injects these via `h1_2_constants.py`, which the bridge never reads). Consequence:
-policies look dirtier in the bridge than in play.py and can fall at the max
-vx=1.0-step-from-stand command even when mjlab shows fall_rate 0.0 for the identical
-condition (measured 2026-07-08, `a0_v2_baseline`). Pre-existing (v1 identical), NOT a
-policy or export bug — the ONNX/obs/gain path itself validated clean. Accepted as-is for
-now; **revisit before real deploy**: either align the scene XML joint defaults with the
-training nominal (faithful bridge) or with the vendor reference (0.01/0.1/0.001, mild
-sim2real proxy) — decide which job the bridge is doing.
+**The live bridge is `/opt/unitree_mujoco`** (`simulate/build/unitree_mujoco`, config
+`/opt/unitree_mujoco/simulate/config.yaml`, scene `unitree_robots/h1_2/scene.xml` →
+`h1_2_handless.xml`) — NOT the in-repo `simulate/` copy (never built/used; its
+`scene_h1_2.xml` is body-identical but is not what the bridge loads). The bridge config
+also provides `enable_elastic_band: 1`, a virtual lifting harness (sim gantry).
+
+**Plant = vendor reference** (`armature 0.01 / frictionloss 0.1 / damping 0.001`, clean
+free base) since 2026-07-15. NOT the mjlab training nominal, and that is deliberate:
+
+- The old defaults (`damping=1 armature=0.1 frictionloss=0.2`, applied to the FREE base
+  joint too — a hidden 6-DOF base damper) were much harsher than training; policies
+  looked dirtier in the bridge and fell at vx=1.0-from-stand where mjlab shows fall_rate
+  0.0 (2026-07-08).
+- A first fix set the plant to the exact training nominal (per-motor armature,
+  frictionloss 0). **It failed immediately** (2026-07-15): FixStand leaned forward with
+  heels unloading and A0 became violently twitchy/unstable. Root cause (headless
+  bridge-replica + delay sweep): the bridge computes **explicit torque PD at 500 Hz with
+  ~2-4 ms real feedback latency** (DDS + threads); on a dissipation-free plant, 2 ms of
+  delay turns the PD into an energy-injecting oscillator (qvel_rms x30, falls), while the
+  old harsh plant absorbs 6 ms without a trace. mjlab has neither latency nor explicit PD
+  (implicit position servos), so "faithful plant" ≠ faithful dynamics in this bridge.
+- The vendor reference absorbs the full 0-6 ms latency range with graceful degradation,
+  passes FixStand→takeover→stand→0→1.0-step→stop→walk at 0/2/4 ms in the replica, and is
+  also the honest hardware proxy (real joints have friction; firmware PD runs multi-kHz).
+
+The original harsh values live on as `h1_2_handless_stress.xml` + `scene_stress.xml` =
+the robustness stress gate (G2.7). Switch via `robot_scene:` in the /opt config. NOTE:
+these edits live OUTSIDE the thesis repo (the /opt clone has its own git); re-verify
+after any unitree_mujoco update. Bring-up note: pure-PD FixStand is NOT self-stable on
+any plant — the elastic band does the stabilizing until the policy takes over.
 
 ## Deploy configs
 
@@ -80,6 +99,11 @@ takes `base_lin_vel`** (actor obs omit it, like A0) — it's used only to build 
 WORLD-frame, rotated to body via the IMU quat; `position().z` is height): in sim that's the
 MuJoCo bridge's **ground-truth** `rt/sportmodestate` (privileged); on the real robot it must come
 from the onboard sport-mode estimator (noisy/drifting) or a custom one. A0 has no such dependency.
+**The velocity MUST be the BASE (pelvis) velocity** (2026-07-15): the bridge's `frame_vel` sensor
+originally sat on the torso-mounted imu SITE, whose ω×r sway component feeds back through the LL
+goal delta and destabilizes A1 (keeper slammed ankle limits in 0.2 s; fine with pelvis velocity).
+Both bridge scenes now publish pelvis `frame_vel`; a real estimator must equally output base-frame
+velocity, not imu-frame (E1 gate criterion).
 **Test knob:** `deploy.yaml` `hrl.state_noise: {velocity, orientation, height}` injects per-step
 Gaussian noise into `s` in sim, to emulate that estimator noise (default 0). Finding (2026-06-18,
 learned `absolute` TD3): under realistic velocity/height noise the clean-trained LL still stands
@@ -90,6 +114,27 @@ HL input isn't noised, so this is the LL reacting to noisy goal feedback) → se
 `.claude/docs/hrl-infra.md`), so the policy learns robustness rather than only being tested for it.
 To remove the dependency entirely instead: switch the LL to observe the **absolute `V*`** instead
 of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity estimate needed.
+
+## Stage-D bridge validation battery (designed 2026-07-14, grilled; run before any H1-2 session)
+
+Both scenes (faithful + stress variant, see Bridge plant above), per candidate checkpoint:
+1. **ONNX↔torch parity** + 27/27 gain/scale lockstep vs both YAMLs (V2-gate procedure).
+2. **Held-command walk** (the user-required deploy gate): stand → hold vx 0.5 ≥30 s → stop;
+   repeat at 1.0. Direction held (no crab/backwards), ramp-then-track, arms calm in-bridge.
+   Known blocker: the A1a velocity-hold HL degeneracy (`doc/hrl/A1a_plan.md` table f) — this
+   gate fails until that is fixed; A0 passes (rs20 baseline ss 0.055/0.077, t90 <1 s in mjlab).
+3. **Command steps**: stand→walk→stand, yaw both directions, short vy hold (vx-1.0 step from
+   stand = the known hard case).
+4. **Safety-envelope audit**: bridge logs vs `h1_2_joint_limits` over the whole battery; arm
+   joint velocities get their own line (stage-D subject).
+5. **Safety-filter audit**: run with `SAFETY_FILTER=1` + flight recorder; extract trigger
+   counts by type, ticks with α>0, max α, tripping joint. Report margins even when clean
+   (worst tilt in the vx-1.0 ramp vs 0.44 rad; worst heel-strike `a_world_z` + consecutive-tick
+   count vs −7/60; per-joint min distance to limits — ankle pitch + hip roll tightest).
+   Pass = zero triggers with comfortable margins; triggers during visually-correct walking →
+   adjust that threshold (data-driven, user call); A/B `SAFETY_FILTER=0` only if triggers fire.
+Parked until after the held-command blocker: goal-channel state-noise DR arm (#8b machinery
+validated, keeper trains without it).
 
 ## Safety filter + flight recorder (deploy-side, 2026-06-03)
 

@@ -23,8 +23,14 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --eval-seeds 2` — prints a
   multi-metric scorecard (err_vx/vy/yaw, fall_rate, action_rate, orient/height dev) +
   `[BENCH] {json}`. The canonical comparator (use `fall_rate`, not `ep_len`, for survival).
+  Also run `--eval-cmd-vx` holds (0.5, 1.0 — the treadmill case; report the `ss_err`
+  steady-state + `t90` numbers, and check the `[HOLDDIAG]` per-env split — batch means
+  hide bimodal backwards modes): the random-command aggregate hides sustained-command
+  failures (2026-07-13/15, `A1a_plan.md` tables e/f).
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
-  --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2` — per-window HL goal error
+  --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2 --num-envs 64` (defaults to
+  1 env without the flag; pre-2026-07-15 probes on cadence ckpts ran frozen-phase — see
+  `hrl-infra.md`) — per-window HL goal error
   vs LL reach error + `|g|` saturation + fwd/bwd vx split + `[GOALDIAG] {json}`. Verdict
   chain: LL competent; the original `|g|→1` saturation was a **pre-tracking-reward**
   failure, **cured by `hl_reward_mode=tracking`** (the primary lever; `absolute` only

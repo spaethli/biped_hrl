@@ -109,7 +109,7 @@ requirement; see `doc/hrl/A1_findings.md` (from-scratch kernel row) for the chai
 ## Reward decomposition
 | Level | Reward |
 |---|---|
-| **LL** | intrinsic, kernel via `ll_goal_kernel`: `l2` (default) `r_lo,i = −Σ_c w_c‖V*−s_{i+1}‖`; `exp` = A0-parity positive-bounded kernels on `V*−s` (from-scratch training; `goal_weights` is l2-only — exp weights hardcoded in `GoalSpace.reward`). No task reward (pure HIRO); `ll_task_reward_coef` blend + `ll_alive_coef` constant knobs, default 0. |
+| **LL** | intrinsic, kernel via `ll_goal_kernel`: `l2` (default) `r_lo,i = −Σ_c w_c‖V*−s_{i+1}‖`; `exp` = A0-parity positive-bounded kernels on `V*−s` (from-scratch training; `goal_weights` is l2-only — exp weights hardcoded in `GoalSpace.reward`). No task reward (pure HIRO); `ll_task_reward_coef` blend + `ll_alive_coef` constant knobs, default 0. ADR-0002 deploy-hygiene penalties add on: posture anchor (arms+waist+hip yaw/roll, per-joint `err²` clamp 9.0) × `ll_posture_coef`, with optional **`ll_posture_weights`** per-joint multipliers (pattern→weight dict, resolved at init, unmatched=1.0, weighted *mean not renormalized* so all-ones ≡ uniform; stage-D arm-calm lever 2026-07-14: shoulders 16 / elbow+wrist 4 gives ~pose_dev 10× down; set via temp rl_cfg edit — tyro dict CLI untrusted) + whole-body action-rate × `ll_action_rate_coef`. |
 | **HL** | `hl_reward_mode=task` (default): the **A0 task reward** summed over the window. `hl_reward_mode=tracking`: velocity command-tracking only (`mdp.track_linear_velocity + track_angular_velocity`, A0 exp terms reused, std read live via `reward_manager.get_term_cfg`), LL-execution penalties removed. The **env reward is unchanged** either way (no RQ2 confound) — only what the HL optimizes internally changes. |
 - **`fell_over=time_out` in the A1 env ONLY** (`config/h1_2_a1/env_cfgs.py`): the LL's
   always-negative goal-distance reward makes early termination an attractor (die fast → stop
@@ -138,9 +138,15 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   **Use `fall_rate`, NOT `ep_len`, for survival** (`episode_length_s=1e9`, no resets in play).
   A0 baseline 0.09/0.11/0.10. Strips exploration noise → judge HLs by this, not training err.
 - **Goal probe** (A1 HL-vs-LL error decomposition): `play.py --checkpoint-file <pt>
-  --diagnose-goals 600 --eval-seeds 2` → per-window `(command−achieved) = (command−V*) [HL
-  goal err] + (V*−achieved) [LL reach err]`, raw `|g|` + saturation frac, fwd/bwd vx split,
-  realized/requested ratio + `[GOALDIAG] {json}`. Decomposition closes exactly.
+  --diagnose-goals 600 --eval-seeds 2 --num-envs 64` → per-window `(command−achieved) =
+  (command−V*) [HL goal err] + (V*−achieved) [LL reach err]`, raw `|g|` + saturation frac,
+  fwd/bwd vx split, realized/requested ratio + `[GOALDIAG] {json}`. Decomposition closes
+  exactly. **Pass `--num-envs` — the probe defaults to 1 env.** With `--eval-cmd-vx` it also
+  prints `[HOLDDIAG]`: per-env bwd/fwd group split with signed goals, `|g|`, HL period, and
+  per-window goal-vs-achieved traces (the probe that exposed the 2026-07-15 velocity-hold HL
+  degeneracy). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
+  frozen `hrl_phase` clock** (the loop didn't advance it; de-entrained LL ⇒ flattering) —
+  fixed to mirror `get_inference_policy`.
 - **Play structure-restore:** play.py restores structure keys (`c, goal_components,
   goal_weights, hl_algorithm, hl_ppo, hl_td3, relabeling, gamma_hi, hl_target_mode, hl_obs_vel,
   hl_cadence, cadence_period_range, ll_cadence_coef, hl_cot_coef, hl_cadence_source,
@@ -151,11 +157,19 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   → weeks of false "no-entrainment" verdicts, only caught by `gait_match` being identical to 3
   decimals across all commands). Re-derives goal obs dim. Pre-2026-06-11 A1 replays (no restore)
   ran oracle/goal-0 → void; W&B training metrics were always ground truth.
+  **Absence-shim rule:** when a structure field's *default* later flips (e.g.
+  `hl_velocity_goals_only` → True 2026-07-09, `hl_obs_vel` → True 2026-07-10), absence from an
+  old yaml must restore the OLD default explicitly — "absent keeps defaults" silently rebuilds
+  wrong-shaped nets (2026-07-15: missing `hl_obs_vel` shim broke every pre-velobs TD3 replay,
+  92 vs 94 dims).
 - **A1a fixed-command / stride-period eval** (`play.py`, eval-only): `--eval-cmd-vx/vy/wz` pin the
   twist command (standing/heading off) so a stride sweep isolates the commanded period from the
   natural v→period map; `--eval-cmd-heading <rad>` holds a world heading (P-controller corrects
   wz) for straight replays; `--eval-cadence-period <s>` pins the HL stride period (needs
-  `hl_cadence`). New `[BENCH]` metrics: `mech_power_w`, `cot` (dimensionless E/(m·g·d), m=75 kg,
+  `hl_cadence`). Holds also report `ss_err_vx/vy` (last 2/3, separates the accel ramp from held
+  tracking) + `t90_s` (time to 90% of commanded vx; NaN = never) since 2026-07-14. **Batch means
+  hide bimodal hold failures — always check the `[HOLDDIAG]` per-env split** (a mean achieved
+  +0.15 coexisted with 27/64 envs walking backwards, 2026-07-15). New `[BENCH]` metrics: `mech_power_w`, `cot` (dimensionless E/(m·g·d), m=75 kg,
   command-gated), `stride_period_s` (footfall interval), `gait_match` (feet_gait agreement vs the
   commanded clock: ~1 locked, ~0.5 drifting). (H1 phase-slaving probe found A0 is slaved to its
   clock obs, match 0.973→0.51 when scrambled; the `--eval-phase-obs` diagnostic that showed this

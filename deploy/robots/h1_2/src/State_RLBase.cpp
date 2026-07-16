@@ -26,14 +26,27 @@ REGISTER_OBSERVATION(keyboard_velocity_commands)
     std::string key = FSMState::keyboard->key();
     static auto cfg = env->cfg["commands"]["base_velocity"]["ranges"];
 
-    // Here you can change the input velocity of the keyboard
+    // Here you can change the input velocity of the keyboard.
+    // s/a/d/q/e clamped to the training command ranges (vx lo -0.5, vy/wz ±0.5) —
+    // the old ±1.0 values were outside the trained distribution. Number keys = held
+    // forward-speed presets for the deploy-gate battery (held-command tests); 0 = stop.
     static std::unordered_map<std::string, std::vector<float>> key_commands = {
-        {"w", { 1.0f,  0.0f,  0.0f}}, 
-        {"s", {-1.0f,  0.0f,  0.0f}},
-        {"a", { 0.0f,  1.0f,  0.0f}},
-        {"d", { 0.0f, -1.0f,  0.0f}},
-        {"q", { 0.0f,  0.0f,  1.0f}},
-        {"e", { 0.0f,  0.0f, -1.0f}},
+        {"w", { 1.0f,  0.0f,  0.0f}},
+        {"s", {-0.5f,  0.0f,  0.0f}},
+        {"a", { 0.0f,  0.5f,  0.0f}},
+        {"d", { 0.0f, -0.5f,  0.0f}},
+        {"q", { 0.0f,  0.0f,  0.5f}},
+        {"e", { 0.0f,  0.0f, -0.5f}},
+        {"0", { 0.0f,  0.0f,  0.0f}},
+        {"1", { 0.1f,  0.0f,  0.0f}},
+        {"2", { 0.2f,  0.0f,  0.0f}},
+        {"3", { 0.3f,  0.0f,  0.0f}},
+        {"4", { 0.4f,  0.0f,  0.0f}},
+        {"5", { 0.5f,  0.0f,  0.0f}},
+        {"6", { 0.6f,  0.0f,  0.0f}},
+        {"7", { 0.7f,  0.0f,  0.0f}},
+        {"8", { 0.8f,  0.0f,  0.0f}},
+        {"9", { 0.9f,  0.0f,  0.0f}},
     };
     std::vector<float> cmd = {0.0f, 0.0f, 0.0f};
     auto it = key_commands.find(key);
