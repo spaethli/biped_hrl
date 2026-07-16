@@ -53,6 +53,9 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 - **`/sync-docs`** — route session results/decisions/conventions into their canonical
   docs (the `doc/` HRL plan + `.claude/docs/`, CLAUDE.md) + auto-memory, with a
   personal-identifier redaction gate (public repo).
+- **`/delegate`** — turn a task into a hand-off prompt for a fresh chat/subagent
+  (model recommendation included). Worklines registry + who-owns-what:
+  `doc/hrl/worklines.md`. Planning chats delegate implementation; don't grind it inline.
 
 ## Code conventions
 

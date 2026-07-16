@@ -12,7 +12,9 @@ Setup scripts (**source them, don't execute**):
   `CFG=deploy_real.yaml` → run `h1_2_real`
 
 FSM states + keyboard: `i`=FixStand, `o`=Velocity/walk, `p`=Passive.
-Velocity keys: `w/s`=fwd/bwd, `a/d`=strafe, `q/e`=turn.
+Velocity keys: `w/s`=fwd/bwd, `a/d`=strafe, `q/e`=turn (clamped to training ranges),
+`1`-`9`=held vx 0.1-0.9, `0`=stop (2026-07-16, for held-command gates; `w`=vx **1.0**,
+the range edge — use numbers first).
 Config: `deploy/robots/h1_2/config/config.yaml` (`keyboard_transitions`).
 Observation assembly: `deploy/robots/h1_2/src/State_RLBase.cpp`
 (`keyboard_velocity_commands`).
@@ -117,7 +119,14 @@ of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity esti
 
 ## Stage-D bridge validation battery (designed 2026-07-14, grilled; run before any H1-2 session)
 
-Both scenes (faithful + stress variant, see Bridge plant above), per candidate checkpoint:
+Tooling (2026-07-15/16): `scripts/onnx_parity.py` (step 1, `[PARITY]` json, CPU-vs-CPU);
+`scripts/bridge_replica.py` (headless bridge replica, A0+HRL, both scenes, `--delay-ms`,
+full chain — pre-session sanity + plant/latency A/B; NOT a substitute for the C++ gates);
+`scripts/deploy_gate_analyzer.py` (per-segment metrics from the `<base>_hrl.csv` telemetry
+that State_RLHRL writes when `H1_2_SAFETY_LOG` is set). Full gate plan:
+`doc/hrl/A1a_deploy_plan.md`.
+
+Both scenes (vendor + stress variant, see Bridge plant above), per candidate checkpoint:
 1. **ONNX↔torch parity** + 27/27 gain/scale lockstep vs both YAMLs (V2-gate procedure).
 2. **Held-command walk** (the user-required deploy gate): stand → hold vx 0.5 ≥30 s → stop;
    repeat at 1.0. Direction held (no crab/backwards), ramp-then-track, arms calm in-bridge.
@@ -144,11 +153,17 @@ off by default — flip to 1 to enable on A1). Robot-local only: `robots/h1_2/in
 safety_logger.h}`; the shared `deploy/include/FSM/State_RLBase.h` guards its logger include with
 `__has_include` so g1/go2/a2 still build. Thresholds centralized in `h1_2_limits.h` (`H1_2_*`).
 
-- **Triggers (OR → ramped hold):** joint pos limits (`h1_2_joint_limits`); IMU tilt
-  >`0.44` rad (~25°); downward-accel fall (`a_world_z < −7 m/s²` sustained 60 ticks).
-  Each engages a 50-tick (50 ms @ 1 kHz) ramp `α:0→1` blending the command
-  `q=(1−α)·policy + α·q_meas` (position hold; kp/kd unchanged). Complements — fires earlier/softer
-  than — the existing FSM `bad_orientation`→Passive check.
+- **Triggers:** IMU tilt >`0.44` rad (~25°) and downward-accel fall (`a_world_z < −7 m/s²`
+  sustained 60 ticks) engage a 50-tick ramp `α:0→1` blending `q=(1−α)·policy + α·q_meas`.
+  ⚠ that "hold" re-reads q_meas per tick → at α=1 it is DAMPING-ONLY (near-passive), not a
+  rigid freeze; G3.0 must decide latched-hold vs damp-mode as the terminal behavior
+  (`A1a_deploy_plan.md` post-mortem issue 3). **Joint limits: split by state (2026-07-16)** —
+  A0 (`State_RLBase`) keeps any-joint-out → hold; A1 (`State_RLHRL`) CLAMPS the offending
+  command to `h1_2_joint_limits` instead (the A1a gait rides its stops every stride; the hold
+  response completed the 2026-07-16 bridge fall at tilt 0.196). `trig_joint` in the A1 flight
+  log now means "clamp active". Audit note: `h1_2_limits.h` disagrees with the sim model at
+  the knee ([-0.26, 2.05] vs XML [-0.12, 2.19]) — re-audit vs URDF before hardware.
+  Complements — fires earlier/softer than — the existing FSM `bad_orientation`→Passive check.
 - **IMU accel convention (verified in sim):** physical IMU = *specific force* → standing reads
   +9.81, so `a_world_z=(R·a_imu).z−9.81` ≈0 standing/hanging, ≈−9.81 free-fall. Sim free-fall
   measured ~−10.7 (leg flailing accelerates pelvis past g) → triggers correctly; no false positive

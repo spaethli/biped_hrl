@@ -229,8 +229,18 @@ TD3-HL velocity-hold degeneracy, a training issue tracked in the A1a thread, fai
 reproduced by the bridge). On a vx=1.0 press it fell; flight recorder: filter at
 alpha=1.0 (whole-body position hold) at t=17.5 with tilt only 0.196, fall AFTER. The
 A1a gait rides its ankle/hip/knee stops by 0.01-0.2 rad every stride (trig_joint active
-40% of the session, from t=0.8 standing), so the any-joint-out -> freeze-all-27 response
-turns a normal stride into a fall. Also found: `h1_2_limits.h` disagrees with the sim
+40% of the session, from t=0.8 standing), so the any-joint-out -> hold-all-27 response
+turns a normal stride into a fall. Mechanism correction (2026-07-16, user question):
+the "hold" is NOT a rigid freeze. q_cmd = (1-a)*action + a*q_meas re-reads q_meas every
+tick, so at a=1 the target chases the measured position and the PD degenerates to
+damping-only torque = near-passive; a biped under gravity collapses. Plus a ratchet:
+the collapse drives tilt past 0.44, the tilt trigger then sustains a=1, so the filter
+cannot release mid-stumble. Honest causality: the stumble was the policy's (degenerate
+HL + vx=1.0 edge command); the filter completed it at a recoverable tilt (0.196).
+G3.0 design item: choose the terminal behavior deliberately - a TRUE hold needs the
+target latched at trigger time (rigid statue, tips whole); the current chasing hold =
+damping-only (Unitree damp-mode-like, collapses gently into the harness - arguably the
+right terminal behavior on the gantry, wrong as a response to a recoverable graze). Also found: `h1_2_limits.h` disagrees with the sim
 model (knee [-0.26, 2.05] vs scene XML [-0.12, 2.19]); audit against the official URDF
 before hardware. **Fix (State_RLHRL only, A0 untouched): joint violations now clamp the
 offending joint's COMMAND to its limit (firmware-like) instead of feeding the hold ramp;
