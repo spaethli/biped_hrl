@@ -102,6 +102,17 @@ analysis and the proposed change first.
 - `goal_components` (in `config/h1_2_a1/rl_cfg.py`) is the **single source of truth**
   for the goal space; the env derives its goal obs dim from it. `goal_dim` is always
   derived, never hardcoded.
+- **The A1 goal SCALE is baked into the checkpoint (2026-07-16, F2) — never re-derive it
+  at inference.** It defines what the HL's `g` means (`V* = ref + scale*g`), so it is a
+  policy property, not an env property. Training derives it live (it tracks the twist
+  curriculum); `save()` bakes `goal_scale`, `load()` pins it, `learn()` un-pins.
+  Pre-2026-07-16 checkpoints have no baked value → `play.py`'s absence shim pins the
+  trained scale and prints `[SHIM] ...`. **Why this is load-bearing:** the old live
+  derivation read the live twist ranges, and `--eval-cmd-vx` collapses those to a point →
+  scale hit its `1e-3` floor → `V* ≈ s` → the goal channel went inert and every A1 hold
+  eval reported a phantom "HL hold degeneracy" (A0 was immune: no goal space). Deploy C++
+  still derives from `deploy.yaml` ranges → **its `ang_vel_z` MUST equal the trained
+  `(-1.0, 1.0)`** until it reads the ONNX `goal_scale` metadata. See `A1_findings.md` WL-C.
 - **`hl_velocity_goals_only=True` is the A1a default (2026-07-09):** the TD3 HL emits
   only the velocity goal columns (+period); orientation/height targets are pinned to
   nominal (oracle path). Fixes the posture sag (tracking-rewarded HL had no reason to

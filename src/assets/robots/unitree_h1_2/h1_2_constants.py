@@ -33,12 +33,14 @@ def get_spec() -> mujoco.MjSpec:
 ##
 # Actuator config.
 # Model v2 (ADR-0005): upper-body gains = deploy hold gains (split deploy).
-# frictionloss is 0 in the training nominal: with 0.1 the policy settles into a deep
-# stand-still optimum (fric01 run 2026-07-07, tracking 0.11 vs v1 0.70 at iter 1500);
-# the reference pipelines also train friction-free (URDF has no <dynamics>) and carry
-# 0.1 only in their deploy-sim XMLs. Joint-friction fidelity belongs to the deploy-sim
-# eval and A2 Wide DR, not the training plant. Stiffness/damping MUST stay in lockstep
-# with the deploy YAML gain vectors (deploy/robots/h1_2/config/policy/*/params/*.yaml).
+# frictionloss is 0 in the training nominal BY CHOICE, not necessity (WL-E 2026-07-17,
+# ADR-0005 Amendment 2): the old "0.1 stalls training" evidence was a kl-0.005 +
+# torso/arm-hold confound; fric 0.1 at desired_kl 0.01 trains from scratch to baseline
+# quality (a0_v2_optB_fric0p1_kl01_s42: err_vx 0.083, 0 falls) and stays a sanctioned
+# option. Flipping it is a v2-style rebase (invalidates all checkpoints), Liam's call;
+# until then joint-friction fidelity lives in the deploy-sim eval and A2 Wide DR.
+# Stiffness/damping MUST stay in lockstep with the deploy YAML gain vectors
+# (deploy/robots/h1_2/config/policy/*/params/*.yaml).
 ##
 
 H1_2_ACTUATOR_M107_24_2 = BuiltinPositionActuatorCfg(

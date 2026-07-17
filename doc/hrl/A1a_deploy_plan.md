@@ -30,9 +30,16 @@
   session), G1.1 re-run only for new M2 candidates.
 - **G2.0 ✅ / G2.1 partial (2026-07-16 live):** keeper loads, runs, STANDS at cmd 0 in
   the real bridge after the pelvis-velocity fix (post-mortem issue 2). Stepping in
-  place unsettled = the known TD3-HL hold degeneracy (training thread). vx=1.0 press
+  place unsettled ~~= the known TD3-HL hold degeneracy (training thread)~~ **[cause
+  FALSIFIED 2026-07-16, WL-C: that "degeneracy" was a sim-EVAL artifact and never
+  existed in training, so it cannot explain a bridge symptom — the stepping is now
+  UNEXPLAINED, treat as open]**. vx=1.0 press
   fell via the safety filter's joint freeze (post-mortem issue 3, fixed; rebuilt).
   Re-run pending with the clamp-filter build; use number keys (5 = held 0.5) before w.
+  **G2.0 must be re-checked (2026-07-16):** the deployed ONNX pair was re-exported and
+  the goal scale is now pinned from its metadata — confirm `[HRL] goal scale pinned from
+  ONNX metadata [0.75, 0.5, 1, 1, 1, 1, 0.2]` at FSM entry (this C++ path has not yet run
+  live). See `.claude/docs/deployment.md`.
 - **Replica permanent (2026-07-16):** `scripts/bridge_replica.py` = the headless bridge
   replica (A0 + HRL, both scenes, delay knob, band, full chain, reads deployed YAML +
   exported ONNX). Pre-session sanity + plant/latency A/B instrument. Validated: A0 and
@@ -224,9 +231,16 @@ arms (kp 7.9); optB deliberately holds arms at deploy gains (ADR-0005 trade: dep
 fidelity over looks). M2 arm calming is the active fix for the look.
 
 **Issue 3 (2026-07-16 session): the safety filter's joint trigger CAUSED the A1 fall.**
-After the pelvis-velocity fix the keeper stood at cmd 0 (unsettled stepping = the known
+After the pelvis-velocity fix the keeper stood at cmd 0 (unsettled stepping ~~= the known
 TD3-HL velocity-hold degeneracy, a training issue tracked in the A1a thread, faithfully
-reproduced by the bridge). On a vx=1.0 press it fell; flight recorder: filter at
+reproduced by the bridge~~ — **corrected 2026-07-16 (WL-C): that cause is FALSIFIED. The
+"velocity-hold degeneracy" was a sim-EVAL artifact (`--eval-cmd-vx` zeroed the goal scale),
+so it never existed in training and cannot have reached the bridge, which does not use
+play.py. The keeper tracks held commands ≥ A0 in sim (ss@0.5 0.043, ss@1.0 0.097). The
+bridge's unsettled stepping is therefore UNEXPLAINED — treat as open.** One bridge-side
+scale defect is real and could contribute: the C++ derives the goal scale from `deploy.yaml`
+ranges, whose `ang_vel_z [-0.5,0.5]` gives **yaw scale 0.5 vs 1.0 trained** (vx/vy are
+correct) — see `.claude/docs/deployment.md`). On a vx=1.0 press it fell; flight recorder: filter at
 alpha=1.0 (whole-body position hold) at t=17.5 with tilt only 0.196, fall AFTER. The
 A1a gait rides its ankle/hip/knee stops by 0.01-0.2 rad every stride (trig_joint active
 40% of the session, from t=0.8 standing), so the any-joint-out -> hold-all-27 response

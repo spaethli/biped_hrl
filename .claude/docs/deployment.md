@@ -106,6 +106,44 @@ originally sat on the torso-mounted imu SITE, whose ω×r sway component feeds b
 goal delta and destabilizes A1 (keeper slammed ankle limits in 0.2 s; fine with pelvis velocity).
 Both bridge scenes now publish pelvis `frame_vel`; a real estimator must equally output base-frame
 velocity, not imu-frame (E1 gate criterion).
+### A1 goal scale vs the command-range safety limit (RESOLVED 2026-07-16, WL-C/WL-B)
+
+`deploy.yaml commands.base_velocity.ranges` drives **two unrelated things**:
+
+- `observations.h:118-120` (`velocity_commands`, joystick = the REAL robot) **clamps the
+  commanded twist** → the operator's safety limit; authoritative (Liam: deploy.yaml is the
+  last call for deployed policies).
+- `hrl::GoalSpace::scale()` **decodes the A1 HL's `g` into `V*`** → trained policy semantics.
+
+Before the fix these were the same knob, so narrowing the ranges for safety (e.g.
+`lin_vel_x: [-0.25, 0.5]` on a policy trained at `(-0.5, 1.0)`) silently halved the A1 goal
+scale (0.75 → 0.375) and gutted the HL's goal authority — the deploy twin of the sim bug
+(`--eval-cmd-vx` collapsed the same scale to its 1e-3 floor; `doc/hrl/A1_findings.md` WL-C).
+A0 was always immune (no goal space).
+
+**Fixed:** `HierarchicalRunner` exports `goal_scale` in both ONNX files' metadata, and
+`State_RLHRL::ensure_models_loaded` pins it into `GoalSpace::freeze_scale` at load — before
+any range is read. **`commands.base_velocity.ranges` is now a pure operator clamp in `delta`
+mode: narrow it for safety freely.** Look for `[HRL] goal scale pinned from ONNX metadata
+[...]` at FSM entry; the deployed keeper pair carries `0.750,0.500,1.000,1.000,1.000,1.000,
+0.200`. Verified by a standalone test of the robot-local path (8/8, incl. "scale() ignores
+yaml ranges" and a wrong-dim throw); `onnx_parity.py` re-passes (LL 4.2e-05, HL 8.5e-06).
+
+**Two limits to know:**
+- **Legacy ONNX** (exported before 2026-07-16) carry no `goal_scale` → the C++ warns loudly
+  and falls back to the old range-derived path. **Then the ranges must equal the trained
+  ones and narrowing is unsafe.** Fix by re-exporting (`play.py --export-onnx`).
+- **`hl_target_mode: absolute`** also decodes against `GoalSpace::center()`, which stays
+  range-derived (it is NOT pinnable: the ONNX `goal_center` holds absolute TRAINING-frame
+  values — its height column is pelvis z 1.02, while this deploy measures at the imu site,
+  `nominal_root_height` 1.3076; adopting it would inject that 0.29 m offset). So **do not
+  narrow ranges under `absolute`** — `State_RLHRL` warns. `delta` is the A1 default and what
+  is deployed, so this does not bite today.
+
+Bridge footnote: `keyboard_velocity_commands` (`State_RLBase.cpp:27`) reads the ranges into a
+`cfg` var and **never uses it** (key map hardcoded, `w`=1.0) — the sim bridge has no clamp at
+all, so don't validate a command limit there. Only the joystick path clamps.
+
 **Test knob:** `deploy.yaml` `hrl.state_noise: {velocity, orientation, height}` injects per-step
 Gaussian noise into `s` in sim, to emulate that estimator noise (default 0). Finding (2026-06-18,
 learned `absolute` TD3): under realistic velocity/height noise the clean-trained LL still stands
@@ -130,8 +168,10 @@ Both scenes (vendor + stress variant, see Bridge plant above), per candidate che
 1. **ONNX↔torch parity** + 27/27 gain/scale lockstep vs both YAMLs (V2-gate procedure).
 2. **Held-command walk** (the user-required deploy gate): stand → hold vx 0.5 ≥30 s → stop;
    repeat at 1.0. Direction held (no crab/backwards), ramp-then-track, arms calm in-bridge.
-   Known blocker: the A1a velocity-hold HL degeneracy (`doc/hrl/A1a_plan.md` table f) — this
-   gate fails until that is fixed; A0 passes (rs20 baseline ss 0.055/0.077, t90 <1 s in mjlab).
+   ~~Known blocker: the A1a velocity-hold HL degeneracy — this gate fails until that is
+   fixed~~ **[VOID 2026-07-16, WL-C: that "degeneracy" was a sim-eval artifact. Re-measured,
+   every A1 run holds ≥ A0 in mjlab (ss@0.5 0.030–0.048 vs A0 0.057; ss@1.0 0.039–0.097 vs
+   0.076, 0 falls) — `A1a_plan.md` table (f). There is no known blocker on this gate; run it.]**
 3. **Command steps**: stand→walk→stand, yaw both directions, short vy hold (vx-1.0 step from
    stand = the known hard case).
 4. **Safety-envelope audit**: bridge logs vs `h1_2_joint_limits` over the whole battery; arm

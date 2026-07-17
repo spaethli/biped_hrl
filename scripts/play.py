@@ -258,6 +258,33 @@ def run_play(task_id: str, cfg: PlayConfig):
       str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
     )
 
+    # Absence shim: checkpoints saved before 2026-07-16 carry no baked `goal_scale`
+    # (HierarchicalRunner.save), so pin the scale the run TRAINED with. Deriving it live
+    # instead reads THIS env's command ranges — play mode narrows ang_vel_z (yaw scale 0.5
+    # vs 1.0 trained) and `--eval-cmd-vx` collapses them to a point, which drops the derived
+    # scale to its 1e-3 floor and pins V* = s + 1e-3*g ≈ s, inerting the whole goal channel
+    # (the 2026-07-15 "HL hold degeneracy" artifact; see doc/hrl/A1_findings.md WL-C row).
+    # Training ranges = the task's non-play cfg with the twist curriculum's stages applied.
+    gsp = getattr(runner, "goal_space", None)
+    if gsp is not None and not gsp.scale_frozen:
+      train_cfg = load_env_cfg(task_id)  # non-play => the ranges training ran with
+      train_ranges = train_cfg.commands["twist"].ranges
+      for term in train_cfg.curriculum.values():
+        for stage in (term.params or {}).get("velocity_stages", []):
+          for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z"):
+            if stage.get(axis) is not None:
+              setattr(train_ranges, axis, stage[axis])
+      live = env.unwrapped.command_manager.get_term("twist").cfg.ranges
+      live_ranges = (live.lin_vel_x, live.lin_vel_y, live.ang_vel_z)
+      # Reuse GoalSpace's own derivation against the training ranges, then restore.
+      live.lin_vel_x, live.lin_vel_y, live.ang_vel_z = (
+        train_ranges.lin_vel_x, train_ranges.lin_vel_y, train_ranges.ang_vel_z
+      )
+      gsp.freeze_scale(gsp.scale(env.unwrapped).clone())
+      live.lin_vel_x, live.lin_vel_y, live.ang_vel_z = live_ranges
+      print(f"[SHIM] no baked goal_scale in checkpoint -> pinned to the training value "
+            f"{[round(x, 4) for x in gsp.scale(env.unwrapped).tolist()]}")
+
     # Export mode: write the ONNX policy/policies next to the checkpoint and exit.
     if cfg.export_onnx:
       assert log_dir is not None

@@ -369,6 +369,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     return policy
 
   def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
+    # Training always derives the goal scale live (it tracks the twist curriculum), so a
+    # resumed run must not inherit the frozen value load() pinned for inference.
+    self.goal_space.freeze_scale(None)
     if init_at_random_ep_len:
       self.env.episode_length_buf = torch.randint_like(
         self.env.episode_length_buf, high=int(self.env.max_episode_length)
@@ -614,6 +617,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     saved_dict["iter"] = self.current_learning_iteration
     saved_dict["infos"] = infos
     saved_dict["hl"] = self.hl.state_dict()
+    # Bake the goal scale: it defines what the HL's g means (V* = ref + scale*g), so it
+    # travels WITH the policy instead of being re-derived from whatever command ranges the
+    # replay env happens to carry (GoalSpace.freeze_scale). Live here — save() runs inside
+    # learn(), where the scale tracks the curriculum.
+    saved_dict["goal_scale"] = self.goal_space.scale(self.env.unwrapped).detach().cpu()
     torch.save(saved_dict, path)
     self.export_hierarchy_to_onnx(path.split("model")[0])
     if self.cfg["upload_model"]:
@@ -679,6 +687,18 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     metadata["hl_algorithm"] = self.hl_algorithm
     metadata["hl_target_mode"] = self.hl_target_mode
     metadata["goal_components"] = [c.name for c in self.goal_space.components]
+    # The g -> V* decode (V* = ref + scale*g). Deploy reads `goal_scale` from here instead of
+    # re-deriving it from deploy.yaml's command ranges: those ranges are an operator knob
+    # (the joystick safety clamp) and any edit would silently rescale the HL's action.
+    metadata["goal_scale"] = [round(x, 6) for x in self.goal_space.scale(self.env.unwrapped).tolist()]
+    # `absolute`-mode center, for diagnostics/parity. NOTE: unlike the scale (every entry is a
+    # *difference*, hence frame-independent) this holds ABSOLUTE values in the TRAINING frame
+    # — its height column is pelvis z (1.02) whereas the C++ deploy measures height at the imu
+    # site (nominal_root_height 1.3076, offset cancels in the delta). Deploy therefore must
+    # NOT adopt this vector wholesale; see deploy/robots/h1_2/include/hrl/goal_space.h.
+    metadata["goal_center"] = [
+      round(x, 6) for x in self.goal_space.center(self.env.unwrapped)[0].tolist()
+    ]
     # Deploy must know the HL output layout: velocity-only HL emits task_dim(+period)
     # values and C++ fills orientation/height targets with their nominals.
     metadata["hl_velocity_goals_only"] = self.hl_velocity_goals_only
@@ -691,7 +711,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
   def load(self, path: str, load_cfg=None, strict: bool = True, map_location=None) -> dict:
     infos = super().load(path, load_cfg, strict, map_location)
-    hl_state = torch.load(path, map_location=map_location, weights_only=False).get("hl")
+    saved = torch.load(path, map_location=map_location, weights_only=False)
+    hl_state = saved.get("hl")
     if hl_state:
       self.hl.load_state_dict(hl_state)
+    # Pin the baked goal scale so inference decodes g exactly as trained; learn() restores
+    # the live path for resumed training. Absent on pre-2026-07-16 checkpoints -> play.py's
+    # absence shim supplies the training value (same pattern as the hl_obs_vel shim).
+    goal_scale = saved.get("goal_scale")
+    if goal_scale is not None:
+      self.goal_space.freeze_scale(goal_scale.to(self.device))
     return infos

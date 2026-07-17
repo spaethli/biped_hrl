@@ -143,8 +143,14 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   fwd/bwd vx split, realized/requested ratio + `[GOALDIAG] {json}`. Decomposition closes
   exactly. **Pass `--num-envs` — the probe defaults to 1 env.** With `--eval-cmd-vx` it also
   prints `[HOLDDIAG]`: per-env bwd/fwd group split with signed goals, `|g|`, HL period, and
-  per-window goal-vs-achieved traces (the probe that exposed the 2026-07-15 velocity-hold HL
-  degeneracy). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
+  per-window goal-vs-achieved traces (the probe that appeared to expose a 2026-07-15
+  velocity-hold HL degeneracy — **which was itself an artifact of this very flag: FALSIFIED
+  2026-07-16, WL-C.** `--eval-cmd-vx` collapses the twist ranges to a point and the HIRO goal
+  scale used to be derived from them → scale hit its 1e-3 floor → `V* ≈ s`, inerting the goal
+  channel. **Fixed by baking `goal_scale` into the checkpoint** (`GoalSpace.freeze_scale`;
+  play.py prints `[SHIM] ...` for pre-2026-07-16 checkpoints). Any `--eval-cmd-vx` `|g|` /
+  `ll_err` / `[HOLDDIAG]` read from BEFORE that fix is meaningless; see `A1_findings.md`
+  WL-C). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
   frozen `hrl_phase` clock** (the loop didn't advance it; de-entrained LL ⇒ flattering) —
   fixed to mirror `get_inference_policy`.
 - **Play structure-restore:** play.py restores structure keys (`c, goal_components,

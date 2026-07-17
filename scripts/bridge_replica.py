@@ -16,6 +16,11 @@ new candidate checkpoint, velocity-source/wiring discriminators. NOT a substitut
 real-bridge gates (it re-implements the controller side in python; the C++ path is what
 G2 validates).
 
+Per-phase swing clearance (WL-E, 2026-07-16): steps = completed swings (either foot,
+>0.1 s air time), clr = mean/max swing apex rise of the ankle_roll body since liftoff.
+`--plant nominal` overrides joint armature/frictionloss/damping in-memory to the mjlab
+training nominal (per-motor armature, fric 0) without touching the /opt scene XMLs.
+
 Examples:
   python scripts/bridge_replica.py --policy a0 --delay-ms 2
   python scripts/bridge_replica.py --policy hrl --delay-ms 2 --walk-vx 0.5 --step-vx 1.0
@@ -48,6 +53,9 @@ def main() -> None:
   p.add_argument('--walk-vx', type=float, default=0.5)
   p.add_argument('--step-vx', type=float, default=1.0, help='held command stepped straight from stand')
   p.add_argument('--onnx-dir', default=None, help='override exported/ dir (candidate checkpoints)')
+  p.add_argument('--plant', choices=('scene', 'nominal'), default='scene',
+                 help='nominal = override joint armature/frictionloss/damping in-memory '
+                      'to the mjlab training nominal (WL-E instrument; scene XMLs untouched)')
   args = p.parse_args()
 
   sub = 'velocity_hrl' if args.policy == 'hrl' else 'velocity'
@@ -75,9 +83,24 @@ def main() -> None:
     net = ort.InferenceSession(f'{onnx_dir}/policy.onnx', providers=prov)
 
   m = mujoco.MjModel.from_xml_path(f'{SCENE_DIR}/{args.scene}')
+  if args.plant == 'nominal':  # h1_2_constants.py training nominal, per-motor armature
+    nom_arm = (('hip', 0.025), ('torso', 0.025), ('knee', 0.04), ('ankle', 0.005),
+               ('shoulder_yaw', 0.002), ('shoulder', 0.005), ('elbow', 0.002), ('wrist', 0.002))
+    for j in range(m.njnt):
+      if m.jnt_type[j] != mujoco.mjtJoint.mjJNT_HINGE:
+        continue
+      dof = m.jnt_dofadr[j]
+      name = m.joint(j).name
+      m.dof_armature[dof] = next(v for k, v in nom_arm if k in name)
+      m.dof_frictionloss[dof] = 0.0
+      m.dof_damping[dof] = 0.001
   d = mujoco.MjData(m)
   base = m.body('pelvis').id
   imu = m.site('imu').id
+  floor = m.geom('floor').id
+  foot_b = {s: m.body(f'{s}_ankle_roll_link').id for s in ('left', 'right')}
+  foot_g = {s: [g for g in range(m.ngeom)
+                if m.geom_bodyid[g] == foot_b[s] and m.geom_contype[g]] for s in foot_b}
   decim = max(1, round(0.02 / m.opt.timestep))
   delay = max(0, round(args.delay_ms / 1000.0 / m.opt.timestep))
   d.qpos[7:] = offset
@@ -132,6 +155,8 @@ def main() -> None:
     tgt = offset + scale * a
 
   results = []
+  min_swing = round(0.1 / m.opt.timestep)  # sub-0.1s air time = contact chatter, not a step
+  sw = {s: {'air': 0, 'lift_z': 0.0, 'max_z': 0.0} for s in foot_b}
   phases = [('fixstand', 6.0, 'fix', True, (0, 0, 0)),
             ('takeover', 3.0, 'pol', True, (0, 0, 0)),
             ('stand', 5.0, 'pol', False, (0, 0, 0)),
@@ -141,6 +166,7 @@ def main() -> None:
   for label, dur, mode, band, cmd in phases:
     n = int(dur / m.opt.timestep)
     qv = []
+    apex = []  # swing apex heights (either foot) completed in this phase
     for i in range(n):
       q_d, dq_d = hist[0]
       if mode == 'fix':
@@ -159,19 +185,43 @@ def main() -> None:
         d.xfrc_applied[base, :3] = 0
       mujoco.mj_step(m, d)
       hist.append((d.qpos[7:].copy(), d.qvel[6:].copy()))
+      onfloor = set()
+      for k in range(d.ncon):
+        con = d.contact[k]
+        if con.geom1 == floor:
+          onfloor.add(con.geom2)
+        elif con.geom2 == floor:
+          onfloor.add(con.geom1)
+      for s, t in sw.items():
+        z = float(d.xpos[foot_b[s]][2])
+        if any(g in onfloor for g in foot_g[s]):
+          if t['air'] >= min_swing:
+            apex.append(t['max_z'] - t['lift_z'])
+          t['air'] = 0
+        else:
+          if t['air'] == 0:
+            t['lift_z'], t['max_z'] = z, z
+          t['air'] += 1
+          t['max_z'] = max(t['max_z'], z)
       if i % 10 == 0:
         qv.append(np.sqrt((d.qvel[6:] ** 2).mean()))
     w, x, y, z = d.qpos[3:7]
     pitch = float(np.arcsin(np.clip(2 * (w*y - z*x), -1, 1)))
-    fell = d.qpos[2] < 0.7 or abs(pitch) > 0.5
+    fell = bool(d.qpos[2] < 0.7) or abs(pitch) > 0.5
     rec = {'phase': label, 'qvel_rms': round(float(np.mean(qv)), 3),
-           'pitch': round(pitch, 3), 'height': round(float(d.qpos[2]), 3), 'fell': fell}
+           'pitch': round(pitch, 3), 'height': round(float(d.qpos[2]), 3), 'fell': fell,
+           'steps': len(apex),
+           'clr_mean': round(float(np.mean(apex)), 4) if apex else None,
+           'clr_max': round(float(np.max(apex)), 4) if apex else None}
     results.append(rec)
+    clr = f"steps={rec['steps']:3d} clr={rec['clr_mean']:.3f}/{rec['clr_max']:.3f}" \
+        if apex else 'steps=  0'
     print(f"  {label:12s} qvel_rms={rec['qvel_rms']:.3f} pitch={rec['pitch']:+.3f} "
-          f"h={rec['height']:.3f} {'FELL' if fell else 'ok'}")
+          f"h={rec['height']:.3f} {clr} {'FELL' if fell else 'ok'}")
     if fell:
       break
-  out = {'policy': args.policy, 'scene': args.scene, 'delay_ms': args.delay_ms,
+  out = {'policy': args.policy, 'scene': args.scene, 'plant': args.plant,
+         'delay_ms': args.delay_ms,
          'pass': not any(r['fell'] for r in results), 'phases': results}
   print(f'[REPLICA] {json.dumps(out)}')
 

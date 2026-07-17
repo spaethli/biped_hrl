@@ -110,7 +110,14 @@ stretch target for A1a moved down, not up.
 **R-round results (2026-07-09, `h1_2_velocity_a1_v2/2026-07-08_*`, all `model_10000`,
 64×600×2 seeds).** Aggregate bench (A0-v2 row above is the reference):
 
-| run | err_vx | err_vy | err_yaw | fall | act | power (W) | CoT | stride | match |
+> ⚠ **2026-07-16: the `err_yaw` column is biased HIGH for these A1 rows** (~17%, the size of
+> the keeper's 0.234→0.195 re-measure). Pre-F2 the aggregate bench ran `scale_yaw` 0.5 vs the
+> trained 1.0, so the HL's yaw goals were halved. `err_vx`/`err_vy`/CoT/stride/power/match are
+> **unaffected** (those scales were already correct) — only yaw. The bias is uniform across A1
+> rows so the within-A1 ranking holds; A1-vs-A0 yaw comparisons overstate A1's error. Re-run
+> post-F2 to fix (no retrain). See the (f)/(e) boxes + `A1_findings.md` WL-C.
+
+| run | err_vx | err_vy | err_yaw ⚠ | fall | act | power (W) | CoT | stride | match |
 |---|---|---|---|---|---|---|---|---|---|
 | R1 s42 (cot0) | 0.107 | 0.071 | 0.204 | 0.0 | 1.31 | 439 | 1.417 | 0.407 | 0.92 |
 | R1 s123 (cot0) | 0.113 | 0.086 | 0.194 | 0.0 | 1.49 | 537 | 1.789 | 0.351 | 0.90 |
@@ -208,29 +215,44 @@ past the boundary.** Probe (cot0.1): hl_vx 0.142 / ll_vx 0.224, no saturation. P
 cot0.2 DIR: CoT 0.769 @ achieved stride 0.657 (band-limited follow, −5.3% vs own) — the
 gradient pointing past 0.625 is what motivated the control.
 
-*(e) fixed-command evals (`--eval-cmd-vx`, the treadmill/deploy case) — the aggregate bench
-HIDES a sustained-command failure (err_vx):*
+*(e) fixed-command evals (`--eval-cmd-vx`, the treadmill/deploy case).*
 
-| run @ fixed cmd | vx@0.5 | vy@0.5 | vx@1.0 | vy@1.0 | aggregate vx |
-|---|---|---|---|---|---|
-| fix0p8 | **0.674** | 0.270 | **1.106** | 0.243 | 0.094 |
-| cot0.2 DIR | **0.360** | 0.082 | **0.878** | 0.138 | 0.080 |
-| A0 optB | — | — | 0.127 | 0.079 | 0.090 |
+> ⚠ **2026-07-16: the original (e) was 100% eval artifact and is REPLACED below.** Every
+> number in it came from `--eval-cmd-vx`, which zeroed the A1 goal scale (see the (f) box +
+> `A1_findings.md` WL-C). ~~old: fix0p8 0.674@0.5 / 1.106@1.0 · cot0.2 DIR 0.360 / 0.878 ·
+> A0 0.127@1.0~~ — **there was no sustained-command failure.**
 
-Reads: (i) **fix0p8 wins aggregate CoT decisively (0.662, −18% vs cot0.2) at near-commanded
-stride 0.783, but does not walk under a sustained command** (achieved vx ≈ −0.17 at cmd 0.5;
-replay = sideways crab walk at gait_match 0.96, user-observed 2026-07-13) — NOT a valid
-best-constant-clock control until root-caused. (ii) cot0.2 DIR degrades too (0.360/0.878):
-the learned HL supplies forward drive the fixed clock lacks, but the whole velgoal line
-under-tracks sustained commands while A0 is fine (0.127 @1.0) — asterisks the old "A1
-fixed-vx ~0.25–0.3 is a benchmark artifact" read (it is real behavior). (iii) Upper-body
-energy signature (user hypothesis, motion-proxy support): A1a `ub_arm_vel` 0.50–0.64 vs A0
-0.18 (2.7–3.5×), `ub_pose_dev` ~70×; fix0p8's 208 W is still the set's lowest power.
-**Decision (user, 2026-07-13): co-training stays the A1a line** (the hierarchy is the
-architecture's point) — **next = real-robot deployment prep** (stage D): calm the arm swing
-+ shape the gait on the cot0.2 velgoal keeper; tracking is secondary until A2 (RMA
-re-prioritizes it). Fixed-command eval joins the bench protocol; the sustained-command
-under-tracking is a known deploy risk (held commands ARE the deploy regime).
+**Table (e) — RE-MEASURED post-F2 (2026-07-16), `model_10000`, 64×600×2, steady-state
+`ss_err` (last 2/3):**
+
+| run @ fixed cmd | ss vx@0.5 | ss vy@0.5 | ss vx@1.0 | ss vy@1.0 | agg vx | agg CoT | stride |
+|---|---|---|---|---|---|---|---|
+| fix0p8 (const 0.8 clock, cot0) | 0.048 | 0.077 | 0.078 | 0.087 | 0.094 | **0.663** | **0.781** |
+| cot0.2 DIR (keeper) | 0.043 | 0.062 | 0.097 | 0.087 | 0.079 | 0.818 | 0.625 |
+| cot0.1 | **0.036** | **0.038** | **0.044** | **0.040** | **0.063** | 0.948 | 0.418 |
+| A0 optB rs20 | 0.057 | 0.084 | 0.076 | 0.082 | 0.083 | 0.537 | 0.591 |
+
+Reads (rewritten 2026-07-16 — the old (e) reads are all void): (i) **fix0p8 walks sustained
+commands fine** (0.048 / 0.078 ≈ A0's 0.057 / 0.076) and **the "sideways crab walk" was the
+artifact too** (vy@0.5 0.270 → **0.077**): with the goal channel inert the HL could not correct
+vy, so the robot drifted. fix0p8 is therefore a **valid best-constant-clock control after
+all** — and it keeps its CoT win (**0.663, the best of any A1**, −19% vs the keeper) at the
+longest stride in the set (0.781 > even A0's 0.591). (ii) **This un-confounds the A1a premise
+question and the answer is uncomfortable**: a *pinned 0.8 s clock* beats every HL-cadence
+policy on CoT while matching them on tracking — i.e. the HL's cadence authority is not paying
+for itself on the metric it exists to optimize. The 2026-07-13 dismissal of fix0p8 ("not a
+valid control until root-caused") no longer applies; **stage F / gate G's logic deserves a
+re-read** (1 seed — worth a seed before any decision). (iii) The `hl_cot_coef` axis survives
+on CoT (0.1 → 0.948 "tracks but wastes", 0.2 → 0.818) but **cot0.1 is now the best tracker in
+the whole project** (agg 0.063, ss@1.0 0.044 — beats A0 everywhere) — the "tracks-but-wastes"
+label was half-measured. (iv) Upper-body energy signature stands (user hypothesis, motion
+proxy): A1a `ub_arm_vel` 0.37–0.58 vs A0 0.14; fix0p8 still the lowest-power A1.
+**Decision (user, 2026-07-13): co-training stays the A1a line** — that decision was made on
+the strength of the (now-void) claim that fix0p8 "does not walk"; it stands as the user's
+call, but the evidence under it has changed and (ii) should go back to Liam.
+~~Fixed-command eval joins the bench protocol; the sustained-command under-tracking is a
+known deploy risk~~ → **there is no sustained-command under-tracking**; the hold eval stays in
+the protocol (it is the deploy regime), now that it measures what it claims to.
 
 **Stage D: arm-calm runs + held-command root cause (2026-07-14/15, all `model_10000`,
 64×600×2; D1 = `2026-07-14_11-39-53_..._pose0p5shw16-4...s42` W&B `qcxbn7yt`, D2 =
@@ -240,28 +262,54 @@ under-tracking is a known deploy risk (held commands ARE the deploy regime).
 `resampling_time_range` (3,20) training change (rs20; bench stays pinned (3,8)).
 Holds report steady-state err (last 2/3) since 2026-07-14:*
 
-| run | agg vx | agg CoT | stride | pose_dev | arm_vel | fall | ss@0.5 | ss@1.0 |
-|---|---|---|---|---|---|---|---|---|
-| keeper (table b/e ref) | 0.080 | 0.812 | 0.625 | 0.033 | 0.50–0.64 | 0 | 0.354 | 0.869 |
-| D1 (weights) | 0.066 | 1.037 | 0.404 | **0.0031** | 0.352 | 0 | 0.376 | 1.033 |
-| D2 (weights+rs20) | **0.063** | 0.897 | 0.351 | 0.0033 | 0.412 | 0 | 0.470 | 0.851 |
-| A0-optB-rs20 | 0.085 | 0.537 | 0.592 | 0.0004 | 0.143 | 0 | **0.055** (t90 0.6 s) | **0.077** (t90 0.9 s) |
+> ⚠ **2026-07-16: the `ss@0.5` / `ss@1.0` columns below are INVALID for the A1 rows.**
+> `--eval-cmd-vx` collapses the twist ranges to a point, which drives the derived HIRO
+> goal scale to its `1e-3` floor → `V* ≈ s_t`, i.e. the A1 goal channel is inert during
+> the hold eval (`play.py:297-299` × `goal_space.py:79-83`). A0 rows are unaffected (no
+> goal space). Re-measured on the **unchanged** keeper with the training scale restored:
+> **ss@0.5 0.304→0.044 (t90 0.56 s), ss@1.0 0.882→0.097 (t90 0.76 s)** vs A0-optB-rs20
+> 0.055/0.077 → **A1 holds ≥ A0; the "TD3-HL velocity-hold degeneracy" does not exist.**
+> Read (iii) below is void. Full verdict → `A1_findings.md` WL-C row + `worklines.md` WL-C.
+>
+> **FIXED 2026-07-16 (F2): the goal scale is now baked into the checkpoint** and pinned at
+> load, so `--eval-cmd-vx` can no longer reach it; pre-bake checkpoints (keeper/D1/D2) get a
+> `play.py` absence shim that pins the trained scale (prints `[SHIM] ...`). **The whole table
+> below has been RE-MEASURED post-F2** (2026-07-16, same checkpoints, no retrain).
 
-Reads: (i) **arm lever validated** — pose_dev 10× down, arm_vel −30–40%, aggregate tracking
-*improves*, replay-confirmed calmer (user); cost = stride/CoT regress toward the short-stride
-regime (arm-momentum vs run-chaos unresolved, 1 seed). (ii) **rs20 costs A0 nothing and
-does NOT fix A1 holds** → hold-duration hypothesis dead. (iii) **Held-command root cause
-(probe, 64 envs, phase-fixed): the TD3 HL degenerates to a velocity-hold policy** —
-`goal_vx[k] ≈ achieved_vx[k−1]` (no pull toward the command), period pinned at the band
-floor (~0.37 s), LL executes near-perfectly (`ll_err_vx` 0.025) → the composed system is a
-driftless random walk; gait-initiation noise picks the sign and the mode absorbs (25–27/64
-envs backwards; 24 s entrenches, does not heal). Same HL under resampled commands pulls
-fine (`hl_err_vx` 0.06). A0-rs20's near-perfect holds isolate the defect to the hierarchy.
-Falsified en route: heading-off (0.332 vs 0.354), exact-zero vy/wz (0.05 identical),
-clean-eval dither (27→17/64, minor). **Prime suspect (unverified): HIRO relabeling fills
-the HL replay with achieved-consistent deltas → critic favors "hold" actions; verify in
-`td3.py` next.** Probe caveat: all pre-2026-07-15 `[GOALDIAG]` numbers on cadence-HL
-checkpoints ran with a frozen phase clock + 1 env (see A1_findings row).
+**Table (f) — RE-MEASURED post-F2 (2026-07-16), `model_10000`, 64×600×2. Supersedes the
+pre-F2 rows** (kept in the strikethrough line below only to show the size of the artifact):
+
+| run | agg vx | agg yaw | agg CoT | stride | pose_dev | arm_vel | fall | ss@0.5 (t90) | ss@1.0 (t90) |
+|---|---|---|---|---|---|---|---|---|---|
+| keeper (table b/e ref) | 0.079 | 0.194 | 0.818 | **0.625** | 0.032 | 0.567 | 0 | 0.043 (0.56 s) | 0.097 (0.77 s) |
+| D1 (weights) | 0.066 | **0.121** | 1.036 | 0.403 | **0.003** | **0.366** | 0 | **0.030** (0.45 s) | **0.039** (0.73 s) |
+| D2 (weights+rs20) | **0.062** | 0.124 | 0.882 | 0.352 | **0.003** | 0.420 | 0 | 0.034 (0.40 s) | 0.042 (0.73 s) |
+| CTRL (norelabel, WL-C) | 0.067 | 0.133 | 0.933 | 0.360 | 0.017 | 0.581 | 0 | 0.031 (0.35 s) | 0.069 (0.70 s) |
+| A0-optB-rs20 | 0.083 | **0.085** | **0.537** | 0.591 | **0.000** | **0.141** | 0 | 0.057 (0.56 s) | 0.076 (0.88 s) |
+
+~~pre-F2 (ARTIFACT, do not cite): keeper 0.354/0.869 · D1 0.376/1.033 · D2 0.470/0.851~~
+
+Goal probe @ held vx=1.0 (post-F2, 64×600×2), the same checkpoints that "proved" the
+degeneracy: `|g|vx` **0.10–0.22, sat ≈0** (was 0.98 / 95% saturated), `hl_err_vx` 0.04–0.14,
+`ll_err_vx` 0.05–0.10, `end_err_vx` 0.06–0.13 — HL asks correctly, LL delivers, nothing
+saturates.
+
+Reads (rewritten 2026-07-16): (i) **arm lever validated, and it is stronger than we thought**
+— pose_dev 10× down (0.032→0.003), arm_vel −35%, aggregate vx/yaw *improve*, replay-confirmed
+calmer; and now **D1/D2 are the BEST holders in the set** (ss@1.0 0.039/0.042). The artifact
+had inverted this: D1's 1.033 was the worst number in the old table and is really the best.
+Cost is unchanged and is now the *only* cost: stride/CoT regress to the short-stride regime
+(CoT 0.88–1.04 vs keeper 0.818; 1 seed). (ii) **Every A1 run holds at least as well as A0**
+(ss@0.5 0.030–0.043 vs A0 0.057; ss@1.0 0.039–0.097 vs 0.076), all 0 falls, all t90 ≤ A0's.
+**A1 held-command tracking is not a deploy risk and never was** — the 2026-07-13 "whole velgoal
+line under-tracks sustained commands" read is dead. (iii) rs20 (D2 vs D1) is a wash on holds
+(0.034/0.042 vs 0.030/0.039) — as expected once the failure it targeted turned out to be an
+eval bug; its rationale is void, it costs nothing, keep or revert on other grounds. (iv) **The
+real remaining A1-vs-A0 gap is energy, not tracking**: CoT 0.82–1.04 vs A0 0.537, arm_vel
+0.37–0.58 vs 0.14, yaw 0.12–0.19 vs 0.085. That is exactly WL-D's brief. (v) Deploy-candidate
+implication: **D1/D2 dominate the keeper on holds + arms + tracking** and only lose on CoT/
+stride — WL-B's candidate choice should be revisited (Liam's call; the keeper was picked
+before the arm lever existed).
 
 ## Results
 

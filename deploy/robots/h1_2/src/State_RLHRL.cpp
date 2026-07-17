@@ -5,7 +5,9 @@
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 
 #include <filesystem>
+#include <sstream>
 #include <stdexcept>
+#include <vector>
 
 // [SAFETY FILTER] master switch lives in FSM/State_RLHRL.h (gates filter + logger).
 #if SAFETY_FILTER
@@ -109,6 +111,28 @@ static int64_t onnx_input_dim(const std::filesystem::path& path)
     return n;
 }
 
+// One-time read of a comma-separated float list from an ONNX file's custom metadata (written
+// by HierarchicalRunner._attach_hrl_metadata). Empty = key absent (pre-2026-07-16 exports).
+// Robot-local, same throwaway-session pattern as onnx_input_dim: OrtRunner lives in the
+// shared isaaclab header and keeps its Ort::Session private, so we open our own at load. Load
+// path only — never the control loop.
+static std::vector<float> onnx_metadata_floats(const std::filesystem::path& path, const char* key)
+{
+    Ort::Env ort_env(ORT_LOGGING_LEVEL_ERROR, "hrl_meta_probe");
+    Ort::SessionOptions so;
+    Ort::Session session(ort_env, path.c_str(), so);
+    Ort::AllocatorWithDefaultOptions alloc;
+    auto val = session.GetModelMetadata().LookupCustomMetadataMapAllocated(key, alloc);
+    std::vector<float> out;
+    if (!val) return out;  // absent
+    std::stringstream ss(val.get());
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        if (!tok.empty()) out.push_back(std::stof(tok));
+    }
+    return out;
+}
+
 void State_RLHRL::ensure_models_loaded()
 {
     if (ll_runner_) return;  // already loaded (entered before)
@@ -167,6 +191,38 @@ void State_RLHRL::ensure_models_loaded()
             std::to_string(hl_runner_->get_action().size()) + " != expected " +
             std::to_string(hl_out_expect) +
             " (check hrl.hl_velocity_goals_only / hl_cadence / goal_components).");
+    }
+    // Pin the g -> V* decode (V* = ref + scale*g) to what the HL TRAINED with, so that
+    // `commands.base_velocity.ranges` in deploy.yaml is free to be whatever the operator
+    // wants. Those ranges are the joystick safety clamp (isaaclab observations.h
+    // `velocity_commands`); until now GoalSpace ALSO derived scale/center from them, so
+    // narrowing them for safety (e.g. lin_vel_x -0.5..1.0 -> -0.25..0.5) silently halved
+    // scale_vx 0.75 -> 0.375 and gutted the HL's goal authority. A0 has no goal space and was
+    // never affected. See doc/hrl/A1_findings.md (WL-C) + .claude/docs/deployment.md.
+    const auto meta_scale = onnx_metadata_floats(hl_path, "goal_scale");
+    if (meta_scale.empty()) {
+        spdlog::warn(
+            "[HRL] high_level.onnx carries no 'goal_scale' metadata (pre-2026-07-16 export) "
+            "-> falling back to deriving the goal scale from deploy.yaml "
+            "commands.base_velocity.ranges. Those ranges MUST then equal the ranges the "
+            "policy was TRAINED with, and narrowing them for safety WILL silently rescale "
+            "the HL's goals. Re-export the policy (play.py --export-onnx) to fix.");
+    } else {
+        goal_space_->freeze_scale(
+            Eigen::Map<const Eigen::VectorXf>(meta_scale.data(), (Eigen::Index)meta_scale.size()));
+        std::ostringstream s;
+        for (size_t i = 0; i < meta_scale.size(); ++i) s << (i ? ", " : "") << meta_scale[i];
+        spdlog::info("[HRL] goal scale pinned from ONNX metadata [{}] — deploy.yaml command "
+                     "ranges are the operator clamp only (safe to narrow).", s.str());
+    }
+    // `absolute` mode also decodes g against GoalSpace::center(), which stays range-derived
+    // (its height column must remain this deploy's imu-site nominal, not training's pelvis z
+    // — see goal_space.h). So the clamp is only free to move in `delta` mode.
+    if (hl_target_mode_ == "absolute") {
+        spdlog::warn("[HRL] hl_target_mode=absolute: the absolute target CENTER is still "
+                     "derived from deploy.yaml commands.base_velocity.ranges, so those "
+                     "ranges must equal the TRAINED ranges — do NOT narrow them for safety "
+                     "with this mode (delta mode is unaffected).");
     }
     spdlog::info("[HRL] Loaded high_level.onnx + low_level.onnx from {}", exported_dir_.string());
 }

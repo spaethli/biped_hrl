@@ -153,3 +153,56 @@ Also learned: lift-off iteration scales with num_envs (the 06-09 v1 baseline use
 8192 envs and lifted off at ~330; all 4096-env runs cross 0.3 at 550-800) — hold
 num_envs fixed within any comparison and never judge stuck-vs-slow before ~2x the
 expected lift-off.
+
+## Amendment 2 (2026-07-17, WL-E): correction 1's stall attribution is FALSIFIED at kl 0.01
+
+The bisect's frictionloss row ("0.12 @1846, stuck") ran at desired_kl 0.005 AND with
+both holds active, so it never isolated friction. The WL-E control run
+(`a0_v2_optB_fric0p1_kl01_s42`: optB config + frictionloss 0.1 on all joints,
+kl 0.01, 10001 iters, 4096 envs, seed 42) settles it. Comparator note: the run
+trained under the post-2026-07-14 command resampling (3, 20) s, NOT the (3, 8) s the
+2026-07-10 `a0_v2_optB_baseline` saw, so its training-side twin is
+`a0_v2_optB_rs20_baseline` (fric 0, same (3, 20)); the benchmark protocol itself is
+unconfounded (play mode pins (3, 8) for every checkpoint):
+
+| torso | arms | frictionloss | kl | result |
+|---|---|---|---|---|
+| 300/3 | hold | 0.1 | 0.005 | 0.12 @1846 (stuck; the confounded row above) |
+| 300/3 | hold | 0.1 | **0.01** | lift-off ~1108, **0.81 @10k, bench err_vx 0.083 / vy 0.108 / yaw 0.087, 0 falls** |
+
+Friction at kl 0.01 trains from scratch to at-least-baseline quality on both
+comparators (rs20 twin: err_vx 0.085, CoT 0.537; 2026-07-10 optB: 0.089/0.109/0.100,
+CoT 0.531; fric run act_rate 0.635 vs 0.63, orient/height dev equal). Held commands:
+ss_err_vx 0.050 @0.5 (t90 0.56 s), 0.089 @1.0 (t90 0.86 s), 0 falls (rs20 twin:
+0.055 / 0.077, so 0.5 slightly better, 1.0 slightly worse, both same class).
+Lift-off slows ~1.5-2x (1108 vs 550-800), no stall. So correction 1's technical
+basis ("friction stalls gait discovery") is void; friction was only ever blocked by
+the kl-0.005 double-hold confound.
+
+Deploy-side evidence (bridge replica, vendor plant, clearance metric added to
+`scripts/bridge_replica.py` 2026-07-16): swing apex clearance is plant-INDEPENDENT
+(walk-0.5 apex 0.061-0.068 m on vendor / old-harsh / training-nominal alike, ~35%
+under the 0.10 m trained target), so the "barely lifts feet" look is a training-side
+character unmasked by the vendor plant, not caused by it; the old harsh plant merely
+damped the jitter (stand qvel_rms flat ~0.06 at 0-4 ms delay vs vendor 0.11→0.31).
+The fric-0.1 policy gains only marginally in the bridge: clearance +4-6 mm, stand
+qvel_rms at 4 ms 0.254 vs 0.308, full chain passes at 0/2/4 ms on vendor + stress.
+
+Reference audit (WL-E, verified in-repo): both reference stacks train friction-free
+AND with less rotor inertia than us (unitree_rl_gym armature cfg 1e-3; CorelLab
+h12_rma armature 0, no URDF <dynamics> in either), while our nominal carries
+per-motor 0.002-0.04. So "adopt friction for reference parity" was never the right
+frame; the honest frame is train->deploy/hardware parity (vendor sim and real joints
+both have friction). Also found: CorelLab's deploy XML (`h12_locomotion_rma/
+MujocoDeploy/h1_2/h1_2_handless.xml`) is `damping 1 / armature 0.1 / frictionloss
+0.2`, i.e. exactly the old harsh bridge plant; that plant's damping masks jitter, so
+"policies looked better on the old bridge" is not evidence of better transfer.
+
+**Standing decision (Liam's ruling, 2026-07-17): frictionloss stays 0; fric 0.1 is a
+sanctioned option, not adopted.** Adopting it costs nothing in-sim and buys a small
+bridge robustness margin, but it invalidates every v2 checkpoint (A0 baseline, A1/A1a
+keepers) like the v1->v2 rebase did; that trade stays open for a later rebase window.
+The constants comment now cites this amendment instead of the falsified stall. The
+audit's three falsifiable follow-ups (explicit-PD actuation, reference-strength
+perturbation DR, correlated obs noise) are folded into the WL-D batch protocol as
+arms 7-9 (`doc/hrl/worklines.md`).

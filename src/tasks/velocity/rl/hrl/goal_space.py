@@ -148,12 +148,32 @@ class GoalSpace:
 
   def __init__(self, components: list[GoalComponent]) -> None:
     self.components = components
+    self._frozen_scale: torch.Tensor | None = None
     # task_only target maps rely on the task components forming a contiguous prefix
     # (so learned goal columns are simply [:task_dim]). True for the canonical
     # (velocity, orientation, height) order; assert loudly rather than mis-slice.
     flags = [c.is_task for c in components]
     if flags != sorted(flags, reverse=True):
       raise ValueError("task goal components must precede non-task ones.")
+
+  @property
+  def scale_frozen(self) -> bool:
+    return self._frozen_scale is not None
+
+  def freeze_scale(self, scale: torch.Tensor | None) -> None:
+    """Pin the goal scale to the checkpoint-baked value (``None`` -> derive live).
+
+    The scale defines what the HL's bounded goal ``g`` *means* (``V* = ref + scale*g``),
+    so it is a property of the trained policy — not of the env it is replayed in. The
+    live derivation reads the twist command ranges, which eval and deploy legitimately
+    edit (play-mode narrowing, ``--eval-cmd-vx`` pinning, deploy.yaml), and then the same
+    ``g`` silently decodes to a different ``V*``. That cost us the 2026-07-15 "HL hold
+    degeneracy": ``--eval-cmd-vx`` collapses the ranges to a point -> ``_vel_scale``'s
+    ``max(.., 1e-3)`` floor -> ``V* = s + 1e-3*g ≈ s`` -> the goal channel is inert for
+    any ``g`` (A0 is immune: no goal space). So: training derives live (the scale tracks
+    the command curriculum), every inference path pins what the checkpoint trained with.
+    """
+    self._frozen_scale = scale
 
   @property
   def dim(self) -> int:
@@ -172,8 +192,12 @@ class GoalSpace:
   def scale(self, env) -> torch.Tensor:
     """Per-dim delta scale for the HIRO map V* = state + scale*g, shape [dim].
 
-    Read from the env (velocity tracks the live twist curriculum), so it reflects
-    the active command ranges if the curriculum stage changes between calls."""
+    Frozen to the checkpoint-baked value once one is loaded (see :meth:`freeze_scale`) —
+    every inference path decodes ``g`` exactly as trained. Otherwise read from the env
+    (velocity tracks the live twist curriculum), so it reflects the active command ranges
+    if the curriculum stage changes between calls."""
+    if self._frozen_scale is not None:
+      return self._frozen_scale
     return torch.cat([c.scale(env) for c in self.components], dim=-1)
 
   def center(self, env) -> torch.Tensor:

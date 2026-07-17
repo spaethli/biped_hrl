@@ -13,9 +13,19 @@
 //   height(1)      = base height (world z)
 //                    scale = 0.2 m, center/nominal = nominal_root_height
 //
-// IMPORTANT: scale/center read the command ranges from deploy.yaml
-// (`commands.base_velocity.ranges`). Those ranges MUST equal the ranges the policy was
-// trained with (the final curriculum stage), or V* is reconstructed on the wrong scale.
+// SCALE/CENTER SOURCE (changed 2026-07-16, WL-C). The g -> V* decode is a property of the
+// TRAINED policy, so it is pinned from the HL ONNX metadata (`goal_scale` / `goal_center`,
+// written by HierarchicalRunner._attach_hrl_metadata) via freeze_scale/freeze_center, which
+// State_RLHRL does at load. `commands.base_velocity.ranges` in deploy.yaml stays the
+// OPERATOR's knob — the joystick safety clamp (isaaclab observations.h `velocity_commands`)
+// — and is now free to be narrowed for safety without touching policy semantics.
+//
+// Legacy exports (no metadata) fall back to deriving scale/center from those ranges, which
+// is the old, coupled behavior: then the ranges MUST equal the ranges the policy was trained
+// with (the final curriculum stage) or V* is reconstructed on the wrong scale, and narrowing
+// them for safety silently rescales the HL's goals (that coupling is what produced the
+// 2026-07-15 phantom "HL hold degeneracy" in sim; see doc/hrl/A1_findings.md WL-C).
+// Re-export the policy to get the metadata and lift that restriction.
 #pragma once
 
 #include <eigen3/Eigen/Dense>
@@ -55,6 +65,16 @@ public:
         return d;
     }
 
+    // Pin the goal SCALE to the value the policy TRAINED with (from the HL ONNX metadata).
+    // Empty vector = leave on the legacy range-derived path. See the header note.
+    // Only the scale is pinnable: every scale entry is a *difference* (m/s, rad/s, m of
+    // height deviation) and so is frame-independent, whereas the ONNX `goal_center` holds
+    // absolute values in the TRAINING frame — its height column is pelvis z (1.02) while
+    // this deploy measures height at the imu site (nominal_root_height 1.3076). Adopting it
+    // would inject that 0.29 m frame offset. See center().
+    void freeze_scale(const Eigen::VectorXf& v) { check_dim(v, "goal_scale"); frozen_scale_ = v; }
+    bool scale_frozen() const { return frozen_scale_.size() > 0; }
+
     // Learned (task) goal columns for hl_velocity_goals_only — the velocity component,
     // which the training side requires to be the contiguous prefix (goal_space.py).
     int task_dim() const
@@ -91,9 +111,12 @@ public:
         return s;
     }
 
-    // Per-dim HIRO delta scale (V* = ref + scale .* g).
+    // Per-dim HIRO delta scale (V* = ref + scale .* g). Pinned to the trained value when the
+    // HL ONNX carried `goal_scale`; otherwise derived from the deploy.yaml command ranges
+    // (legacy — see the header note: then those ranges must equal the trained ones).
     Eigen::VectorXf scale(isaaclab::ManagerBasedRLEnv* env) const
     {
+        if (frozen_scale_.size()) return frozen_scale_;
         const auto r = env->cfg["commands"]["base_velocity"]["ranges"];
         Eigen::VectorXf sc(dim());
         int i = 0;
@@ -114,6 +137,14 @@ public:
 
     // Absolute-target center (used only by `absolute` mode): velocity = command midpoint,
     // orientation = upright (0,0,-1), height = nominal_root_height.
+    //
+    // NOT pinnable from the ONNX (unlike scale): the height column must stay this deploy's
+    // imu-site nominal_root_height (1.3076), not training's pelvis z (1.02) — see
+    // freeze_scale. The velocity columns therefore remain range-derived, so **for
+    // `hl_target_mode: absolute` the command ranges must still equal the TRAINED ranges**
+    // (narrowing them for safety would shift the absolute reference). `delta` — the A1
+    // default and what is deployed — never calls this, so the safety clamp is free there.
+    // State_RLHRL warns loudly if absolute mode is configured.
     Eigen::VectorXf center(isaaclab::ManagerBasedRLEnv* env) const
     {
         const auto r = env->cfg["commands"]["base_velocity"]["ranges"];
@@ -192,6 +223,17 @@ public:
 private:
     static int comp_dim(Comp c) { return c == HEIGHT ? 1 : 3; }
 
+    // A metadata vector that disagrees with the declared goal space means the ONNX and the
+    // deploy yaml describe different policies -> refuse rather than decode g on wrong dims.
+    void check_dim(const Eigen::VectorXf& v, const char* what) const
+    {
+        if (v.size() && v.size() != dim())
+            throw std::runtime_error(
+                std::string("hrl::GoalSpace: ") + what + " from ONNX metadata has dim " +
+                std::to_string(v.size()) + " but goal_components declare " +
+                std::to_string(dim()) + " — the ONNX and deploy.yaml disagree.");
+    }
+
     // half = max((hi-lo)/2, 1e-3); mid = (lo+hi)/2  (mirror goal_space.py).
     static float half(const YAML::Node& n)
     {
@@ -204,6 +246,7 @@ private:
 
     std::vector<Comp> comps_;
     float nominal_height_;
+    Eigen::VectorXf frozen_scale_;  // empty -> derive from the deploy.yaml command ranges
 };
 
 } // namespace hrl
