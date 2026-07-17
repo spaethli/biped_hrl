@@ -5,7 +5,7 @@ from pathlib import Path
 import mujoco
 
 from src import SRC_PATH
-from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.actuator import BuiltinPositionActuatorCfg, IdealPdActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from src.assets.robots._utils import update_assets
 from mjlab.utils.spec_config import CollisionCfg
@@ -197,17 +197,50 @@ H1_2_ARTICULATION = EntityArticulationInfoCfg(
 )
 
 
-def get_h1_2_robot_cfg() -> EntityCfg:
+##
+# WL-D arm 7 (2026-07-17): explicit discrete-torque PD actuation, matching what the
+# IsaacGym references train AND the bridge/firmware run (mjlab's BuiltinPositionActuator
+# instead uses MuJoCo's native <position> actuator, an IMPLICIT servo baked into the
+# solver). IdealPdActuator computes torque = kp*(q_des-q) + kd*(qdot_des-qdot) explicitly
+# at sim dt via a <motor> actuator, clipped to effort_limit - same gains/armature/
+# frictionloss/viscous_damping as the builtin groups above, transmission swapped only.
+# Falsifies WL-E transfer-gap suspect (i): expect the vendor-plant latency sensitivity
+# (stand qvel_rms 0.11->0.31 over 0-4ms) to flatten toward the stress-plant profile.
+##
+
+
+def _as_explicit_pd(cfg: BuiltinPositionActuatorCfg) -> IdealPdActuatorCfg:
+  return IdealPdActuatorCfg(
+    target_names_expr=cfg.target_names_expr,
+    stiffness=cfg.stiffness,
+    damping=cfg.damping,
+    effort_limit=cfg.effort_limit if cfg.effort_limit is not None else float("inf"),
+    armature=cfg.armature,
+    frictionloss=cfg.frictionloss,
+    viscous_damping=cfg.viscous_damping,
+  )
+
+
+H1_2_ARTICULATION_EXPLICIT_PD = EntityArticulationInfoCfg(
+  actuators=tuple(_as_explicit_pd(a) for a in H1_2_ARTICULATION.actuators),  # type: ignore[arg-type]
+  soft_joint_pos_limit_factor=H1_2_ARTICULATION.soft_joint_pos_limit_factor,
+)
+
+
+def get_h1_2_robot_cfg(explicit_pd: bool = False) -> EntityCfg:
   """Get a fresh H1_2 robot configuration instance.
 
   Returns a new EntityCfg instance each time to avoid mutation issues when
   the config is shared across multiple places.
+
+  ``explicit_pd=True`` (WL-D arm 7): swap the implicit MuJoCo <position> servo for an
+  explicit discrete-torque PD actuator, same gains. See H1_2_ARTICULATION_EXPLICIT_PD.
   """
   return EntityCfg(
     init_state=HOME_KEYFRAME,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
-    articulation=H1_2_ARTICULATION,
+    articulation=H1_2_ARTICULATION_EXPLICIT_PD if explicit_pd else H1_2_ARTICULATION,
   )
 
 

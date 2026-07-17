@@ -248,16 +248,61 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   invariant, so without the hip anchor from-scratch LLs walk with a ~20° hip twist (A0
   pins the same joints via its tightest ``variable_posture`` stds). ~No-op for aligned
   warm-started policies (deviation ≈ 0). 0 disables."""
-  ll_posture_weights: dict[str, float] | None = None
+  ll_posture_weights: dict[str, float] | None = field(
+    default_factory=lambda: {
+      r".*shoulder.*": 16.0,
+      r".*elbow.*": 4.0,
+      r".*wrist.*": 4.0,
+      r".*ankle_roll.*": 4.0,
+    }
+  )
   """Per-joint multipliers on the posture penalty (regex pattern -> weight), resolved
   against the anchored joint names at runner init; joints no pattern matches stay at 1.0.
-  ``dev = (w * err^2).mean`` — NOT renormalized, so ``None``/all-ones reproduces the
-  uniform penalty and raising one group does not dilute the hip yaw/roll anchor. Stage D
-  arm-calm lever (2026-07-14): the uniform mean gives each of the 19 anchored joints
-  ~coef/19 pull vs A0's per-joint-std pressure (~50-100x more on the shoulders) -> the
-  A1a shoulder flail. Set via rl_cfg edit (structured tyro CLI overrides untrusted, the
-  fix0p8 lesson); promote the validated vector to this default. RQ2: A1-only reward
-  change, log next to the ar 0.02-vs-0.05 note."""
+  ``dev = (w * err^2).mean`` — NOT renormalized, so all-ones reproduces the uniform
+  penalty and raising one group does not dilute the hip yaw/roll anchor. **Default since
+  2026-07-17 (WL-D)**: the Stage D arm-calm lever (2026-07-14, D1/D2) — the uniform mean
+  gives each of the 19 anchored joints ~coef/19 pull vs A0's per-joint-std pressure
+  (~50-100x more on the shoulders) -> the A1a shoulder flail; shoulders 16 / elbow+wrist
+  4 fixes it (pose_dev 10x down, validated x2). Promoted from a temp rl_cfg edit
+  (structured tyro CLI overrides untrusted, the fix0p8 lesson) now that it dominates the
+  keeper on holds+arms+tracking post-F2 (A1a_plan.md table f). Costs +10-28% CoT vs the
+  old keeper — this is WL-D's new energy zero-point. Set ``None`` for the pre-D1 uniform
+  baseline. RQ2: A1-only reward change, log next to the ar 0.02-vs-0.05 note.
+
+  The ``ankle_roll`` entry (WL-D arm 5, 2026-07-17) is INERT unless
+  ``ll_posture_anchor_ankle_roll=True`` (ankle roll is not in the anchored-joint set by
+  default) — present here so the arm only needs the one flag flipped, no weight edit."""
+  ll_posture_anchor_ankle_roll: bool = False
+  """WL-D arm 5 (2026-07-17): add ``.*ankle_roll.*`` to the LL posture anchor's joint set
+  (default anchor = arms+waist+hip yaw/roll; see ``HierarchicalRunner.__init__``).
+  Targets a replay defect (ankles roll inward) with a small anchor pull; weight comes
+  from ``ll_posture_weights``'s ``ankle_roll`` entry (4.0 default — the joint's range is
+  only +-15 deg, far narrower than the shoulders, so it needs much less pull). Off by
+  default (byte-identical to pre-arm-5 behavior)."""
+  ll_stand_still_coef: float = 0.0
+  """WL-D arm 3 (2026-07-17): mirrors A0's ``stand_still`` term (joint deviation from
+  default, gated ``|cmd| < command_threshold``) into the LL intrinsic - targets the
+  "unsettled stepping" defect (the goal-only LL has no reason to fully stop stepping at
+  a held near-zero command; the posture anchor above already pulls arms/waist/hips but
+  is always-on, not stand-gated). Reuses ``mdp.stand_still`` unmodified. 0 disables."""
+  ll_angmom_coef: float = 0.0
+  """WL-D arm 4a (2026-07-17): mirrors A0's ``angular_momentum_penalty`` (whole-body
+  angular momentum, encourages natural counter-swing arm motion) into the LL intrinsic.
+  Targets the arm_vel energy gap (0.37-0.58 vs A0's 0.14) directly - the LL never sees
+  this env term otherwise (``ll_task_reward_coef=0``). 0 disables."""
+  ll_footslip_coef: float = 0.0
+  """WL-D arm 4b (2026-07-17): mirrors A0's ``feet_slip`` (contact-time foot xy velocity
+  penalty) into the LL intrinsic. Targets foot-quality/energy loss during stance.
+  0 disables."""
+  ll_footclear_coef: float = 0.0
+  """WL-D arm 4c (2026-07-17): mirrors A0's ``feet_clearance`` (deviation from the 0.10m
+  swing-height target, velocity-weighted) into the LL intrinsic. Targets the WL-E
+  swing-clearance defect (A0-optB apex ~35% under target) at the LL level. 0 disables."""
+  ll_energy_coef: float = 0.0
+  """WL-D arm 4d (2026-07-17): mirrors the new ``cost_of_transport_penalty`` (see
+  ``mdp/rewards.py``, same term the A0+energy S4' control uses) into the LL intrinsic -
+  the most direct mirror candidate, since it targets the CoT gap itself rather than a
+  proxy for it. 0 disables."""
   ll_goal_kernel: Literal["l2", "exp"] = "exp"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =

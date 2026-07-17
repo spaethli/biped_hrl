@@ -422,6 +422,41 @@ class variable_posture:
     return torch.exp(-torch.mean(error_squared / (std**2), dim=1))
 
 
+def mech_power(asset: Entity) -> torch.Tensor:
+  """Total mechanical power draw (W): Σ_j |qfrc_actuator_j · joint_vel_j|.
+
+  Shared by the benchmark (play.py), the A1a HL's window CoT (hrl_runner.py), and
+  cost_of_transport_penalty below - keep the definition in exactly one place.
+  """
+  return (asset.data.qfrc_actuator * asset.data.joint_vel).abs().sum(dim=-1)
+
+
+def cost_of_transport_penalty(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.1,
+  vel_floor: float = 0.1,
+  mass_g: float = 75.0 * 9.81,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Per-step command-gated cost-of-transport analog: P / (m·g·max(|v_cmd|, floor)).
+
+  Same normalization the A1a HL's ``hl_cot_coef`` window reward uses (ADR-0004), so an
+  A0 or A1-LL run shaped by this term is a fair architectural energy comparator
+  (A1a_plan.md stage S4', "A0+energy"). Stateless/per-step - unlike the HL's
+  window-integrated version, this uses COMMANDED speed as the distance-rate proxy
+  (not achieved distance), so it needs no window state and can drop into either the
+  A0 RewardManager or the A1 LL intrinsic unchanged.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  cmd_speed = command[:, :2].norm(dim=-1)
+  gated = (cmd_speed > command_threshold).float()
+  cot = mech_power(asset) / (cmd_speed.clamp(min=vel_floor) * mass_g)
+  return cot * gated
+
+
 def stand_still(
         env: ManagerBasedRlEnv,
         command_name: str,

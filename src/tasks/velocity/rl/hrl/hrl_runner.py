@@ -20,11 +20,13 @@ Key wiring (HIRO delta encoding):
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import torch
 import wandb
 
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.utils.lab_api.string import resolve_matching_names_values
@@ -66,6 +68,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # behind the back and twist. Resolve the arms+waist joint ids once (0 coef -> no-op).
     self.ll_action_rate_coef: float = train_cfg.get("ll_action_rate_coef", 0.0)
     self.ll_posture_coef: float = train_cfg.get("ll_posture_coef", 0.0)
+    # WL-D (2026-07-17): stand-still + A0-term-mirror LL-intrinsic levers, all 0 = off.
+    self.ll_stand_still_coef: float = train_cfg.get("ll_stand_still_coef", 0.0)
+    self.ll_angmom_coef: float = train_cfg.get("ll_angmom_coef", 0.0)
+    self.ll_footslip_coef: float = train_cfg.get("ll_footslip_coef", 0.0)
+    self.ll_footclear_coef: float = train_cfg.get("ll_footclear_coef", 0.0)
+    self.ll_energy_coef: float = train_cfg.get("ll_energy_coef", 0.0)
     # Per-step alive bonus (from-scratch survival economics; see rl_cfg docstring).
     self.ll_alive_coef: float = train_cfg.get("ll_alive_coef", 0.0)
     self.ll_goal_kernel: str = train_cfg.get("ll_goal_kernel", "l2")
@@ -103,9 +111,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
-    ub_ids, ub_names = env.unwrapped.scene["robot"].find_joints(
-      [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*", ".*hip_yaw.*", ".*hip_roll.*"]
-    )
+    anchor_patterns = [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*",
+                       ".*hip_yaw.*", ".*hip_roll.*"]
+    # WL-D arm 5 (2026-07-17): replay defect (ankles roll inward) - extend the anchor.
+    if train_cfg.get("ll_posture_anchor_ankle_roll", False):
+      anchor_patterns.append(".*ankle_roll.*")
+    ub_ids, ub_names = env.unwrapped.scene["robot"].find_joints(anchor_patterns)
+    # WL-D arm 4b/4c: resolved foot-site cfg for the feet_slip/feet_clearance mirrors
+    # (same sites A0's own foot_slip/foot_clearance terms use).
+    self._foot_asset_cfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
+    self._foot_asset_cfg.resolve(env.unwrapped.scene)
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     # Stage D (2026-07-14): per-joint posture multipliers (pattern -> weight; unmatched
     # joints stay 1.0). NOT renormalized, so all-ones = the uniform penalty and raising
@@ -113,7 +128,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self._ub_weights = torch.ones(len(ub_names), device=device)
     pw = train_cfg.get("ll_posture_weights")
     if pw:
-      w_idx, w_names, w_vals = resolve_matching_names_values(dict(pw), ub_names)
+      # Drop patterns matching zero anchored joints (e.g. the ankle_roll entry when
+      # ll_posture_anchor_ankle_roll=False) - resolve_matching_names_values requires
+      # every key to match at least one name, so an inert/not-yet-anchored pattern
+      # would otherwise hard-error instead of being a no-op.
+      pw = {p: w for p, w in dict(pw).items()
+            if any(re.search(p, n) for n in ub_names)}
+    if pw:
+      w_idx, w_names, w_vals = resolve_matching_names_values(pw, ub_names)
       self._ub_weights[torch.as_tensor(w_idx, device=device)] = torch.as_tensor(
         w_vals, dtype=torch.float32, device=device)
       print("[HRL] Posture weights: "
@@ -408,6 +430,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       start = time.time()
       intrinsic_sum = 0.0
       goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
+      stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       with torch.inference_mode():
         uenv = self.env.unwrapped
@@ -489,6 +512,39 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             ar_pen = self.ll_action_rate_coef * ar
             r_lo = r_lo - ar_pen
             action_rate_sum += -ar_pen.mean().item()  # signed reward contribution (<= 0)
+          # WL-D arm 3 (2026-07-17): stand-still gating - mirrors A0's stand_still term
+          # (joint deviation from default, gated |cmd| < threshold) into the LL intrinsic.
+          if self.ll_stand_still_coef != 0.0:
+            ss_pen = self.ll_stand_still_coef * mdp_rewards.stand_still(
+              uenv, command_name="twist", command_threshold=0.1)
+            r_lo = r_lo - ss_pen
+            stand_still_sum += -ss_pen.mean().item()
+          # WL-D arm 4a: mirror A0's angular_momentum_penalty (natural arm counter-swing).
+          if self.ll_angmom_coef != 0.0:
+            am_pen = self.ll_angmom_coef * mdp_rewards.angular_momentum_penalty(
+              uenv, sensor_name="robot/root_angmom")
+            r_lo = r_lo - am_pen
+            angmom_sum += -am_pen.mean().item()
+          # WL-D arm 4b: mirror A0's feet_slip (contact-time foot xy velocity penalty).
+          if self.ll_footslip_coef != 0.0:
+            fs_pen = self.ll_footslip_coef * mdp_rewards.feet_slip(
+              uenv, sensor_name="feet_ground_contact", command_name="twist",
+              command_threshold=0.1, asset_cfg=self._foot_asset_cfg)
+            r_lo = r_lo - fs_pen
+            footslip_sum += -fs_pen.mean().item()
+          # WL-D arm 4c: mirror A0's feet_clearance (0.10m swing-height target).
+          if self.ll_footclear_coef != 0.0:
+            fc_pen = self.ll_footclear_coef * mdp_rewards.feet_clearance(
+              uenv, target_height=0.10, command_name="twist",
+              command_threshold=0.1, asset_cfg=self._foot_asset_cfg)
+            r_lo = r_lo - fc_pen
+            footclear_sum += -fc_pen.mean().item()
+          # WL-D arm 4d: mirror the new cost_of_transport_penalty (the direct CoT mirror).
+          if self.ll_energy_coef != 0.0:
+            en_pen = self.ll_energy_coef * mdp_rewards.cost_of_transport_penalty(
+              uenv, command_name="twist", command_threshold=0.1)
+            r_lo = r_lo - en_pen
+            energy_sum += -en_pen.mean().item()
           # A1a cadence entrainment (ADR-0004): reward the LL for matching the contact
           # schedule of the HL-commanded stride period. Positive feet_gait term.
           if self.hl_cadence and self.ll_cadence_coef != 0.0:
@@ -582,6 +638,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/posture_pen": posture_sum / n_steps,
         "ll/action_rate_pen": action_rate_sum / n_steps,
         "ll/cadence_rew": cadence_sum / n_steps,
+        "ll/stand_still_pen": stand_still_sum / n_steps,
+        "ll/angmom_pen": angmom_sum / n_steps,
+        "ll/footslip_pen": footslip_sum / n_steps,
+        "ll/footclear_pen": footclear_sum / n_steps,
+        "ll/energy_pen": energy_sum / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
         "hl/cot_pen": cot_pen_sum / (n_steps // self.c),  # per-window mean (0 when off)
         **{f"hl/{k}": v for k, v in hl_losses.items()},

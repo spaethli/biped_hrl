@@ -357,6 +357,14 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
         "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
       },
     ),
+    # A1a_plan.md S4' "A0+energy" control (WL-D): 0.0 = inert, byte-identical A0
+    # baseline (RQ2-safe). Set > 0 to test whether a flat command-gated CoT penalty
+    # matches A1a's within-architecture CoT saving without regressing tracking.
+    "cost_of_transport": RewardTermCfg(
+      func=mdp.cost_of_transport_penalty,
+      weight=0.0,
+      params={"command_name": "twist", "command_threshold": 0.1},
+    ),
   }
 
   ##

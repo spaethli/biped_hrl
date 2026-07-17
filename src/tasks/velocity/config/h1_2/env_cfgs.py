@@ -12,7 +12,9 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg, RayCastSensorCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
+from mjlab.utils.noise import UniformNoiseCfg as Unoise
 from src.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
+from src.tasks.velocity import mdp as project_mdp
 
 
 def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -236,4 +238,65 @@ def unitree_h1_2_flat_lean_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Lean-reward A0 flat env (Track F): A0 flat env, shaping terms stripped."""
   cfg = unitree_h1_2_flat_env_cfg(play=play)
   apply_lean_reward(cfg)
+  return cfg
+
+
+def unitree_h1_2_flat_explicit_pd_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """WL-D arm 7 (2026-07-17): A0 flat env with explicit discrete-torque PD actuation
+  instead of MuJoCo's implicit <position> servo (same gains) - see h1_2_constants.py
+  H1_2_ARTICULATION_EXPLICIT_PD. Everything else (reward/DR/terrain) is unchanged.
+  """
+  cfg = unitree_h1_2_flat_env_cfg(play=play)
+  cfg.scene.entities = {"robot": get_h1_2_robot_cfg(explicit_pd=True)}
+  return cfg
+
+
+def apply_wide_dr(cfg: ManagerBasedRlEnvCfg) -> None:
+  """WL-D arm 8 (2026-07-17): unitree_rl_gym-recipe perturbation DR, in place.
+
+  Falsifies WL-E transfer-gap suspect (ii): push max linear speed 0.5->1.5 m/s, add
+  base-mass DR (-1,+3) kg on torso_link, and lower the foot-friction floor 0.3->0.1.
+  Bundled as one package (matching the reference recipe), not swept individually.
+  """
+  push = cfg.events["push_robot"].params["velocity_range"]
+  push["x"] = (-1.5, 1.5)
+  push["y"] = (-1.5, 1.5)
+  cfg.events["base_mass"] = EventTermCfg(
+    mode="startup",
+    func=envs_mdp.dr.body_mass,
+    params={
+      "asset_cfg": cfg.events["base_com"].params["asset_cfg"],
+      "operation": "add",
+      "ranges": (-1.0, 3.0),
+    },
+  )
+  friction_ranges = cfg.events["foot_friction"].params["ranges"]
+  cfg.events["foot_friction"].params["ranges"] = (0.1, friction_ranges[1])
+
+
+def unitree_h1_2_flat_wide_dr_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """WL-D arm 8 (2026-07-17): A0 flat env with the wide-DR bundle applied."""
+  cfg = unitree_h1_2_flat_env_cfg(play=play)
+  if not play:
+    apply_wide_dr(cfg)
+  return cfg
+
+
+def unitree_h1_2_flat_corr_noise_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """WL-D arm 9 (2026-07-17): A0 flat env with correlated (low-pass) obs noise.
+
+  Falsifies WL-E transfer-gap suspect (iii): swaps the actor's base_ang_vel and
+  joint_vel Unoise terms for an amplitude-matched ~2Hz EMA low-pass (same +-0.2 /
+  +-1.5 ranges) instead of i.i.d. white noise each control step. Nothing else changes.
+  """
+  cfg = unitree_h1_2_flat_env_cfg(play=play)
+  if not play:
+    dt = cfg.decimation * cfg.sim.mujoco.timestep
+    actor_terms = cfg.observations["actor"].terms
+    actor_terms["base_ang_vel"].noise = project_mdp.LowPassNoiseModelCfg(
+      noise_cfg=Unoise(n_min=-0.2, n_max=0.2), cutoff_hz=2.0, dt=dt
+    )
+    actor_terms["joint_vel"].noise = project_mdp.LowPassNoiseModelCfg(
+      noise_cfg=Unoise(n_min=-1.5, n_max=1.5), cutoff_hz=2.0, dt=dt
+    )
   return cfg
