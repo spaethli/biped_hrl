@@ -319,16 +319,27 @@ def ankle_pushoff_power(
         swing_time: float = 0.0,
         duty_max: float = 0.70,
 ) -> torch.Tensor:
-    """WL-D arm 6, formulation B: ankle push-off power burst (implemented, untrained
-    until formulation A's read - A1a_plan.md Arm 6).
+    """WL-D arm 6, formulation B: ankle push-off power burst.
 
     Saturating bonus on signed ankle-pitch power (``tau * qd`` - NOT ``mech_power``,
     which is abs-summed over all joints) in the terminal-stance window, bounded above
     (per the same clamp-discipline that motivated ``cost_of_transport_penalty``'s
-    clamp) instead of rewarding unbounded torque-cranking. ``ReLU`` so only
-    forward-delivering power counts, not absorption/eccentric work.
+    clamp) instead of rewarding unbounded torque-cranking.
 
-    Gate pin: SCHEDULE **and** actual contact (stricter than formulation A) - phase-only
+    **Direction-corrected 2026-07-20** (the user's visual replay at model_7400 caught it):
+    the original formula gated only on ``ReLU(power)`` - "concentric, not eccentric" -
+    which does NOT distinguish push-off (plantarflexion) from a toe-lift (dorsiflexion):
+    both are concentric work, just in opposite directions, and the trained policy chose
+    the toe-lift 100% of the time (measured on the buggy run's `model_10000`: every
+    rewarded step had `qd < 0`). Root cause: the constants-probe's sign convention
+    (2026-07-17) was ITSELF backwards - it inferred direction from a correlational signal
+    smaller than its own noise. A forward-kinematics sweep of the XML (no policy, no
+    dynamics - just "which way does the toe move as the joint angle changes") settles it:
+    increasing ``ankle_pitch`` moves the toe DOWN (plantarflexion); decreasing moves it UP
+    (dorsiflexion). So the fix gates on ``qd > 0`` - only power delivered WHILE actively
+    plantarflexing counts, not any concentric power regardless of direction.
+
+    Gate pins: SCHEDULE **and** actual contact (stricter than formulation A) - phase-only
     gating would let the LL harvest the bonus by driving the ankle in the air after an
     early liftoff; power without ground contact is thrash, not propulsion. Known watch
     item (monitor in replay, not a redesign): ReLU keeps the positive half of any ankle
@@ -346,8 +357,142 @@ def ankle_pushoff_power(
     tau = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
     qd = asset.data.joint_vel[:, asset_cfg.joint_ids]
     power = tau * qd
-    bonus = 1.0 - torch.exp(-torch.relu(power) / p_scale)
+    # Only count power delivered while actively plantarflexing (qd > 0, corrected
+    # convention) - excludes concentric dorsiflexion (toe-lift), which ReLU alone let
+    # through since it only checks torque-velocity sign agreement, not direction.
+    directed_power = power * (qd > 0).float()
+    bonus = 1.0 - torch.exp(-torch.relu(directed_power) / p_scale)
     reward = (gate.float() * bonus).sum(dim=1)
+    return reward * _command_gate(env, command_name, command_threshold)
+
+
+class foot_step_symmetry:
+  """WL-D arm 10, formulation B (primary training arm - A1a_plan.md "Arm 10"):
+  step-time left/right symmetry index. Per-env last-touchdown-time buffer (mirrors
+  ``feet_swing_height``'s per-env buffer pattern below) so each new touchdown can be
+  compared against the OTHER foot's last one, giving the two alternating step-time
+  intervals ``t_LR``/``t_RL`` (contact-based, no history buffer - contrast formulation
+  A below). The reward is dense (available every step once both intervals have been
+  observed at least once), not sparse-at-touchdown, so PPO gets a per-step gradient
+  rather than one spike per stride.
+
+  A double-tap (the observed defect: one foot touches down twice before the other
+  lifts) drives one interval toward 0, so ``SI -> 1`` and the reward saturates toward
+  0 - it fires on exactly the behaviour the arm targets.
+
+  Plain-argument constructor (not the ``RewardTermCfg``-driven ``__init__`` above it):
+  ``hrl_runner`` computes its LL intrinsic directly (no ``RewardManager`` in the
+  loop), so it instantiates stateful helpers the way it already does for
+  ``GoalStateNoise`` (``state_noise.py``) - construct once with plain args, call every
+  step, reset explicitly from the runner's own ``dones``.
+  """
+
+  def __init__(self, num_envs: int, device: str) -> None:
+    self.last_td_time = torch.full((num_envs, 2), -1.0, device=device)
+    self.t_lr = torch.zeros(num_envs, device=device)
+    self.t_rl = torch.zeros(num_envs, device=device)
+    self.have_lr = torch.zeros(num_envs, dtype=torch.bool, device=device)
+    self.have_rl = torch.zeros(num_envs, dtype=torch.bool, device=device)
+
+  def reset_envs(self, dones: torch.Tensor) -> None:
+    """Called from ``hrl_runner`` with THIS step's ``dones`` before the touchdown read,
+    so a stale pre-reset last-touchdown time never gets diffed against a fresh
+    post-reset touchdown (the runner has no RewardManager driving its LL intrinsic,
+    so it calls this directly instead of relying on ``RewardManager.reset``)."""
+    if dones is None or not dones.any():
+      return
+    d = dones.bool()
+    self.last_td_time[d] = -1.0
+    self.have_lr[d] = False
+    self.have_rl[d] = False
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    command_threshold: float,
+    sigma_si: float,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)  # [B, 2], 0=left, 1=right
+    # episode_length_buf is already reset for envs whose episode just ended (auto-reset
+    # vecenv semantics) - reusing it as the clock avoids a second manually-reset buffer.
+    now = env.episode_length_buf.float() * env.step_dt  # [B]
+
+    valid = self.last_td_time >= 0.0  # [B, 2]
+    td_l = first_contact[:, 0] & valid[:, 1]  # left touchdown completes a t_RL interval
+    self.t_rl = torch.where(td_l, now - self.last_td_time[:, 1], self.t_rl)
+    self.have_rl = self.have_rl | td_l
+    td_r = first_contact[:, 1] & valid[:, 0]  # right touchdown completes a t_LR interval
+    self.t_lr = torch.where(td_r, now - self.last_td_time[:, 0], self.t_lr)
+    self.have_lr = self.have_lr | td_r
+    self.last_td_time = torch.where(first_contact, now.unsqueeze(1), self.last_td_time)
+
+    si = (self.t_lr - self.t_rl).abs() / (self.t_lr + self.t_rl).clamp(min=1e-3)
+    reward = torch.exp(-si.square() / sigma_si**2) * (self.have_lr & self.have_rl).float()
+    return reward * _command_gate(env, command_name, command_threshold)
+
+
+class phaseshift_joint_mirror:
+  """WL-D arm 10, formulation A (implemented alongside B but left untrained pending
+  B's read - the Arm 6 pattern): half-period phase-shifted joint mirror,
+  ``r = exp(-mean_pairs(q_L(t) - m*q_R(t-tau))^2 / sigma^2)``, ``tau = T/2`` (``T`` =
+  ``env.hrl_period``, the HL-commanded stride period). The CRITICAL adaptation vs. the
+  dead-code reference ``joint_mirror`` (A1a_plan.md "Arm 10"): comparing same-instant
+  ``q_L(t)`` to ``q_R(t)`` would force the antiphase legs INTO phase (hopping); this
+  compares to the OTHER leg's state half a stride ago instead, the actual gait-symmetry
+  statement.
+
+  Buffers only the RIGHT leg's joint history (mirrors ``feet_swing_height``'s per-env
+  buffer pattern below) - the formula only needs ``q_R(t-tau)``; ``q_L(t)`` is read
+  live each step. ``tau`` varies per env with the commanded period, so the lookback is
+  a per-env step count, not a fixed one; the ring buffer is sized off
+  ``cadence_period_range``'s upper bound so the longest realistic ``tau`` always fits.
+
+  Plain-argument constructor - see ``foot_step_symmetry`` above for why (no
+  ``RewardManager`` drives ``hrl_runner``'s LL intrinsic).
+  """
+
+  def __init__(self, num_envs: int, n_joints: int, max_period: float, step_dt: float,
+               device: str) -> None:
+    self.step_dt = step_dt
+    self.ring_len = max(2, int(math.ceil(max_period / 2.0 / step_dt)) + 1)
+    self.buf = torch.zeros(self.ring_len, num_envs, n_joints, device=device)
+    self.filled = torch.zeros(num_envs, dtype=torch.long, device=device)
+    self.ptr = 0
+    self._env_idx = torch.arange(num_envs, device=device)
+
+  def reset_envs(self, dones: torch.Tensor) -> None:
+    """See ``foot_step_symmetry.reset_envs`` - same reason, same calling convention."""
+    if dones is None or not dones.any():
+      return
+    self.filled[dones.bool()] = 0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    left_asset_cfg: SceneEntityCfg,
+    right_asset_cfg: SceneEntityCfg,
+    sigma: float,
+    command_name: str,
+    command_threshold: float,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[left_asset_cfg.name]
+    q_left = asset.data.joint_pos[:, left_asset_cfg.joint_ids]    # [B, J] live
+    q_right = asset.data.joint_pos[:, right_asset_cfg.joint_ids]  # [B, J] pushed into history
+
+    self.buf[self.ptr] = q_right
+    delay_steps = (env.hrl_period / 2.0 / self.step_dt).round().long().clamp(1, self.ring_len - 1)
+    idx = (self.ptr - delay_steps) % self.ring_len
+    q_right_delayed = self.buf[idx, self._env_idx]  # [B, J]
+    valid = self.filled > delay_steps
+
+    self.ptr = (self.ptr + 1) % self.ring_len
+    self.filled = torch.clamp(self.filled + 1, max=self.ring_len)
+
+    err = (q_left - q_right_delayed).square().mean(dim=1)
+    reward = torch.exp(-err / sigma**2) * valid.float()
     return reward * _command_gate(env, command_name, command_threshold)
 
 

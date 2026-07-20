@@ -249,7 +249,7 @@ label was half-measured. (iv) Upper-body energy signature stands (user hypothesi
 proxy): A1a `ub_arm_vel` 0.37–0.58 vs A0 0.14; fix0p8 still the lowest-power A1.
 **Decision (user, 2026-07-13): co-training stays the A1a line** — that decision was made on
 the strength of the (now-void) claim that fix0p8 "does not walk"; it stands as the user's
-call, but the evidence under it has changed and (ii) should go back to Liam.
+call, but the evidence under it has changed and (ii) should go back to the user.
 ~~Fixed-command eval joins the bench protocol; the sustained-command under-tracking is a
 known deploy risk~~ → **there is no sustained-command under-tracking**; the hold eval stays in
 the protocol (it is the deploy regime), now that it measures what it claims to.
@@ -308,7 +308,7 @@ eval bug; its rationale is void, it costs nothing, keep or revert on other groun
 real remaining A1-vs-A0 gap is energy, not tracking**: CoT 0.82–1.04 vs A0 0.537, arm_vel
 0.37–0.58 vs 0.14, yaw 0.12–0.19 vs 0.085. That is exactly WL-D's brief. (v) Deploy-candidate
 implication: **D1/D2 dominate the keeper on holds + arms + tracking** and only lose on CoT/
-stride — WL-B's candidate choice should be revisited (Liam's call; the keeper was picked
+stride — WL-B's candidate choice should be revisited (the user's call; the keeper was picked
 before the arm lever existed).
 
 ## Results
@@ -653,10 +653,10 @@ only by abandoning the command — penalty domination reproduces from scratch at
 
 ## Stage D (WL-D, 2026-07-17): reward/gait lever batch — implementation + launch record
 
-Per `worklines.md` WL-D (gate released 2026-07-16 by WL-C). Two decisions from Liam
+Per `worklines.md` WL-D (gate released 2026-07-16 by WL-C). Two decisions from the user
 before launch: (1) promote D1/D2's arm weights to the A1 default (done — see below);
 (2) keep arms 1-2 (cadence HL) even though fix0p8 beats every HL-cadence policy on CoT
-at equal tracking — Liam's call: cadence is "the main reason for hierarchy... otherwise
+at equal tracking — the user's call: cadence is "the main reason for hierarchy... otherwise
 there is no real benefit... not even training is faster," so the arms stay, plus a
 fix0p8+weights control re-run on the new base (needed since table (e)'s fix0p8 predates
 the arm-weight promotion). Open question raised alongside this (not yet investigated):
@@ -710,7 +710,7 @@ this base config unmodified and serves as the batch's zero-point (no retrain nee
   action-rate penalties (clamped since the 2026-06-30 `it9624` crash: unbounded L2 let
   a sim blow-up spike the LL PPO update to ~-5e5 in one step), the CoT term had no cap
   on the numerator, only a denominator floor. Deliberately **NOT** applied to the HL's
-  own `hl_cot_coef` window computation in `hrl_runner.py` (Liam's call, 2026-07-17):
+  own `hl_cot_coef` window computation in `hrl_runner.py` (the user's call, 2026-07-17):
   that path feeds a TD3 replay buffer (off-policy, one bad transition diluted across a
   500k-capacity buffer and clipped double-Q), not an on-policy PPO rollout whose GAE
   backward-recursion lets one outlier corrupt many timesteps' advantages at once - the
@@ -734,6 +734,158 @@ seed 42 each): the fix0p8+weights control; arm 1 (`ll_cadence_coef` 1.0/2.0); ar
 weight magnitude, NOT tuned, expect a second pass); arm 5 (`ll_posture_anchor_ankle_roll`);
 arm 7/8/9 (`ENV_VARIANT=explicit_pd|wide_dr|corr_noise`); A0+energy
 (`ENERGY_COEF=0.05`). Results pending.
+
+### WL-D batch results (benched 2026-07-20 by the planning chat, `model_10000`, 64x600x2)
+
+**Comparator correction:** the launch note above designates D1 as the batch zero-point.
+That is wrong on the `resampling_time_range` axis - **D1 trained at (3,8), every batch arm
+trained at (3,20)**, so **D2** (`2026-07-14_16-03-57_..._rs20_s42`) is the config-matched
+control (verified by diffing `agent.yaml`/`env.yaml`: the only differences are the new
+coefficient fields, all 0.0 except each arm's own lever, plus an inert weight-0.0
+diagnostic reward term). D1 is reported below as a secondary row, not the zero-point.
+Arm 6's "re-diff once the batch control lands" caveat is hereby closed: D2 is the control,
+and D2's numbers reproduce exactly (CoT 0.897 here vs 0.898 in the arm-6 table).
+
+*(g) A1 arms, LL-intrinsic levers on the arm-calmed cadence-HL base. 0 falls in every cell.*
+
+| run | vx | vy | yaw | act | CoT | power | stride | match | arm_vel | orient | height |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **D2 (control)** | 0.063 | 0.054 | 0.129 | 1.13 | 0.897 | 317 | 0.352 | 0.955 | 0.413 | 0.036 | 0.0067 |
+| D1 (rs8, off-config) | 0.066 | 0.067 | 0.121 | 1.14 | 1.040 | 350 | 0.403 | 0.935 | 0.352 | 0.032 | 0.0070 |
+| arm1a cad 1.0 | 0.073 | 0.072 | 0.140 | 1.21 | 1.108 | 394 | 0.438 | 0.954 | 0.381 | 0.034 | 0.0076 |
+| arm1b cad 2.0 | 0.077 | 0.065 | 0.157 | 1.28 | 1.413 | 476 | 0.496 | 0.963 | 0.378 | 0.035 | 0.0099 |
+| arm2a cot 0.15 | 0.067 | 0.080 | 0.118 | 1.07 | 0.788 | 270 | 0.382 | 0.945 | 0.360 | 0.034 | 0.0072 |
+| arm2b cot 0.25 | 0.070 | 0.064 | 0.120 | 1.07 | 0.800 | 272 | 0.378 | 0.949 | 0.346 | 0.034 | 0.0076 |
+| arm3 stand-still | 0.062 | 0.070 | 0.128 | 1.09 | 0.963 | 330 | 0.366 | 0.948 | 0.361 | 0.037 | 0.0063 |
+| arm4a angmom | 0.081 | 0.084 | 0.130 | 1.13 | 0.683 | 230 | 0.538 | 0.938 | 0.342 | 0.031 | 0.0079 |
+| arm4b footslip | 0.086 | 0.104 | 0.124 | 1.26 | 0.776 | 257 | 0.499 | 0.912 | 0.480 | 0.036 | 0.0101 |
+| arm4c footclear | 0.081 | 0.077 | 0.136 | 1.15 | 0.792 | 266 | **0.649** | 0.933 | 0.407 | **0.056** | 0.0077 |
+| **arm4d energy 0.05** | 0.064 | 0.069 | **0.109** | **0.92** | **0.465** | **154** | 0.361 | 0.951 | **0.300** | **0.028** | 0.0056 |
+| arm5 ankle-roll | 0.062 | 0.082 | 0.126 | 1.07 | 0.767 | 264 | 0.357 | 0.955 | 0.454 | 0.030 | **0.0040** |
+| ctrl fix0p8 | 0.080 | 0.106 | 0.139 | 1.27 | 1.069 | 346 | 0.384 | **0.896** | 0.466 | 0.041 | 0.0060 |
+
+*(h) A1 goal probe (same checkpoints, `--diagnose-goals 600 --eval-seeds 2 --num-envs 64`,
+9600/9600 windows kept in every run):*
+
+| run | HL err vx | LL err vx | HL err yaw | LL err yaw | gabs vx | gabs vy |
+|---|---|---|---|---|---|---|
+| D2 (control) | 0.055 | 0.063 | 0.112 | 0.080 | 0.136 | 0.153 |
+| arm1a cad 1.0 | 0.078 | 0.088 | 0.113 | 0.095 | 0.159 | 0.204 |
+| arm1b cad 2.0 | 0.061 | 0.085 | 0.129 | 0.128 | 0.130 | 0.186 |
+| arm2a cot 0.15 | 0.049 | 0.061 | 0.115 | 0.076 | 0.127 | 0.297 |
+| arm2b cot 0.25 | 0.063 | 0.076 | 0.102 | 0.078 | 0.145 | 0.232 |
+| arm3 stand-still | 0.046 | 0.061 | 0.115 | 0.086 | **0.110** | 0.217 |
+| arm4a angmom | 0.083 | 0.097 | 0.116 | 0.085 | 0.156 | 0.204 |
+| arm4b footslip | **0.142** | **0.152** | 0.118 | 0.089 | **0.266** | **0.520** |
+| arm4c footclear | 0.110 | 0.137 | 0.123 | 0.100 | 0.207 | 0.323 |
+| arm4d energy | 0.060 | 0.073 | **0.097** | **0.070** | 0.125 | 0.243 |
+| arm5 ankle-roll | **0.041** | **0.057** | 0.107 | 0.077 | **0.110** | 0.313 |
+| ctrl fix0p8 | 0.067 | 0.094 | 0.120 | 0.091 | 0.152 | 0.220 |
+
+*(i) A0-scoped arms (WL-E transfer audit), vs `a0_v2_optB_rs20_baseline` re-benched here:*
+
+| run | vx | vy | yaw | act | CoT | power | stride | match | arm_vel | orient | height | fall |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **A0 rs20 (control)** | 0.088 | 0.111 | 0.089 | 0.644 | 0.541 | 166 | 0.590 | 0.946 | 0.143 | 0.029 | 0.0246 | 0 |
+| arm7 explicit PD | 0.720 | 0.438 | 4.113 | 12.10 | 11.82 | 6249 | 0.358 | 0.297 | 3.667 | 0.364 | 0.0615 | **0.11** |
+| arm8 wide DR | 0.139 | 0.126 | 0.280 | 0.751 | 0.582 | 187 | 0.595 | 0.877 | 0.224 | 0.058 | 0.0208 | 0 |
+| arm9 corr noise | 0.098 | 0.114 | 0.093 | 0.623 | 0.517 | 155 | 0.593 | 0.938 | 0.134 | 0.027 | 0.0245 | 0 |
+| **A0 + energy 0.05** | 0.087 | 0.113 | 0.086 | **0.571** | **0.440** | **134** | 0.592 | 0.943 | **0.118** | 0.030 | 0.0257 | 0 |
+
+**Reads (honest, 2026-07-20):**
+
+(i) **arm4d (`ll_energy_coef=0.05`) is the batch's clear winner and the first A1 to beat A0
+on energy.** CoT 0.897 -> **0.465** (-48%), power 317 -> 154 W (-51%), at *unchanged*
+tracking (vx 0.064 vs 0.063) and with the best err_yaw (0.109), lowest action rate (0.92),
+lowest arm velocity (0.300) and best orientation (0.028) of any A1 run. The probe confirms
+no hierarchy damage (HL 0.060 / LL 0.073 vs the control's 0.055 / 0.063). It clears S4''s
+stretch bar "CoT <= A0-v2" (0.465 < 0.541). **Two honest caveats:** the term optimizes
+*exactly* the quantity the benchmark scores (same normalization), so the CoT number is
+partly tautological - the independent wins are the action-rate, arm-velocity and
+orientation improvements; and the saving comes with a SHORT stride (0.361 vs A0's 0.590),
+i.e. the mechanism is "move less violently", not "stride better".
+
+(ii) **S4''s honest disconfirmer must be logged: A0+energy matches the saving without
+regressing tracking.** CoT **0.440** at vx 0.087 (control 0.088) - a *flat* policy with the
+same term is more efficient than the hierarchy with it. The S4' pass criterion required
+A0+energy to fail to match or to regress tracking; it did neither. **The claim "the
+hierarchy buys energy" is not supported by this batch.** The surviving A1 advantage is
+tracking at comparable energy (arm4d 0.064/0.069 vs A0+energy 0.087/0.113), which is a
+real trade but not the energy story the A1a line was premised on.
+
+(iii) **arm7 (explicit PD) is a hard TRAINING FAILURE, not a lever result.** Training
+`mean_episode_length` sat at ~9 steps for all 10k iterations (baseline reaches 1000 by
+it 2000) and mean reward never turned positive (-9.83 final vs +45.09). The policy never
+learned to stand; the bench numbers (ep_len 4.0, err_yaw 4.11, 6249 W) just measure
+thrashing. Almost certainly an actuator-config defect (implicit-servo kp/kd and the derived
+action scale do not transfer unchanged to an explicit torque PD). **WL-E suspect (i) remains
+UNTESTED**; the arm needs a config fix and a retrain before any conclusion.
+
+(iv) **arm1 (cadence coef) is closed as negative and monotonic**: 1.0 -> CoT 1.108 (+24%),
+2.0 -> 1.413 (+58%), both with worse tracking. Keeper 0.5 beats both. Consistent with the
+historical S5 result that raising this weight destabilizes rather than helps.
+
+(v) **arm2 (cot coef) is within run-to-run noise**: 0.15 -> 0.788 and 0.25 -> 0.800 BOTH
+beat the 0.2 control (0.897), which is non-monotonic and therefore evidence of seed spread,
+not a coefficient effect. Read: do not re-tune this knob on 1 seed; keep 0.2. This row is
+also the batch's own calibration of noise magnitude - **CoT differences below ~15% are not
+resolvable here.**
+
+(vi) **arm5 (ankle-roll anchor) is quietly excellent and essentially free**: best HL/LL
+probe errors in the entire set (0.041 / 0.057), joint-lowest `gabs_vx` (0.110), best
+height_dev (0.0040), CoT -15%, tracking equal-best. Cost: `ub_arm_vel` 0.454 vs 0.413.
+
+(vii) **arm4c (foot clearance) is the only stride lever that works**: stride 0.352 -> **0.649**
+(+84%), the closest any A1 run gets to A0's 0.590, directly targeting the deploy-blocking
+clearance shortfall (bridge 0.5 m/s failures, swing apex 0.050-0.057 m vs A0's 0.065-0.098).
+Cost: worst orientation in the set (0.056, 2x control) and tracking -28%.
+
+(viii) **arm4b (foot slip) is the worst arm**: probe HL err vx 0.142 and `gabs_vx` 0.266 /
+`gabs_vy` 0.520 (goal magnitudes ballooning), worst tracking, highest arm velocity. Drop it.
+
+(ix) **arm3 (stand-still) is UNJUDGED by this protocol.** Its target defect (unsettled
+in-place stepping) is invisible to an aggregate bench that resamples commands every 3-8 s.
+Aggregate CoT is mildly worse (0.963), tracking is unchanged, and the probe shows the
+joint-lowest `gabs_vx` (0.110), consistent with a calmer policy. Needs a dedicated stand
+evaluation before any verdict.
+
+(x) **The fix0p8 control does not replicate table (e) - cause OPEN, two candidates.** Config
+verified correct (`cadence_period_range (0.8, 0.8)`, `hl_cadence_source: random`,
+`hl_cot_coef 0.0`), but achieved stride is **0.384 against a commanded 0.8 s** - a 2:1 ratio -
+with the lowest `gait_match` in the batch (0.896). **Eval integrity confirmed** (the user's
+challenge, 2026-07-20): re-benching the OLD 2026-07-11 fix0p8 reproduces his numbers exactly
+(`model_8000`: stride **0.790**, CoT **0.633**; `model_10000`: 0.779 / 0.662), so `play.py`
+restores the pinned cadence correctly and the two runs genuinely differ. A config diff shows
+the **only** functional difference is `ll_posture_weights` (the promoted arm anchor), with
+`resampling_time_range` (3,8)->(3,20) as a second, smaller changed variable. Two live
+explanations, NOT yet discriminated:
+  - **(x-a) Arm-momentum suppression.** Clamping the arms removes the counter-swing that
+    makes long strides feasible, forcing a short-stride, higher-CoT gait. This would resolve
+    table (f)'s explicitly-open "arm-momentum vs run-chaos" question in favour of arm
+    momentum, and it would apply to the WHOLE batch (every arm inherits the weights).
+    Supporting: old fix0p8 `ub_arm_vel` 0.618 / `ub_pose_dev` 0.041 vs new 0.466 / 0.0059.
+  - **(x-b) Double-tap measurement artifact.** `stride_period_s` divides by touchdown count
+    (`play.py:498`), so a stuttering foot HALVES the reported stride. The user's 2026-07-20
+    replay observation (right foot touches down twice before the left lifts) makes a 2:1
+    ratio exactly what a double-tap would produce. If so the stride never dropped at all and
+    the metric is lying.
+  **The Arm 10 probe discriminates these directly** (per-foot touchdown counts) and MUST run
+  before either (x-a) or (x-b) is treated as settled. Until then, treat the whole `stride`
+  column of table (g) as provisional, and do NOT conclude "the HL cadence now wins" on the
+  premise question.
+
+(xi) **arm8 (wide DR) fails its own stated bar in sim** ("bench within noise of baseline"):
+vx +58%, err_yaw 3x, orient_dev 2x, though stable (0 falls, stride preserved). Whether the
+robustness is worth it can only be settled on the bridge replica. **arm9 (correlated noise)
+is free** (every metric within or near noise of the control) and therefore cheap to adopt
+if the replica shows the intended calmer stand under `hrl.state_noise`. Both still need
+their replica half - neither was run.
+
+**Protocol caveat applying to the whole batch: 1 seed per arm.** Item (v) is direct
+in-batch evidence that ~10-15% CoT differences are seed noise. Treat any ranking below that
+margin as provisional, and note that combinations are NOT additive - arm 6 is the standing
+counter-example (its target metric improved 3.7x while tracking regressed, because every
+added LL term dilutes the finite goal-tracking gradient).
 
 ### Arm 6 — heel-to-toe roll-over / ankle push-off (researched -> approved 2026-07-17; formulation A trains)
 
@@ -809,7 +961,7 @@ events (an exp kernel imprints a wrong reference HARD - do not hand-pick these);
 peak terminal-stance ankle-pitch power -> `P_scale`. Only `sigma` and `k` remain free
 knobs after the probe.
 
-**Decision (planning-chat review + Liam go, 2026-07-17):** implement BOTH terms as
+**Decision (planning-chat review + the user go, 2026-07-17):** implement BOTH terms as
 LL-intrinsic coefficients defaulting to 0.0 (byte-identical baseline, matching the
 batch discipline), run the probe, then train **formulation A only** as the arm-6 slot,
 on the same batch base as the other arms (arm-calmed cadence-HL + cot0.2, i.e. the
@@ -898,7 +1050,7 @@ fight against velocity tracking inside the shared LL capacity. A coef sweep (e.g
 of this hand-off's scope — one training run, formulation A only, per the approved
 decision). Planning-chat call on whether/how to sweep.
 
-**Correction (2026-07-19-20, Liam's visual replay at pinned `vx=0.9`): the roll-over is
+**Correction (2026-07-19-20, the user's visual replay at pinned `vx=0.9`): the roll-over is
 NOT visible** — reconciled with, not contradicting, the RMSE-to-reference win above. The
 probe-measured reference itself has almost no amplitude: `theta_hs -0.253 -> theta_to
 -0.275` is a ROM of ~0.022 rad (**1.3 degrees**), because it was measured off the
@@ -916,3 +1068,145 @@ probe-first methodology itself (measuring the reference off a gait that doesn't 
 the thing the reward is meant to induce) — whether to hand-pick a larger,
 biomechanically-anchored reference instead (reopening the spec) is a planning-chat
 decision, out of this hand-off's scope.
+
+**Formulation B trained + corrected (2026-07-20).** `ll_pushoff_coef=0.5` (same
+untuned-magnitude caveat as A), same base config, local, `a1a_cot0p2_cad0p5_pushoff0p5_s42`.
+Tracking held up much better than A's (aggregate err_vx 0.067 vs D2's 0.064, ss@0.5/1.0
+close to D2 — nowhere near A's ~2x regression), but energy got WORSE (CoT 0.898→1.012,
++13%; A improved it -21%) — the opposite tradeoff from A.
+
+**Then the user's visual replay at `model_7400`, pinned `vx=0.9`, caught a second, more
+serious defect: the robot looked like it was lifting its toes at liftoff (dorsiflexion),
+not pushing off through them (plantarflexion).** Direction-check replay on `model_10000`
+confirmed it quantitatively — **100% of the rewarded power** (n=8965 gated steps) was
+earned while `qd < 0`, and every in-window bout ended more negative (mean -0.176 rad,
+**~10 degrees** — a real, large motion, unlike A's sub-visible ROM).
+
+**Root cause: the 2026-07-17 constants probe's sign convention was backwards from the
+start.** It inferred plantarflexion-vs-dorsiflexion direction from a correlational signal
+on the D2 baseline (theta_hs -0.253 vs theta_to -0.275) that was smaller than its own
+noise (0.022 rad signal vs 0.073-0.126 rad std) — not solid evidence. A forward-kinematics
+sweep of the raw XML (`mujoco.mj_kinematics`, no policy/dynamics — just how a toe-forward
+point's world height changes as the joint angle changes) settles it unambiguously:
+increasing `ankle_pitch` moves the toe DOWN (plantarflexion); decreasing moves it UP
+(dorsiflexion) — the **opposite** of the original claim. So `power = tau*qd` with plain
+`ReLU` (the original formula) only ever checked "concentric vs eccentric," not
+"plantarflexion vs dorsiflexion" — both directions of concentric work satisfied it
+equally, and the LL found dorsiflexion easier. This also retroactively reinterprets
+formulation A: its measured `theta_to < theta_hs` reference was training the LL toward
+tighter DORSIFLEXION at toe-off, i.e. reinforcing the same defect it was meant to fix
+(at negligible amplitude, which is why it wasn't visually obvious for A the way it was
+for B's much larger swing).
+
+**Fix (`mdp.ankle_pushoff_power`, `rewards.py`):** gate on `qd > 0` (the corrected
+plantarflexion direction) before the ReLU, so only power delivered while actively
+plantarflexing counts. **`P_scale` recalibrated 40.0 → 3.0W**: re-measuring the D2
+baseline's terminal-window power WITH the corrected gate, only 33.7% of bouts show ANY
+plantarflexion-direction sample at all, and that power is tiny (median 0.34W / p90 1.48W
+/ max 17.96W, n=335) — the old 40W value was calibrated almost entirely against
+dorsiflexion power and would have starved the corrected reward of gradient. 3.0W sits
+between the corrected p90 and max (full derivation in the `ll_pushoff_p_scale`
+docstring, `rl_cfg.py`). Smoke-tested byte-identical at coef=0, sane nonzero at 0.5.
+
+**Corrected retrain launched 2026-07-20**: `a1a_cot0p2_cad0p5_pushoff0p5fix_s42`
+(W&B `tonvo8bp`), same protocol (10001it/4096envs/seed42, local). Bench + a repeat of
+the direction-check diagnostic pending — this is the read that actually tests whether
+formulation B, correctly gated, can produce a genuine, visible push-off.
+
+### Arm 10 — left/right gait symmetry (specced 2026-07-20, awaiting probe + approval)
+
+**Defect (the user, replay observation 2026-07-20):** the right foot touches down **twice
+before the left foot lifts** - a stutter/double-tap - and A1 shows a persistent left/right
+asymmetry in leg behaviour across runs, not a one-off.
+
+**Why nothing in the current LL intrinsic catches this:**
+1. `feet_gait` (`rewards.py:218`) reduces with `.mean(dim=1)` over the two feet, so one
+   leg's systematic schedule violation is **diluted** by the other leg's good match. A run
+   can report `gait_match` 0.95 with one leg persistently off-schedule.
+2. Nothing in the LL intrinsic compares the two legs **to each other**. The goal-distance
+   reward is body-level (velocity), the posture anchor is per-joint and absolute (not
+   left-right relative), and cadence/pitchref are each per-foot schedule matches.
+3. **Measurement blind spot (found 2026-07-20):** `stride_period_s` (`play.py:498`) is
+   `eval_time / mean touchdowns-per-foot`, so a double-tap **inflates** the touchdown count
+   and reports a spuriously **SHORT** stride. Every `stride` number in tables (d)/(g) needs
+   an asterisk until the stutter is quantified - including the (x) read on the fix0p8
+   control, whose 0.384 against a commanded 0.8 s is exactly a 2:1 ratio and may be a
+   double-tap artifact rather than the failure-to-entrain it was written up as.
+
+**Reference implementation (surveyed 2026-07-20, both workspace copies):** `joint_mirror`
+= `Σ_pairs (q_a - q_b)²`, mean over pairs. It exists in **two** repos and is
+**byte-identical** between them (verified by diff, same `joint_mirror_joints_cache`
+attribute name): `unitree_rl_lab/.../tasks/locomotion/mdp/rewards.py:208` (Unitree's own
+reference, the likely origin) and `h12_locomotion_rma/.../mdp/rewards.py:214` (the copy).
+
+**Honest provenance note: it is DEAD CODE in BOTH.** Neither repo references it outside its
+own `rewards.py` - no `mirror_joints` list, no weight, no task config, in either. So there
+is **no validated recipe to inherit**: no joint pairing, no tuned magnitude, and no evidence
+anyone ever trained with it. "The references use this" is NOT available as justification,
+and the antiphase/hopping objection below is un-refuted by any working example.
+
+What the same reference DOES configure for gait (`unitree_rl_lab` H1 velocity cfg, lines
+290-318) is worth noting instead: `feet_gait` weight 0.5 with `offset [0.0, 0.5]` /
+threshold 0.55 (this is the direct ancestor of our own `feet_gait`, near-identical phase
+math - theirs sums over feet without normalizing, ours means, so **both carry the same
+one-bad-foot dilution**), `feet_slide` -0.2, and `foot_clearance_reward` weight 20.0 at
+**target_height 0.15** (vs our 0.10 - a useful datapoint for arm 4c, given WL-E measured our
+swing apex ~35% under its own target).
+
+**CRITICAL adaptation (do not port naively):** applied instantaneously to the *sagittal*
+leg joints (hip_pitch, knee, ankle_pitch), `(q_L - q_R)²` forces the two legs **into
+phase**, which is a HOPPING gait, not walking. Our schedule is deliberately antiphase
+(`offset=[0.0, 0.5]`, `hrl_runner.py:116`), so a naive port would fight the cadence term
+and destroy the gait. Two correct adaptations:
+
+**Formulation A - half-period phase-shifted joint mirror** (the true gait-symmetry
+statement: the left leg should do what the right leg did half a stride ago):
+
+```
+tau = T/2                                   (T = commanded stride period, env.hrl_period)
+r_mirror = exp( -(1/sigma^2) * mean_pairs ( q_L(t) - m * q_R(t - tau) )^2 )
+m = +1 for sagittal pairs (hip_pitch, knee, ankle_pitch)
+m = -1 for lateral/rotational pairs (hip_roll, hip_yaw, ankle_roll)  [mirror about the sagittal plane]
+```
+
+Needs a short per-env joint-position history ring buffer (~T/2 at 50 Hz = ~8-20 steps,
+per-env length since T varies with the HL's commanded period). Command-gated like every
+other gait term. **Overlap warning:** the LL posture anchor already pins `hip_yaw`/`hip_roll`
+(`hrl_runner.py:130-131`), so including those pairs partly duplicates existing machinery -
+prefer starting with the sagittal pairs only, where the antiphase structure lives.
+
+**Formulation B - step-time symmetry index** (contact-based, no history buffer, the
+clinical gait-symmetry standard - and it targets the observed defect most directly):
+
+```
+t_LR = time from left touchdown to the next right touchdown
+t_RL = time from right touchdown to the next left touchdown
+SI   = |t_LR - t_RL| / (t_LR + t_RL)        in [0, 1]
+r_sym = exp( -SI^2 / sigma_si^2 )            (or the plain penalty -SI)
+```
+
+A double-tap drives one interval toward 0, so `SI -> 1` and the penalty saturates: it fires
+on exactly the behaviour the user saw. Stateful (per-foot last-touchdown timestamps), mirroring
+the existing `feet_swing_height` class pattern (`rewards.py:230`) which already keeps
+per-env buffers.
+
+**Recommendation: B is the primary training arm, A is implemented alongside but untrained**
+(the Arm 6 pattern). B is cheaper, needs no history buffer, is robust to the HL changing the
+period mid-episode, and maps 1:1 onto the observed defect; A is the more general statement
+but carries the phase-shift machinery and the sign-convention risk above.
+
+**Probe FIRST (required, offline, no cluster - the Arm 6 precedent):** instrument a replay
+over D2 (control), arm4c (longest stride), arm4d (batch winner), the new fix0p8 control and
+the OLD 2026-07-11 fix0p8, logging per-foot touchdown counts, the `t_LR`/`t_RL` step-time
+distributions, the realized double-support fraction vs the scheduled ~12% (duty 0.56), and
+per-foot `gait_match`. Deliverables: (a) the actual `SI` magnitude per checkpoint = the
+defect size and the `sigma_si` anchor; (b) whether per-foot touchdown counts are unequal
+(the asymmetry, quantified); (c) **whether `stride_period_s` is corrupted by double-taps in
+this batch**, which decides if table (g)'s stride column and read (x) need revising.
+STOP and report before training.
+
+**Coefficient:** untuned, no A0 term to mirror the magnitude from. Arm 6's lesson was that
+matching `ll_cadence_coef` (0.5) was TOO STRONG and cost tracking, so start **lower
+(~0.25)** and flag it as a first guess expecting a second pass.
+
+**Status:** specced 2026-07-20, not implemented, not trained. Probe + approval gate first.

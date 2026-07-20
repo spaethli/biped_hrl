@@ -85,11 +85,24 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_pushoff_coef: float = train_cfg.get("ll_pushoff_coef", 0.0)
     self.ll_pushoff_w: float = train_cfg.get("ll_pushoff_w", 0.175)
     self.ll_pushoff_p_scale: float = train_cfg.get("ll_pushoff_p_scale", 40.0)
+    # WL-D arm 10 (2026-07-20): left/right gait symmetry. Formulation B (step-time
+    # symmetry index) is the primary training arm; formulation A (phase-shifted joint
+    # mirror) is implemented alongside but left untrained pending B's read (the arm 6
+    # pattern). sigma_si anchored to the arm-10 probe (2026-07-20): healthy checkpoints
+    # (D2/arm4d/old-fix0p8) measure SI 0.010-0.016, the one severely double-tapping
+    # checkpoint measures 0.235 - 0.06 sits between, keeping healthy gaits near r~0.9-1.0
+    # while strongly penalizing the observed defect magnitude.
+    self.ll_symmetry_coef: float = train_cfg.get("ll_symmetry_coef", 0.0)
+    self.ll_symmetry_sigma_si: float = train_cfg.get("ll_symmetry_sigma_si", 0.06)
+    self.ll_mirror_coef: float = train_cfg.get("ll_mirror_coef", 0.0)
+    self.ll_mirror_sigma: float = train_cfg.get("ll_mirror_sigma", 0.15)
     # Per-step alive bonus (from-scratch survival economics; see rl_cfg docstring).
     self.ll_alive_coef: float = train_cfg.get("ll_alive_coef", 0.0)
     self.ll_goal_kernel: str = train_cfg.get("ll_goal_kernel", "l2")
     # A1a (ADR-0004): HL gait-cadence channel + cost-of-transport HL objective.
     self.hl_cadence: bool = train_cfg.get("hl_cadence", False)
+    if self.ll_mirror_coef != 0.0 and not self.hl_cadence:
+      raise ValueError("ll_mirror_coef requires hl_cadence=True (reads env.hrl_period).")
     self.cadence_period_range = tuple(train_cfg.get("cadence_period_range", (0.5, 1.4)))
     self.ll_cadence_coef: float = train_cfg.get("ll_cadence_coef", 0.0)
     self.hl_cot_coef: float = train_cfg.get("hl_cot_coef", 0.0)
@@ -142,6 +155,19 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self._ankle_asset_cfg = SceneEntityCfg(
       "robot", joint_names=("left_ankle_pitch_joint", "right_ankle_pitch_joint"))
     self._ankle_asset_cfg.resolve(env.unwrapped.scene)
+    # WL-D arm 10 (2026-07-20): stateful helpers for both formulations, constructed
+    # unconditionally (cheap; mirrors _ankle_asset_cfg's unconditional resolve above) -
+    # gated at the call site instead, like every other WL-D lever.
+    self._symmetry = mdp_rewards.foot_step_symmetry(env.num_envs, device)
+    self._mirror_left_cfg = SceneEntityCfg(
+      "robot", joint_names=("left_hip_pitch_joint", "left_knee_joint", "left_ankle_pitch_joint"))
+    self._mirror_right_cfg = SceneEntityCfg(
+      "robot", joint_names=("right_hip_pitch_joint", "right_knee_joint", "right_ankle_pitch_joint"))
+    self._mirror_left_cfg.resolve(env.unwrapped.scene)
+    self._mirror_right_cfg.resolve(env.unwrapped.scene)
+    self._mirror = mdp_rewards.phaseshift_joint_mirror(
+      env.num_envs, len(self._mirror_left_cfg.joint_ids), self.cadence_period_range[1],
+      env.unwrapped.step_dt, device)
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     # Stage D (2026-07-14): per-joint posture multipliers (pattern -> weight; unmatched
     # joints stay 1.0). NOT renormalized, so all-ones = the uniform penalty and raising
@@ -453,6 +479,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
       stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
       pitchref_sum = pushoff_sum = 0.0
+      symmetry_sum = mirror_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       with torch.inference_mode():
         uenv = self.env.unwrapped
@@ -594,6 +621,26 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
               use_commanded_phase=True, **self._gait_params)
             r_lo = r_lo + self.ll_pushoff_coef * po
             pushoff_sum += (self.ll_pushoff_coef * po).mean().item()
+          # WL-D arm 10 formulation B (2026-07-20): step-time left/right symmetry index,
+          # the primary training arm. Reset the per-env touchdown-time buffer for envs
+          # that reset THIS step before reading this step's touchdowns (no RewardManager
+          # drives this loop, so the runner resets it explicitly - see foot_step_symmetry).
+          if self.ll_symmetry_coef != 0.0:
+            self._symmetry.reset_envs(dones)
+            sym = self._symmetry(
+              uenv, sensor_name="feet_ground_contact", command_name="twist",
+              command_threshold=0.1, sigma_si=self.ll_symmetry_sigma_si)
+            r_lo = r_lo + self.ll_symmetry_coef * sym
+            symmetry_sum += (self.ll_symmetry_coef * sym).mean().item()
+          # WL-D arm 10 formulation A: implemented alongside B but left untrained
+          # pending B's read (the arm 6 pattern). Requires hl_cadence (env.hrl_period).
+          if self.hl_cadence and self.ll_mirror_coef != 0.0:
+            self._mirror.reset_envs(dones)
+            mir = self._mirror(
+              uenv, left_asset_cfg=self._mirror_left_cfg, right_asset_cfg=self._mirror_right_cfg,
+              sigma=self.ll_mirror_sigma, command_name="twist", command_threshold=0.1)
+            r_lo = r_lo + self.ll_mirror_coef * mir
+            mirror_sum += (self.ll_mirror_coef * mir).mean().item()
           # A1a: cost-of-transport training metric (dimensionless; gated to commanded motion).
           # Power sub-formula deduped onto the shared helper (2026-07-17, WL-D) - the
           # window/floor/signed-distance logic below stays a deliberately separate
@@ -692,6 +739,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/energy_pen": energy_sum / n_steps,
         "ll/pitchref_rew": pitchref_sum / n_steps,
         "ll/pushoff_rew": pushoff_sum / n_steps,
+        "ll/symmetry_rew": symmetry_sum / n_steps,
+        "ll/mirror_rew": mirror_sum / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
         "hl/cot_pen": cot_pen_sum / (n_steps // self.c),  # per-window mean (0 when off)
         **{f"hl/{k}": v for k, v in hl_losses.items()},

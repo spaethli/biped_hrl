@@ -72,6 +72,16 @@ gait-spillover set below (cadence, step length, stance width).
 - **Depends on:** Track C verdict (is the measurable quantity accurate enough to close the loop?).
 - **Single source of truth to edit:** `goal_components` in `config/h1_2_a1/rl_cfg.py`;
   `GoalSpace` in `rl/hrl/goal_space.py`.
+- **Track C verdict now exists, real hardware, not just sim (2026-07-20) — see #8 below.**
+  The velocity basis's real-hardware feasibility failed outright (not a noise/drift question):
+  the onboard `SportModeState` estimator is structurally unavailable under a custom low-level
+  policy. That makes this idea live rather than deferred — it's the one candidate basis that
+  doesn't depend on that estimator at all (raw IMU accelerometer, proven reliable on hardware
+  same session, E2). Still needs the goal-basis-swap effort above (target-map rework) plus its
+  own open question: the goal state currently drives a *held* target constant for the whole HL
+  window, natural for velocity (converge and hold) but not obviously so for acceleration (which
+  integrates over a held window rather than converging). Not spec'd. Deploy-side pointer:
+  `doc/hrl/A1a_deploy_plan.md` "E1/E2 result" (fallback option 3).
 
 ### #5 — Extend the goal space with more LL-conditioning inputs
 - **Idea.** Add goal dimensions (beyond the current 7-dim `velocity/orientation/height`) so the
@@ -195,6 +205,24 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
 - **Kind.** A *measurement*, not a training change — **start now, fully parallel** with Tracks B.
   Likely realizable with existing sim sensors + `play.py` logging; no new architecture.
 - **Feeds:** the #6 decision (velocity vs acceleration basis) and the deployment milestone.
+- **Real-hardware verdict landed (2026-07-20) — stronger and worse than a drift question.**
+  Ran the real-robot equivalent of this probe on the H1-2 (`read_all_joints` + IMU/odometry
+  logging, both a wireless-controller stand and a debug/low-level stand matching mjlab's
+  FixStand start pose). Result: not noise or drift — `SportModeState`/`odommodestate`
+  (position, velocity, height, yaw rate) was **exactly zero for the entire session**, every
+  phase, both stand modes. Root cause (`ros2 topic info -v` + Unitree docs): this estimator
+  only populates while Unitree's own built-in motion-control service owns the robot, and it
+  goes silent the moment a custom low-level policy takes command — which A1 needs to run at
+  all. **So the base-velocity goal basis is not "noisy on hardware," it is structurally
+  unavailable under our control scheme**, full stop — a decisive answer, not a
+  characterization. Companion check (M5's IMU-convention part, not #8 itself): the
+  specific-force fall-trigger assumption DID hold on real hardware (E2 PASS). Full
+  writeup: `doc/hrl/A1a_deploy_plan.md` "E1/E2 result"; mechanism note in
+  `.claude/docs/deployment.md` "A1 needs a runtime base-velocity estimate". Does not block
+  A0 (no velocity dependency); blocks A1 hardware, and is now the concrete trigger making
+  #6's accel/IMU basis (M4) a live decision rather than a deferred one — a custom
+  leg-odometry estimator and the absolute-`V*` LL retrain are the other two options on the
+  table, undecided.
 
 ### #8b — Train on *noisy* sensor velocity, not ground-truth (estimator-noise DR) — **VALIDATED (2026-06-22)**
 - **Idea.** Feed the LL goal a **deploy-realistic base-velocity estimate** (DR: bias + drift +

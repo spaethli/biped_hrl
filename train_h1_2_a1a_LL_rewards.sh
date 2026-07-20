@@ -34,9 +34,25 @@
 #                     rl_cfg default); True tags _ankle
 #   LL_PITCHREF       float (default 0.0)          -> arm 6 formulation A (heel-to-toe
 #                     roll-over); >0 tags _pitchrefXpXX. theta_hs/theta_to/sigma/k stay
-#                     at the rl_cfg probe-derived defaults (not swept here). Formulation
-#                     B (ll_pushoff_coef) stays untrained (A1a_plan.md Arm 6 decision) -
-#                     no knob exposed in this script.
+#                     at the rl_cfg probe-derived defaults (not swept here). A's read
+#                     (2026-07-17/19): tracking regresses, roll-over stays sub-visible
+#                     (~1.3->2.4 degrees ROM) - weaker candidate than the other arms.
+#   LL_PUSHOFF        float (default 0.0)          -> arm 6 formulation B (ankle
+#                     push-off power burst); >0 tags _pushoffXpXX. w/P_scale stay at the
+#                     rl_cfg defaults (not swept here). **Direction-corrected 2026-07-20**
+#                     (see rewards.py/rl_cfg.py): the original formula rewarded a
+#                     dorsiflexion toe-lift habit as readily as genuine plantarflexion
+#                     push-off (caught via the user's visual replay); fixed with a qd>0 gate
+#                     + P_scale recalibrated 40->3.0W for the corrected (much sparser)
+#                     power distribution.
+#   LL_SYMMETRY       float (default 0.0)          -> arm 10 formulation B (step-time
+#                     left/right symmetry index, the primary training arm - see
+#                     A1a_plan.md "Arm 10"); >0 tags _symXpXX. sigma_si stays at the
+#                     rl_cfg probe-derived default (not swept here).
+#   LL_MIRROR         float (default 0.0)          -> arm 10 formulation A (half-period
+#                     phase-shifted joint mirror); >0 tags _mirrorXpXX. Implemented but
+#                     left UNTRAINED pending formulation B's read (the arm 6 pattern) -
+#                     no launch example below on purpose.
 #   NUM_ENVS, MAX_ITER
 #
 # Examples:
@@ -59,6 +75,10 @@
 #   sbatch --export=ALL,ANKLE_ANCHOR=True train_h1_2_a1a_LL_rewards.sh
 #   # arm 6 (formulation A only):
 #   sbatch --export=ALL,LL_PITCHREF=0.5 train_h1_2_a1a_LL_rewards.sh
+#   # arm 6 (formulation B, exploratory):
+#   sbatch --export=ALL,LL_PUSHOFF=0.5 train_h1_2_a1a_LL_rewards.sh
+#   # arm 10 (formulation B, the primary training arm):
+#   sbatch --export=ALL,LL_SYMMETRY=0.25 train_h1_2_a1a_LL_rewards.sh
 
 eval "$($WORK/miniconda3/bin/conda shell.bash hook)"
 conda activate unitree_mjlab_h1_2_rl
@@ -86,6 +106,9 @@ LL_FOOTCLEAR=${LL_FOOTCLEAR:-0.0}
 LL_ENERGY=${LL_ENERGY:-0.0}
 ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
 LL_PITCHREF=${LL_PITCHREF:-0.0}
+LL_PUSHOFF=${LL_PUSHOFF:-0.0}
+LL_SYMMETRY=${LL_SYMMETRY:-0.0}
+LL_MIRROR=${LL_MIRROR:-0.0}
 NUM_ENVS=${NUM_ENVS:-4096}
 MAX_ITER=${MAX_ITER:-10001}
 
@@ -130,14 +153,31 @@ ANKLE_FLAG=""; ANKLE_TAG=""
 [[ "$ANKLE_ANCHOR" == "True" ]] && ANKLE_FLAG="--agent.ll-posture-anchor-ankle-roll True" \
   && ANKLE_TAG="_ankle"
 
-# Arm 6 (formulation A only - see A1a_plan.md Arm 6): tagless at 0.0/off.
+# Arm 6 (formulation A - see A1a_plan.md Arm 6): tagless at 0.0/off.
 PR_FLAG=""; PR_TAG=""
 awk "BEGIN{exit !($LL_PITCHREF > 0)}" && PR_FLAG="--agent.ll-pitchref-coef ${LL_PITCHREF}" \
   && PR_TAG="_pitchref$(echo $LL_PITCHREF | tr '.' 'p')"
 
-RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${ANKLE_TAG}${PR_TAG}_s${SEED}"
+# Arm 6 (formulation B, exploratory - see A1a_plan.md Arm 6): tagless at 0.0/off.
+PO_FLAG=""; PO_TAG=""
+awk "BEGIN{exit !($LL_PUSHOFF > 0)}" && PO_FLAG="--agent.ll-pushoff-coef ${LL_PUSHOFF}" \
+  && PO_TAG="_pushoff$(echo $LL_PUSHOFF | tr '.' 'p')"
 
-echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  seed=${SEED}"
+# Arm 10 formulation B (the primary training arm - A1a_plan.md "Arm 10"): tagless at
+# 0.0/off.
+SYM_FLAG=""; SYM_TAG=""
+awk "BEGIN{exit !($LL_SYMMETRY > 0)}" && SYM_FLAG="--agent.ll-symmetry-coef ${LL_SYMMETRY}" \
+  && SYM_TAG="_sym$(echo $LL_SYMMETRY | tr '.' 'p')"
+
+# Arm 10 formulation A: implemented, left UNTRAINED pending B's read (the arm 6
+# pattern) - included here for the same reason PR_FLAG/PO_FLAG both exist above.
+MIR_FLAG=""; MIR_TAG=""
+awk "BEGIN{exit !($LL_MIRROR > 0)}" && MIR_FLAG="--agent.ll-mirror-coef ${LL_MIRROR}" \
+  && MIR_TAG="_mirror$(echo $LL_MIRROR | tr '.' 'p')"
+
+RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${ANKLE_TAG}${PR_TAG}${PO_TAG}${SYM_TAG}${MIR_TAG}_s${SEED}"
+
+echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
 
 python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS} \
@@ -145,7 +185,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --agent.seed ${SEED} \
     --agent.ll-cadence-coef ${LL_CADENCE_COEF} \
     $CAD_FLAG \
-    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $ANKLE_FLAG $PR_FLAG \
+    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $ANKLE_FLAG $PR_FLAG $PO_FLAG $SYM_FLAG $MIR_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

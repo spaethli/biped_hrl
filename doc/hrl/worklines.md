@@ -31,10 +31,10 @@ runs in delegated chats/agents (see `.claude/skills/delegate`). Decisions from t
 | WL | What | Owner chat | State |
 |---|---|---|---|
 | **A** | Planning, sequencing, doc/gate ownership, hand-offs | THIS chat | live |
-| **B** | Deploy pipeline: bridge gates G2.x, sim2sim/sim2real battery, hardware prep (plan: `A1a_deploy_plan.md`). **Split into two tracks 2026-07-20 (see "WL-B track split"): B0 = A0-first hardware (PRIORITY), B1 = A1 keeper.** | was the planning chat (de facto); hand off to a fresh WL-B chat (prompts below) | **B0 (A0-first, NEW 2026-07-20, Liam's call): the first real-robot deploy is A0, not the hierarchy.** Ladder + 4 A0-specific items + DR ruling → `A1a_deploy_plan.md` "A0-first hardware track"; G3's "M2 winner only" corrected to A1-track-only scoping, so A0 does not wait on M2/WL-D. Open A0 items: un-fixed whole-body hold in `State_RLBase`, `h1_2_limits.h` knee disagreement (now blocking), formal analyzer-recorded G2 pass, split-vs-live arms call. **B1 (A1 keeper):** G2.0 done; G2.1 rerun pending with the clamp-filter build. 2026-07-17 headless pre-check found an open latency x goal-scale finding (4ms takeover fall under the TRUE trained yaw scale) - see `A1a_deploy_plan.md` G2.0 pre-check entry - blocks recommending the live re-run until characterized/mitigated. **That finding is goal-scale-specific and does NOT block B0.** |
-| **C** | HL held-command fix: verify the HIRO-relabel hold-bias suspect in `td3.py`, then fix + validate | NEW chat (prompt below) | **CLOSED 2026-07-16.** Relabel FALSIFIED; the blocker was an eval artifact. F2 shipped (baked goal_scale) + WL-B's C++ pin + deployed pair re-exported; tables (e)/(f) re-measured. Gate RELEASED. Residuals handed on: 2 decisions for Liam in the WL-D prompt (arm-weight base config; cadence premise), (b) err_yaw re-run, live FSM check → WL-B G2.0. |
-| **D** | Reward/gait lever batch on the cluster (levers above) | NEW chat (prompt below) | **2026-07-17: implemented + committed (`6828ca4`), 15 runs launched on the cluster** (base config promoted - arm weights now default; results pending). **Arm 6 (heel-toe roll-over): probe + both formulations implemented, formulation A trained + benched LOCALLY 2026-07-17/18** (`a1a_cot0p2_cad0p5_pitchref0p5_s42`, `ll_pitchref_coef=0.5` untuned) — RMSE-to-reference improved (0.114→0.031 rad) but tracking regressed (LL reach err vx 0.064→0.139, follow-through ratio 0.743→0.130); **correction 2026-07-19/20 (Liam's visual replay @ pinned vx=0.9): the roll-over ISN'T actually visible** — the probe-measured reference has only ~1.3° ROM (measured off a gait that barely rolled over to begin with), so tighter tracking of it can't produce a visible fix; post-training ROM only reached ~2.4°. **Revised read: weaker candidate than the other WL-D arms** — costs tracking for a non-visible gait change. Chicken-and-egg limit in the probe-first ("measure, don't hand-pick") methodology itself; whether to hand-pick a bigger biomechanical reference (reopening the spec) is open for this chat to decide. See `A1a_plan.md` "Arm 6" for full tables/reads. Compared against D2 (local), not the cluster batch's own control (hadn't synced locally at bench time) - re-diff once it lands. |
-| **E** | Training-nominal realism + IsaacGym parity audit (added 2026-07-16): A0 barely lifts feet on the vendor-plant bridge; fric-0.1-nominal control run at kl 0.01 (the ADR-0005 fric stall predates kl 0.01 - untested); mjlab vs IsaacGym training-parameter comparison | WL-E chat | **CLOSED 2026-07-17 (Liam's ruling): nominal stays fric 0, fric-0.1 stays a sanctioned option (constants comment updated); audit arms folded into WL-D (arms 7-9)** |
+| **B** | Deploy pipeline: bridge gates G2.x, sim2sim/sim2real battery, hardware prep (plan: `A1a_deploy_plan.md`). **Split into two tracks 2026-07-20 (see "WL-B track split"): B0 = A0-first hardware (PRIORITY), B1 = A1 keeper.** | was the planning chat (de facto); hand off to a fresh WL-B chat (prompts below) | **B0 (A0-first, NEW 2026-07-20, the user's call): the first real-robot deploy is A0, not the hierarchy.** Ladder + 4 A0-specific items + DR ruling → `A1a_deploy_plan.md` "A0-first hardware track"; G3's "M2 winner only" corrected to A1-track-only scoping, so A0 does not wait on M2/WL-D. Open A0 items: un-fixed whole-body hold in `State_RLBase`, `h1_2_limits.h` knee disagreement (now blocking), formal analyzer-recorded G2 pass, split-vs-live arms call. **B1 (A1 keeper):** G2.0 done; G2.1 rerun pending with the clamp-filter build. 2026-07-17 headless pre-check found an open latency x goal-scale finding (4ms takeover fall under the TRUE trained yaw scale) - see `A1a_deploy_plan.md` G2.0 pre-check entry - blocks recommending the live re-run until characterized/mitigated. **That finding is goal-scale-specific and does NOT block B0.** |
+| **C** | HL held-command fix: verify the HIRO-relabel hold-bias suspect in `td3.py`, then fix + validate | NEW chat (prompt below) | **CLOSED 2026-07-16.** Relabel FALSIFIED; the blocker was an eval artifact. F2 shipped (baked goal_scale) + WL-B's C++ pin + deployed pair re-exported; tables (e)/(f) re-measured. Gate RELEASED. Residuals handed on: 2 decisions for the user in the WL-D prompt (arm-weight base config; cadence premise), (b) err_yaw re-run, live FSM check → WL-B G2.0. |
+| **D** | Reward/gait lever batch on the cluster (levers above) | NEW chat (prompt below) | **2026-07-17: implemented + committed (`6828ca4`), 15 runs launched on the cluster** (base config promoted - arm weights now default; results pending). **Arm 6 (heel-toe roll-over): probe + both formulations implemented, formulation A trained + benched LOCALLY 2026-07-17/18** (`a1a_cot0p2_cad0p5_pitchref0p5_s42`, `ll_pitchref_coef=0.5` untuned) — RMSE-to-reference improved (0.114→0.031 rad) but tracking regressed (LL reach err vx 0.064→0.139, follow-through ratio 0.743→0.130); **correction 2026-07-19/20 (the user's visual replay @ pinned vx=0.9): the roll-over ISN'T actually visible** — the probe-measured reference has only ~1.3° ROM (measured off a gait that barely rolled over to begin with), so tighter tracking of it can't produce a visible fix; post-training ROM only reached ~2.4°. **Revised read: weaker candidate than the other WL-D arms** — costs tracking for a non-visible gait change. Chicken-and-egg limit in the probe-first ("measure, don't hand-pick") methodology itself; whether to hand-pick a bigger biomechanical reference (reopening the spec) is open for this chat to decide. See `A1a_plan.md` "Arm 6" for full tables/reads. Compared against D2 (local), not the cluster batch's own control (hadn't synced locally at bench time) - re-diff once it lands. **BATCH BENCHED 2026-07-20 by the planning chat** (all 15 + D1/D2/A0 controls + goal probes; tables (g)/(h)/(i) + reads in `A1a_plan.md`). Headlines: **arm4d `ll_energy_coef=0.05` is the winner** (CoT -48%, first A1 to beat A0's 0.541, tracking unchanged, calmest action rate/arms/orientation of any A1); **S4''s honest disconfirmer fires - A0+energy reaches CoT 0.440 without regressing tracking**, so "the hierarchy buys energy" is unsupported; **arm7 explicit-PD is a hard TRAINING FAILURE** (ep_len ~9 for all 10k iters, WL-E suspect (i) still untested); arm1 closed negative; arm2 within seed noise (the batch's own noise calibration: <~15% CoT is unresolvable); arm4b drop; arm3 unjudged by this protocol. **Comparator correction: D1 is NOT the zero-point (it trained rs8, arms trained rs20) - D2 is.** **Arm 10 (left/right gait symmetry) specced 2026-07-20** from the user's replay (right foot double-taps before the left lifts) - prompt below, probe-first; its probe also discriminates the open read (x) and tests whether `stride_period_s` is corrupted by double-taps. **Arm 6 formulation B trained + a real bug caught + fixed (2026-07-20):** `ll_pushoff_coef=0.5` trained with tracking close to D2 (unlike A) but CoT +13% (opposite tradeoff from A); the user's visual replay @ `model_7400` caught the LL lifting its toes (dorsiflexion) instead of pushing off (plantarflexion) - confirmed quantitatively (100% of rewarded power at `qd<0`, ~10° swing) and traced to the **2026-07-17 constants probe's sign convention being backwards** (weak correlational evidence, disproven by a forward-kinematics XML sweep: increasing `ankle_pitch` = plantarflexion, not decreasing). Retroactively means formulation A's reference was ALSO calibrated toward dorsiflexion (negligible-amplitude, so invisible). Fixed: `qd>0` direction gate + `P_scale` 40→3.0W (old value was calibrated almost entirely off dorsiflexion power). Corrected retrain launched (`a1a_cot0p2_cad0p5_pushoff0p5fix_s42`, W&B `tonvo8bp`); bench pending. Full detail → `A1a_plan.md` "Arm 6". |
+| **E** | Training-nominal realism + IsaacGym parity audit (added 2026-07-16): A0 barely lifts feet on the vendor-plant bridge; fric-0.1-nominal control run at kl 0.01 (the ADR-0005 fric stall predates kl 0.01 - untested); mjlab vs IsaacGym training-parameter comparison | WL-E chat | **CLOSED 2026-07-17 (the user's ruling): nominal stays fric 0, fric-0.1 stays a sanctioned option (constants comment updated); audit arms folded into WL-D (arms 7-9)** |
 
 Gate for WL-C -> WL-D: a verdict on the relabel suspect (confirmed + fix identified,
 or falsified + next suspect named). Either way WL-D launches then, on the best-known
@@ -61,7 +61,7 @@ degeneracy' is an EVAL-TOOLING ARTIFACT". Summary:
    rs20's rationale is void; the "sustained-command under-tracking = deploy risk" read is
    void. A0 hold numbers stay valid.
 
-**F2 SHIPPED 2026-07-16 (Liam: "do fix 2, the others are deprecated"). F1/F3 dropped —
+**F2 SHIPPED 2026-07-16 (the user: "do fix 2, the others are deprecated"). F1/F3 dropped —
 F2 subsumes both.**
 
 The goal scale is now a **property of the policy, baked into the checkpoint** (like the
@@ -103,9 +103,9 @@ derives live), eval takes the baked path (no shim), ONNX metadata carries
 `goal_scale=0.750,0.500,1.000,1.000,1.000,1.000,0.200`. Resume re-bakes the live value.
 Smokes deleted, `WANDB_MODE=disabled` (no runs created).
 
-### Deploy decision (Liam, 2026-07-16): deploy.yaml stays the last call — which is exactly why the scale must leave it
+### Deploy decision (the user, 2026-07-16): deploy.yaml stays the last call — which is exactly why the scale must leave it
 
-Liam: *"I want to keep it like this with deploy yaml still being the last call for deployed
+the user: *"I want to keep it like this with deploy yaml still being the last call for deployed
 policies. Maybe I want to limit a policy which is trained on -0.5 to 1 to -0.25 to 0.5 for
 safety reasons."* **Agreed, and F2 does not take that away** — the ONNX `goal_scale` metadata
 owns *only* the goal scale, never the command limits. But the two are the SAME yaml field
@@ -115,7 +115,7 @@ today, and that is a trap:
 
 | consumer | what it does | should follow the operator's safety limit? |
 |---|---|---|
-| `observations.h:118-120` (`velocity_commands`, joystick = **real robot**) | clamps the commanded twist | **YES** — this is the safety limit Liam wants |
+| `observations.h:118-120` (`velocity_commands`, joystick = **real robot**) | clamps the commanded twist | **YES** — this is the safety limit the user wants |
 | `goal_space.h:97,119` (`hrl::GoalSpace::scale/center`) | decodes the HL's `g` into `V*` | **NO** — it is trained policy semantics |
 
 So setting `lin_vel_x: [-0.25, 0.5]` for safety would clamp the joystick **and** silently
@@ -179,7 +179,7 @@ the control's stride 0.357 sits at the cadence band floor (0.35) vs the keeper's
 divergence worth a 2nd seed **only if** someone wants to argue relabeling should be dropped from
 the locked A1 structure. Given `relabel_frac` ≈ 0.03–0.09, HIRO relabeling is close to a no-op
 here; that it is a near-inert component of the "final A1 structure" is itself a reportable
-finding, but dropping it is a structure change and Liam's call, not WL-C's.
+finding, but dropping it is a structure change and the user's call, not WL-C's.
 
 ## WL-E verdict (2026-07-17): friction does NOT stall at kl 0.01; foot drag is training-side, not plant-side
 
@@ -220,20 +220,20 @@ Full evidence: ADR-0005 Amendment 2. Summary of the four deliverables:
    0.5 / none / 0.3 (test: one A0 arm with their ranges); (iii) obs-noise temporal
    structure, CorelLab low-passes velocity noise at 2 Hz (drift-like) vs our white
    noise (test: correlated-noise arm, judge bridge stand twitch under state_noise).
-4. **Recommendation** (rebase ruling = Liam's): adopting frictionloss 0.1 as nominal
+4. **Recommendation** (rebase ruling = the user's): adopting frictionloss 0.1 as nominal
    is now known to cost nothing in-sim and buy a small bridge margin, and it closes a
    real train→deploy/hardware gap (vendor sim and real joints have friction; the
    references' fric-free training is a pipeline artifact, not a principle). But it
    re-opens a v1→v2-style rebase (all v2 checkpoints invalid). If the rebase is
    unwanted now, the fallback stays ADR-0005's original: vendor-sim eval + A2 Wide DR
    randomizes over friction. The run's env.yaml carries its own fric-0.1 record.
-   **RULED 2026-07-17 (Liam): nominal stays fric 0; fric 0.1 stays a sanctioned
+   **RULED 2026-07-17 (the user): nominal stays fric 0; fric 0.1 stays a sanctioned
    option for a later rebase window (constants comment updated to cite Amendment 2
    instead of the falsified stall); audit follow-ups added to WL-D as arms 7-9.**
 
 ## WL-B track split (2026-07-20): B0 = A0-first hardware, B1 = A1 keeper
 
-**Liam's call: the first real-robot deployment is the flat A0 policy, not the hierarchy.**
+**the user's call: the first real-robot deployment is the flat A0 policy, not the hierarchy.**
 Kept inside WL-B (not a new workline) because both tracks share one bridge, one
 `bridge_replica.py`, one flight recorder, one E-gate set and one C++ tree; a separate
 workline would only create a second editor of `deploy/`.
@@ -301,7 +301,7 @@ Tasks, in order:
    positive. Propose the fix; approval before committing limit changes.
 3. Item 3: the formal G2 recording pass for A0. Pre-check headlessly with
    scripts/bridge_replica.py (vendor + stress, 0/2/4 ms) and scripts/onnx_parity.py, then
-   prepare exact per-session key scripts for Liam's GUI bridge session covering
+   prepare exact per-session key scripts for the user's GUI bridge session covering
    G2.1/G2.2/G2.3/G2.4/G2.7 per the A0 gate table. Analyze the produced logs with
    scripts/deploy_gate_analyzer.py and write gate verdicts into the A1a_deploy_plan.md
    status block (edit in place, house style, honest reads). G2.2's achieved-vx and stride
@@ -310,7 +310,7 @@ Tasks, in order:
    ss@1.0 0.077 (t90 0.9 s), 0 falls.
 4. Item 4: recommend split-vs-live arms for A0's first hardware session (decision 7's
    "split first" was written for the wild A1 keeper; A0's arms are already calm,
-   ub_arm_vel 0.143). Recommendation only; the call is Liam's.
+   ub_arm_vel 0.143). Recommendation only; the call is the user's.
 5. E1/E2 prep (hardware, policy NOT in control): the logging checklist for onboard odometry
    in low-level mode + the IMU specific-force check. Note in your report that E1's bar is
    SOFTER for A0 than the plan's A1-era text implies, because A0's actor never consumes the
@@ -364,7 +364,7 @@ list in worklines.md in order.
 WL-C/WL-B changes landed 2026-07-16 that you inherit (do NOT re-implement):
 - The A1 goal scale is now pinned from the HL ONNX `goal_scale` metadata
   (`State_RLHRL` -> `hrl::GoalSpace::freeze_scale`), so deploy.yaml's
-  `commands.base_velocity.ranges` is a pure operator clamp in `delta` mode and Liam may
+  `commands.base_velocity.ranges` is a pure operator clamp in `delta` mode and the user may
   narrow it for safety (e.g. lin_vel_x -0.25..0.5). This also silently fixed the old
   yaw-scale defect (was 0.5 vs 1.0 trained).
 - The deployed keeper ONNX pair was RE-EXPORTED to carry that metadata
@@ -380,7 +380,7 @@ WL-C/WL-B changes landed 2026-07-16 that you inherit (do NOT re-implement):
   under that mode (State_RLHRL warns). Deployed config is `delta`.
 - Candidate note: post-F2 re-measurement makes D1/D2 (arm-calm) dominate the keeper on
   holds + arms + tracking, losing only CoT/stride. The staged keeper predates the arm
-  lever; the candidate choice is Liam's, not yours — flag it, don't switch. The user runs GUI bridge sessions; you
+  lever; the candidate choice is the user's, not yours — flag it, don't switch. The user runs GUI bridge sessions; you
 prepare exact per-session key scripts, then analyze the produced logs
 (scripts/deploy_gate_analyzer.py on logs/deploy_safety/<ts>_hrl.csv + the safety CSV)
 and write gate verdicts into A1a_deploy_plan.md status block (edit in place, house
@@ -502,7 +502,7 @@ Arms:
    [DONE 2026-07-17: spec approved after WL-A review; implementation now has its own
    hand-off prompt below ("WL-D arm 6").]
 
-WL-E transfer-audit arms (added 2026-07-17 per Liam; source: worklines.md WL-E verdict
+WL-E transfer-audit arms (added 2026-07-17 per the user; source: worklines.md WL-E verdict
 item 3 + ADR-0005 Amendment 2). These are A0-scoped (train on `Unitree-H1_2-Flat`,
 optB config), judged by the deterministic bench PLUS the bridge replica
 (`scripts/bridge_replica.py`, both scenes, 0/2/4 ms, clearance + qvel_rms); pass =
@@ -583,6 +583,73 @@ Tasks, in order:
    holds/tracking/falls vs the batch control.
 
 Do not touch: deploy/ (WL-B), td3.py/relabeling, the other arms' coefficients or any
+existing reward-term defaults.
+```
+
+## Hand-off prompt: WL-D arm 10 (left/right gait symmetry)
+
+Model: **sonnet class** (spec is written; the probe read returns for approval before any
+training). Paste into a fresh chat:
+
+```
+Implement and launch WL-D arm 10 (left/right gait symmetry) per the spec in
+doc/hrl/A1a_plan.md section "Arm 10" - read it first and follow it exactly, including the
+CRITICAL adaptation note. Spec-first per CLAUDE.md; the spec is not up for redesign, open
+questions go back to the planning chat.
+
+Motivating defect (the user's replay, 2026-07-20): the right foot touches down TWICE before the
+left foot lifts (a stutter/double-tap), and A1 shows persistent left/right leg asymmetry.
+
+Read also: doc/hrl/A1a_plan.md "WL-D batch results" (tables (g)/(h) + reads, your
+comparators; D2 = 2026-07-14_16-03-57_..._rs20_s42 is the config-matched control, NOT D1)
+and the Arm 6 section (the probe-first pattern this arm repeats, and the cautionary read on
+an over-strong first-guess coefficient).
+
+DO NOT naively port the reference `joint_mirror` (it exists byte-identically in BOTH
+unitree_rl_lab/.../tasks/locomotion/mdp/rewards.py:208 and
+h12_locomotion_rma/.../mdp/rewards.py:214): it penalizes (q_L - q_R)^2 instantaneously,
+which on the sagittal leg joints forces both legs INTO PHASE = hopping, fighting our
+deliberately antiphase schedule (offset [0.0, 0.5], hrl_runner.py:116). It is also DEAD
+CODE in both repos - never configured, no joint pairs, no weight, so there is no validated
+recipe to copy and no working example refuting the hopping objection. Already surveyed
+2026-07-20; do not re-derive this. Use the spec's formulations.
+
+Tasks, in order:
+
+1. PROBE FIRST (offline, no cluster, REQUIRED). Instrument a replay over: D2 (control),
+   arm4c (2026-07-17_21-36-14_*footclear1p0*), arm4d (2026-07-17_21-46-14_*energy0p05*),
+   the new fix0p8 control (2026-07-17_13-27-25_a1a_fix0p8_cad0p5_s42) and the OLD
+   2026-07-11_08-07-55_*fix0p8* run. Log per-foot touchdown counts, the t_LR / t_RL
+   step-time distributions, realized double-support fraction vs the scheduled ~12%
+   (duty 0.56), and PER-FOOT gait_match (not the averaged one). Report: (a) the SI
+   magnitude per checkpoint (defect size + the sigma_si anchor), (b) whether per-foot
+   touchdown counts are unequal, (c) whether stride_period_s is corrupted by double-taps
+   (play.py:498 divides by touchdown count, so a double-tap HALVES the reported stride).
+   Point (c) decides whether table (g)'s stride column and read (x) need revising - flag it
+   to the planning chat either way. STOP for approval before training.
+
+2. Implement BOTH formulations in the LL intrinsic (rewards.py + hrl_runner.py, mirroring
+   how arms 3/4/5/6 were wired): formulation B (step-time symmetry index) as the primary
+   `ll_symmetry_coef`, formulation A (half-period phase-shifted mirror) as
+   `ll_mirror_coef`. Both default 0.0; command-gate both; verify coef 0 reproduces the
+   baseline byte-identically with a short smoke (WANDB_MODE=disabled, delete logs after).
+   Reuse the existing _gait_schedule() helper and the feet_swing_height stateful-class
+   pattern rather than adding new machinery.
+
+3. After approval: launch ONE run - formulation B only - on the same batch base as arms
+   1-9 (extend train_h1_2_a1a_LL_rewards.sh), cluster launch per .claude/docs/cluster.md,
+   10001 iters, 4096 envs, seed 42, name per the deviation convention (e.g. ..._sym0p25_s42).
+   Start the coefficient at ~0.25, NOT 0.5 (Arm 6's first guess at 0.5 was too strong and
+   cost tracking). Formulation A stays implemented-but-untrained pending B's read.
+
+4. Bench at model_10000 per the batch protocol (aggregate + --eval-cmd-vx 0.5/1.0 +
+   [HOLDDIAG] + goal probe), PLUS re-run the step-1 probe on the new checkpoint so the
+   symmetry metrics are directly comparable, PLUS a replay look for the double-tap. Winner
+   bar: the stutter/asymmetry measurably improves without regressing holds/tracking/falls
+   vs D2. Report into A1a_plan.md (extend the stage-D results tables, house style, honest
+   reads) and sync the worklines.md WL-D row.
+
+Do not touch: deploy/ (WL-B), td3.py/relabeling, the other arms' coefficients, or any
 existing reward-term defaults.
 ```
 

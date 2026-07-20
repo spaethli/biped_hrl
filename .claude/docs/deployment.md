@@ -106,12 +106,34 @@ originally sat on the torso-mounted imu SITE, whose ω×r sway component feeds b
 goal delta and destabilizes A1 (keeper slammed ankle limits in 0.2 s; fine with pelvis velocity).
 Both bridge scenes now publish pelvis `frame_vel`; a real estimator must equally output base-frame
 velocity, not imu-frame (E1 gate criterion).
+
+**E1 result on real H1-2 (2026-07-20): FAIL, structural, not a code bug.**
+`unitree_go/msg/SportModeState` (topic `odommodestate`; `read_all_joints.cpp` subscribes to
+the wrong name `sportmodestate`, which doesn't exist, but even the correct topic reads
+all-zero) only populates while Unitree's OWN built-in motion-control service owns the
+robot — it goes silent the moment a custom low-level policy takes command, which is
+required to run ours at all. Confirmed via `ros2 topic info -v` (live publisher, correct
+type, zero payload) plus Unitree's own docs. **Does not block A0** (no velocity
+dependency in its obs). Blocks the eventual A1 hardware attempt; three fallback options
+are on the table (not yet chosen), see `doc/hrl/A1a_deploy_plan.md` "E1/E2 result": (1) a
+custom leg-odometry estimator from joint encoders + IMU (both fine under `lowstate`
+independent of the vendor's motion service), (2) the absolute-`V*` LL retrain below
+(removes the dependency entirely), (3) swap velocity/height for acceleration in the goal
+space — the existing roadmap idea `doc/hrl/hierarchy_benefit_roadmap.md` `#6` / thesis M4,
+not a new idea; this E1 result is the trigger that makes it live rather than deferred.
+E2 (IMU specific-force convention) passed cleanly on the same session.
+
+**Offline hardware sensor validation tool:** `scripts/robot_estimator_check.py` — generic
+analyzer for `read_all_joints` CSV logs (specific-force check, velocity bias/noise,
+a rotation-vs-yaw-rate frame check for base-vs-other-frame estimator bugs, a
+walk-distance integration check). Not gate-specific; point it at any `all_joints_*.csv`
+and mark time windows.
 ### A1 goal scale vs the command-range safety limit (RESOLVED 2026-07-16, WL-C/WL-B)
 
 `deploy.yaml commands.base_velocity.ranges` drives **two unrelated things**:
 
 - `observations.h:118-120` (`velocity_commands`, joystick = the REAL robot) **clamps the
-  commanded twist** → the operator's safety limit; authoritative (Liam: deploy.yaml is the
+  commanded twist** → the operator's safety limit; authoritative (the user: deploy.yaml is the
   last call for deployed policies).
 - `hrl::GoalSpace::scale()` **decodes the A1 HL's `g` into `V*`** → trained policy semantics.
 
@@ -162,7 +184,13 @@ Tooling (2026-07-15/16): `scripts/onnx_parity.py` (step 1, `[PARITY]` json, CPU-
 full chain — pre-session sanity + plant/latency A/B; NOT a substitute for the C++ gates);
 `scripts/deploy_gate_analyzer.py` (per-segment metrics from the `<base>_hrl.csv` telemetry
 that State_RLHRL writes when `H1_2_SAFETY_LOG` is set). Full gate plan:
-`doc/hrl/A1a_deploy_plan.md`.
+`doc/hrl/A1a_deploy_plan.md`. **Two bugs fixed in `bridge_replica.py` (2026-07-17):** a
+variable name collision (`c` = HL decision period, shadowed every tick by the
+swing-clearance instrument's per-contact loop variable also named `c`) crashed any
+`--policy hrl` run — renamed to `con`. Its `gscale` also used to derive from `deploy.yaml`
+ranges (the legacy path) instead of the HL ONNX's `goal_scale` metadata, so it wasn't
+exercising the same scale the real C++ path (`GoalSpace::freeze_scale`) does — fixed to
+read the metadata, falling back to the legacy derivation with a warning if absent.
 
 Both scenes (vendor + stress variant, see Bridge plant above), per candidate checkpoint:
 1. **ONNX↔torch parity** + 27/27 gain/scale lockstep vs both YAMLs (V2-gate procedure).
@@ -211,10 +239,27 @@ safety_logger.h}`; the shared `deploy/include/FSM/State_RLBase.h` guards its log
 - **Flight recorder** (`safety_logger.h`, header-only): active only when `SAFETY_FILTER=1` **and**
   `H1_2_SAFETY_LOG` set. Launch scripts (`h1_2_sim`/`h1_2_real`) auto-set it to
   `logs/deploy_safety/<ts>` (timestamped, no manual preamble). Writes `<base>.csv` (per tick: raw
-  policy `action`=**pre-filter** intent, measured q/dq, IMU quat+accel, α, trigger flags) +
-  `<base>_meta.json` (limits/names/thresholds/dt). Hot-path safe: RAM buffer, flush on exit + ~2.5 s.
-  Limitation: one flat folder, not the per-arch run dir (A0/A1 chosen at runtime by key; deployed
-  ONNX carries no source-run record). For per-arch routing, add a config-driven `safety_log_dir` key.
+  policy `action`=**pre-filter** intent, measured q/dq, IMU quat+accel, α, trigger flags, `entry`
+  id) + `<base>_meta.json` (limits/names/thresholds/dt). Hot-path safe: RAM buffer, flush on exit
+  + ~2.5 s. Limitation: one flat folder, not the per-arch run dir (A0/A1 chosen at runtime by key;
+  deployed ONNX carries no source-run record). For per-arch routing, add a config-driven
+  `safety_log_dir` key.
+  **Multi-attempt sessions (fixed 2026-07-17, two rounds):** `init()` used to truncate the CSV
+  and reset the tick counter on EVERY FSM entry (not once per process), silently destroying an
+  earlier attempt's telemetry (e.g. a fall) the moment a later attempt in the same session got
+  logged. Round 2: A0 and A1 hold SEPARATE `SafetyLogger` instances (`State_RLBase.h` vs.
+  robot-local `State_RLHRL.h`), so a per-instance "have I run before" check still let the FIRST
+  A0->A1 switch in a session truncate A0's data — the new instance had never run, so from ITS
+  view it was still a first entry. Fixed properly: truncate-vs-append is decided by whether the
+  CSV already exists ON DISK (robust across different C++ objects, not instance memory), and
+  `entry` is a process-wide counter (`g_safety_logger_entry`, a C++17 inline global), unique
+  across both same-type retries and cross-type switches. The A1-only `hrl::Telemetry`
+  (`hrl_telemetry.h`, `<base>_hrl.csv`) got the same fix, plus its flush cadence dropped from
+  ~10s to ~2.5s (matching the safety logger) — an abrupt session end (not a clean FSM exit) used
+  to lose the telemetry tail, which is exactly when it matters most; caught once by cross-checking
+  `trig_fall` in the base CSV against an apparently-clean `_hrl.csv`. `deploy_gate_analyzer.py`
+  now also segments on `entry` changes (not just command changes) and never drops a fallen
+  segment under its 3s minimum-duration floor (a fast fall must never be filtered out).
 - **Offline analyzer:** `python scripts/safety_analyzer.py <base>` → `<base>_report.json` +
   `[SAFETY] {json}` one-liner. Reports raw-vs-measured limit-violation rates, filter engagement
   (per trigger), per-joint stats. **Raw violations = target-space aggressiveness** (policy commands
