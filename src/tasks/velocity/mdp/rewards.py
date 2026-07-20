@@ -437,6 +437,7 @@ def cost_of_transport_penalty(
   command_threshold: float = 0.1,
   vel_floor: float = 0.1,
   mass_g: float = 75.0 * 9.81,
+  max_cot: float = 10.0,
   asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
   """Per-step command-gated cost-of-transport analog: P / (m·g·max(|v_cmd|, floor)).
@@ -447,13 +448,22 @@ def cost_of_transport_penalty(
   window-integrated version, this uses COMMANDED speed as the distance-rate proxy
   (not achieved distance), so it needs no window state and can drop into either the
   A0 RewardManager or the A1 LL intrinsic unchanged.
+
+  ``max_cot`` clamps the ratio (not just the denominator floor) - the same catastrophe-
+  bound pattern the LL posture/action-rate penalties use (a torque-limited joint
+  thrashing at near-zero net displacement can spike ``mech_power`` arbitrarily; healthy
+  CoT sits at 0.5-1.5 across every measured run, so 10 is a physical-blowup bound, not
+  a tuning knob). Deliberately NOT applied to the HL's own hl_cot_coef window
+  computation (hrl_runner.py) - that path feeds a TD3 replay buffer, not an on-policy
+  PPO rollout, so it lacks the single-sample GAE-corruption failure mode the clamp
+  guards against (2026-07-17 WL-D discussion).
   """
   asset: Entity = env.scene[asset_cfg.name]
   command = env.command_manager.get_command(command_name)
   assert command is not None
   cmd_speed = command[:, :2].norm(dim=-1)
   gated = (cmd_speed > command_threshold).float()
-  cot = mech_power(asset) / (cmd_speed.clamp(min=vel_floor) * mass_g)
+  cot = (mech_power(asset) / (cmd_speed.clamp(min=vel_floor) * mass_g)).clamp(max=max_cot)
   return cot * gated
 
 

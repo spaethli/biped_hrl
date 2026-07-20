@@ -650,3 +650,142 @@ only by abandoning the command — penalty domination reproduces from scratch at
 - The absolute-CoT gap vs A0 (v1: A0 0.577 vs cadence LLs ≥1.0 at fixed vx=0.5) is an
   LL-efficiency limitation orthogonal to the hierarchy claim; if it persists on v2 it is
   reported as future work, not hidden by the within-architecture framing.
+
+## Stage D (WL-D, 2026-07-17): reward/gait lever batch — implementation + launch record
+
+Per `worklines.md` WL-D (gate released 2026-07-16 by WL-C). Two decisions from Liam
+before launch: (1) promote D1/D2's arm weights to the A1 default (done — see below);
+(2) keep arms 1-2 (cadence HL) even though fix0p8 beats every HL-cadence policy on CoT
+at equal tracking — Liam's call: cadence is "the main reason for hierarchy... otherwise
+there is no real benefit... not even training is faster," so the arms stay, plus a
+fix0p8+weights control re-run on the new base (needed since table (e)'s fix0p8 predates
+the arm-weight promotion). Open question raised alongside this (not yet investigated):
+why the A0 baseline CoT (0.537) is still well below every A1a variant even after the
+arm-calming — see the reads in the WL-D chat transcript for a first-pass hypothesis
+(arm-swing energy, self-chosen-cadence cost, and the LL never seeing A0's efficiency/
+quality shaping terms — exactly what arm 4 tests).
+
+**Base config promoted** (`config/h1_2_a1/rl_cfg.py`): `ll_posture_weights` default
+changed from `None` to `{shoulder: 16, elbow: 4, wrist: 4, ankle_roll: 4 (inert unless
+arm 5's flag is set)}` — D1's temp rl_cfg edit, now permanent. Every WL-D arm trains on
+this base; D1 (`2026-07-14_11-39-53_..._pose0p5shw16-4...s42`, `model_10000`) **is**
+this base config unmodified and serves as the batch's zero-point (no retrain needed).
+
+**Implementation (commit `6828ca4`):**
+- New shared `mdp.mech_power()` helper (`src/tasks/velocity/mdp/rewards.py`) and
+  `mdp.cost_of_transport_penalty()` — a stateless per-step CoT analog
+  `-w·P/(m·g·max(|v_cmd|, floor))`, clamped `max_cot=10.0` (catastrophe bound, same
+  pattern as the LL posture/action-rate clamps — see below). Wired as an inert-by-
+  default (`weight=0.0`) A0 reward term (`velocity_env_cfg.py`) — this **is** the
+  parked S4' "A0+energy" control, now buildable — and as the arm-4d LL-intrinsic
+  mirror (`ll_energy_coef`).
+- Arm 3 (`ll_stand_still_coef`) and arm 4a-4c (`ll_angmom_coef`, `ll_footslip_coef`,
+  `ll_footclear_coef`) mirror A0's `stand_still` / `angular_momentum_penalty` /
+  `feet_slip` / `feet_clearance` into the LL intrinsic (`hrl_runner.py`), same pattern
+  as the existing posture/action-rate additions. All default 0.0 (off).
+- Arm 5 (`ll_posture_anchor_ankle_roll`): extends the LL posture anchor's joint regex
+  set (`hrl_runner.py` anchor_patterns) to include `.*ankle_roll.*` when set; weight
+  comes from the `ankle_roll` entry already in the promoted `ll_posture_weights` (4.0 -
+  the joint's range is only +-15 deg, far narrower than the shoulders).
+- Arm 7 (explicit-PD actuation): no new actuator code needed — mjlab already ships
+  `IdealPdActuatorCfg` (explicit torque = kp*(q_des-q)+kd*(qdot_des-qdot) via a
+  `<motor>` actuator) as an alternative to the implicit `<position>` servo
+  (`BuiltinPositionActuatorCfg`). New `H1_2_ARTICULATION_EXPLICIT_PD` +
+  `get_h1_2_robot_cfg(explicit_pd=True)` + task `Unitree-H1_2-Flat-ExplicitPD`.
+- Arm 8 (wide DR): `apply_wide_dr()` bundles push x/y +-0.5->+-1.5, new
+  `dr.body_mass` event on `torso_link` (add, -1..+3 kg), foot-friction floor 0.3->0.1.
+  Task `Unitree-H1_2-Flat-WideDR`.
+- Arm 9 (correlated noise): new `LowPassNoiseModel`/`LowPassNoiseModelCfg`
+  (`src/tasks/velocity/mdp/noise.py`) - a first-order EMA filter over the same i.i.d.
+  innovations `Unoise` draws, rescaled so the filtered process's stationary std matches
+  the original (unfiltered) amplitude (~2Hz cutoff). Swaps the actor's `base_ang_vel`
+  and `joint_vel` noise terms. Task `Unitree-H1_2-Flat-CorrNoise`.
+- Launchers: `train_h1_2_a1a_LL_rewards.sh` (new, dedicated - this batch's baseline is
+  cadence-HL + cot0.2 on the arm-calmed base, which is NOT `train_h1_2_a1.sh`'s own
+  tagless default, so a separate script avoids re-specifying 3+ flags on every one of
+  11 sbatch invocations); `train_h1_2.sh` extended with `ENV_VARIANT` (arms 7/8/9) and
+  `ENERGY_COEF` (A0+energy) knobs.
+- **Catastrophe clamp + power dedupe (2026-07-17, same commit day, follow-up)**:
+  `cost_of_transport_penalty`'s ratio is clamped (`max_cot=10.0`) - unlike the posture/
+  action-rate penalties (clamped since the 2026-06-30 `it9624` crash: unbounded L2 let
+  a sim blow-up spike the LL PPO update to ~-5e5 in one step), the CoT term had no cap
+  on the numerator, only a denominator floor. Deliberately **NOT** applied to the HL's
+  own `hl_cot_coef` window computation in `hrl_runner.py` (Liam's call, 2026-07-17):
+  that path feeds a TD3 replay buffer (off-policy, one bad transition diluted across a
+  500k-capacity buffer and clipped double-Q), not an on-policy PPO rollout whose GAE
+  backward-recursion lets one outlier corrupt many timesteps' advantages at once - the
+  failure mode the clamp guards against doesn't transfer with the same urgency. The
+  power SUB-formula (only) is deduped: `hrl_runner.py`'s window-CoT now calls
+  `mdp.mech_power()` instead of an inline copy; the window/floor/signed-distance logic
+  stays a deliberately separate formula (achieved distance, not commanded speed;
+  window-integrated, not per-step) - not unified, since it answers a different question.
+- All new coefficients default to 0.0/off (byte-identical baseline unless swept); every
+  mechanism individually smoke-tested (`WANDB_MODE=disabled`, small envs/iters) before
+  commit, including the comma-syntax tuple CLI override for `cadence_period_range`
+  (`--agent.cadence-period-range 0.8,0.8`) - confirmed WORKING 2026-07-17, so the old
+  "tyro tuple override broken" note (2026-07-03) was a space-vs-comma syntax mistake,
+  not a real limitation; no scalar-flag workaround was needed for the fix0p8 control.
+
+**Launched 2026-07-17** (15 runs, `sbatch --export=ALL,...`, 10001 it / 4096 envs /
+seed 42 each): the fix0p8+weights control; arm 1 (`ll_cadence_coef` 1.0/2.0); arm 2
+(`hl_cot_coef` 0.15/0.25); arm 3 (`ll_stand_still_coef=1.0`); arm 4a-d
+(`ll_angmom_coef=0.025`, `ll_footslip_coef=0.25`, `ll_footclear_coef=1.0`,
+`ll_energy_coef=0.05` - first-guess values matched to each mirrored term's own A0
+weight magnitude, NOT tuned, expect a second pass); arm 5 (`ll_posture_anchor_ankle_roll`);
+arm 7/8/9 (`ENV_VARIANT=explicit_pd|wide_dr|corr_noise`); A0+energy
+(`ENERGY_COEF=0.05`). Results pending.
+
+### Arm 6 (research only, no training arm) — heel-to-toe roll-over / ankle push-off
+
+Two prior-work lines ground this: **Siekmann et al., "Sim-to-Real Learning of All
+Common Bipedal Gaits via Periodic Reward Composition"** (arXiv:2011.01387) - the origin
+of the clock/phase-indexed-indicator mechanism this codebase's `feet_gait` term already
+implements, generalizable from a binary stance/swing indicator to *any* phase-indexed
+reference (foot orientation, joint power); and the biomechanics literature on ankle
+push-off (Winter-style gait analysis) - **ankle plantarflexion push-off generates >80%
+of the positive mechanical power in late stance**, concentrated in the last ~15-20% of
+stance (the "A2 burst"), the dominant propulsive event in human walking.
+
+**Formulation A - foot-pitch phase-locking** (a *matching* problem - a real target
+trajectory exists -> exp kernel, consistent with `track_linear_velocity`/
+`variable_posture`). Reuses `feet_gait`'s existing phase math (`period`, `offset`,
+`duty` threshold):
+
+```
+phi_i = leg_phase_i / duty   (in [0,1), defined only while foot i is in stance)
+theta_ref(phi) = theta_hs + (theta_to - theta_hs) * (1 - cos(pi * phi^k)) / 2
+r_pitch = exp( -(1/sigma^2) * sum_i 1[stance_i] * (theta_i - theta_ref(phi_i))^2 )
+```
+
+using the `ankle_pitch` joint angle directly as the foot-pitch proxy (no new sensor).
+`k>1` concentrates the rotation late in stance, matching the real ankle-angle curve
+(flat through midstance, rapid near push-off) rather than a naive symmetric raised-
+cosine. **Open item before implementing:** verify the `ankle_pitch` sign convention
+(axis `0 1 0`, range `[-0.897, 0.524]`, nominal standing `-0.3`) empirically - which
+direction is dorsiflexion vs. plantarflexion - by reading the joint angle at a
+heel-strike vs. toe-off instant in an existing replay, before fixing `theta_hs`/`theta_to`.
+
+**Formulation B - ankle push-off power burst** (a *maximization/bonus* problem - no
+upper target -> must be bounded-ABOVE, not a raw unbounded ratio, per the same
+clamp-discipline that motivated the `cost_of_transport_penalty` clamp above):
+
+```
+P_i = tau_ankle_pitch_i * theta_dot_ankle_pitch_i
+g_i = 1[ phi_i in [1-w, 1) ]                      (w ~ 0.15-0.2, the terminal-stance window)
+r_pushoff = sum_i g_i * ( 1 - exp( -ReLU(P_i) / P_scale ) )
+```
+
+saturates toward 1 per foot as push-off power grows, instead of rewarding unbounded
+torque-cranking during the gated window (the failure mode this project already hit
+once, when an uncapped HL action std blew up chasing a weak gradient). `ReLU` so only
+forward-delivering push-off power is rewarded, not absorption/eccentric work.
+
+Both reuse existing plumbing only (`feet_gait`'s phase math, the `mech_power`
+primitive) - no new sensors needed. A harder third option (center-of-pressure
+progression heel->toe, using the foot's 7 individual collision sub-geoms) was
+considered and parked: `feet_ground_contact` nets each foot's contact into one scalar
+(`reduce="netforce"`), so this would need new per-geom contact sensing - flagged as a
+stretch goal, not specced.
+
+**Status:** specced, not implemented, not trained. Liam is checking this spec with the
+delegation/planning chat before any code or training slot is committed.

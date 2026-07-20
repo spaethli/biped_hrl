@@ -552,8 +552,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             r_lo = r_lo + self.ll_cadence_coef * cad
             cadence_sum += (self.ll_cadence_coef * cad).mean().item()
           # A1a: cost-of-transport training metric (dimensionless; gated to commanded motion).
+          # Power sub-formula deduped onto the shared helper (2026-07-17, WL-D) - the
+          # window/floor/signed-distance logic below stays a deliberately separate
+          # formula from cost_of_transport_penalty (achieved distance, not commanded
+          # speed; window-integrated, not per-step), so only the power term is shared.
           rd_ = uenv.scene["robot"].data
-          _pw = (rd_.qfrc_actuator * rd_.joint_vel).abs().sum(dim=1)
+          _pw = mdp_rewards.mech_power(uenv.scene["robot"])
           _eng = (uenv.command_manager.get_command("twist")[:, :2].norm(dim=-1) > 0.1).float()
           _e_step = _pw * _eng * uenv.step_dt
           _d_step = rd_.root_link_lin_vel_b[:, :2].norm(dim=-1) * _eng * uenv.step_dt
