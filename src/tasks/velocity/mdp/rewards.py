@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -185,20 +186,23 @@ def feet_clearance(
   return cost
 
 
-def feet_gait(
+def _gait_schedule(
         env: ManagerBasedRlEnv,
         period: float,
         offset: list[float],
         threshold: float,
-        command_threshold: float,
-        command_name: str,
-        sensor_name: str,
         use_commanded_phase: bool = False,
         swing_time: float = 0.0,
         duty_max: float = 0.70,
-) -> torch.Tensor:
-    sensor: ContactSensor = env.scene[sensor_name]
-    is_contact = sensor.data.current_contact_time > 0
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | float]:
+    """Shared phase/duty schedule: per-leg phase in [0,1) + the scheduled-stance mask.
+
+    Factored out of ``feet_gait`` (WL-D arm 6, 2026-07-17) so the roll-over/push-off
+    terms below read the identical schedule - never a second hardcoded copy of the
+    duty threshold (A1a_plan.md Arm 6 gate pin iii). Returns ``(leg_phase, is_stance,
+    duty)``; ``duty`` is the threshold actually applied (float, or a per-env [B,1]
+    tensor under the d(T) schedule) so callers can compute ``phi = leg_phase / duty``.
+    """
     # A1a: when the HL commands cadence, key the schedule to the accumulated per-env phase
     # (env.hrl_phase in [0,1)) instead of the fixed-period clock. Default off -> A0 unchanged.
     if use_commanded_phase:
@@ -215,6 +219,26 @@ def feet_gait(
     offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(1, -1)
     leg_phase = (global_phase + offsets) % 1.0
     is_stance = (leg_phase < threshold)
+    return leg_phase, is_stance, threshold
+
+
+def feet_gait(
+        env: ManagerBasedRlEnv,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        command_threshold: float,
+        command_name: str,
+        sensor_name: str,
+        use_commanded_phase: bool = False,
+        swing_time: float = 0.0,
+        duty_max: float = 0.70,
+) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    is_contact = sensor.data.current_contact_time > 0
+    _, is_stance, _ = _gait_schedule(
+        env, period, offset, threshold, use_commanded_phase, swing_time, duty_max
+    )
     reward = (is_stance == is_contact).float().mean(dim=1)
     if command_name is not None:
         command = env.command_manager.get_command(command_name)
@@ -225,6 +249,106 @@ def feet_gait(
             scale = (total_command > command_threshold).float()
             reward *= scale
     return reward
+
+
+def _command_gate(env: ManagerBasedRlEnv, command_name: str, command_threshold: float) -> torch.Tensor:
+    """``1[|cmd| > threshold]`` gate shared by the Arm 6 terms below (same rule feet_gait
+    and the other command-gated terms in this module already apply, factored out once
+    there were 2 new call sites)."""
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    linear_norm = torch.norm(command[:, :2], dim=1)
+    angular_norm = torch.abs(command[:, 2])
+    total_command = linear_norm + angular_norm
+    return (total_command > command_threshold).float()
+
+
+def ankle_pushoff_pitchref(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg,
+        command_name: str,
+        command_threshold: float,
+        theta_hs: float,
+        theta_to: float,
+        k: float,
+        sigma: float,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        use_commanded_phase: bool = False,
+        swing_time: float = 0.0,
+        duty_max: float = 0.70,
+) -> torch.Tensor:
+    """WL-D arm 6, formulation A: heel-to-toe ankle roll-over phase-locking.
+
+    Matches ``ankle_pitch`` to a raised-cosine reference interpolated between the
+    measured heel-strike/toe-off angles over scheduled-stance progress ``phi``
+    (Siekmann et al. arXiv:2011.01387's phase-indexed-reference generalization of
+    ``feet_gait``). ``asset_cfg.joint_ids`` must list the ankle_pitch joints in the
+    SAME left/right order as ``offset`` (see ``feet_gait``'s own offset convention).
+
+    Gate pins (A1a_plan.md Arm 6, 2026-07-17 review): (i) command-gated - the phase
+    clock keeps running at stand, so an ungated term rewards ankle-marching in place;
+    (ii) gated on the SCHEDULED stance window (not actual contact) - ``phi`` is only
+    well-defined on the schedule, and ``feet_gait`` already pushes contact to match it.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    leg_phase, is_stance, duty = _gait_schedule(
+        env, period, offset, threshold, use_commanded_phase, swing_time, duty_max
+    )
+    phi = leg_phase / duty
+    theta_ref = theta_hs + (theta_to - theta_hs) * (1 - torch.cos(math.pi * phi.pow(k))) / 2
+    ankle_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    sq_err = (ankle_pos - theta_ref).square() * is_stance.float()
+    reward = torch.exp(-sq_err.sum(dim=1) / sigma**2)
+    return reward * _command_gate(env, command_name, command_threshold)
+
+
+def ankle_pushoff_power(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg,
+        sensor_name: str,
+        command_name: str,
+        command_threshold: float,
+        w: float,
+        p_scale: float,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        use_commanded_phase: bool = False,
+        swing_time: float = 0.0,
+        duty_max: float = 0.70,
+) -> torch.Tensor:
+    """WL-D arm 6, formulation B: ankle push-off power burst (implemented, untrained
+    until formulation A's read - A1a_plan.md Arm 6).
+
+    Saturating bonus on signed ankle-pitch power (``tau * qd`` - NOT ``mech_power``,
+    which is abs-summed over all joints) in the terminal-stance window, bounded above
+    (per the same clamp-discipline that motivated ``cost_of_transport_penalty``'s
+    clamp) instead of rewarding unbounded torque-cranking. ``ReLU`` so only
+    forward-delivering power counts, not absorption/eccentric work.
+
+    Gate pin: SCHEDULE **and** actual contact (stricter than formulation A) - phase-only
+    gating would let the LL harvest the bonus by driving the ankle in the air after an
+    early liftoff; power without ground contact is thrash, not propulsion. Known watch
+    item (monitor in replay, not a redesign): ReLU keeps the positive half of any ankle
+    dither inside the window, so dithering nets some reward, capped at the same ceiling
+    as genuine push-off.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    is_contact = sensor.data.current_contact_time > 0
+    leg_phase, is_stance, duty = _gait_schedule(
+        env, period, offset, threshold, use_commanded_phase, swing_time, duty_max
+    )
+    phi = leg_phase / duty
+    gate = is_stance & (phi >= (1.0 - w)) & is_contact
+    tau = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+    qd = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    power = tau * qd
+    bonus = 1.0 - torch.exp(-torch.relu(power) / p_scale)
+    reward = (gate.float() * bonus).sum(dim=1)
+    return reward * _command_gate(env, command_name, command_threshold)
 
 
 class feet_swing_height:

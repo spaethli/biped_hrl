@@ -74,6 +74,17 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_footslip_coef: float = train_cfg.get("ll_footslip_coef", 0.0)
     self.ll_footclear_coef: float = train_cfg.get("ll_footclear_coef", 0.0)
     self.ll_energy_coef: float = train_cfg.get("ll_energy_coef", 0.0)
+    # WL-D arm 6 (2026-07-17): heel-to-toe roll-over (A) / push-off power burst (B).
+    # Probe-derived defaults (D2 checkpoint constants probe, 2026-07-17); sigma/k/w are
+    # free knobs (sigma anchored to env_cfgs.py's std_walking ankle_pitch tolerance).
+    self.ll_pitchref_coef: float = train_cfg.get("ll_pitchref_coef", 0.0)
+    self.ll_pitchref_theta_hs: float = train_cfg.get("ll_pitchref_theta_hs", -0.253)
+    self.ll_pitchref_theta_to: float = train_cfg.get("ll_pitchref_theta_to", -0.275)
+    self.ll_pitchref_sigma: float = train_cfg.get("ll_pitchref_sigma", 0.15)
+    self.ll_pitchref_k: float = train_cfg.get("ll_pitchref_k", 2.0)
+    self.ll_pushoff_coef: float = train_cfg.get("ll_pushoff_coef", 0.0)
+    self.ll_pushoff_w: float = train_cfg.get("ll_pushoff_w", 0.175)
+    self.ll_pushoff_p_scale: float = train_cfg.get("ll_pushoff_p_scale", 40.0)
     # Per-step alive bonus (from-scratch survival economics; see rl_cfg docstring).
     self.ll_alive_coef: float = train_cfg.get("ll_alive_coef", 0.0)
     self.ll_goal_kernel: str = train_cfg.get("ll_goal_kernel", "l2")
@@ -108,6 +119,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
                              command_threshold=0.1, command_name="twist",
                              sensor_name="feet_ground_contact",
                              swing_time=self.cadence_swing_time)
+    # WL-D arm 6 (2026-07-17): formulation A gates on the SCHEDULE only (gate pin ii,
+    # A1a_plan.md Arm 6) - no sensor_name needed, so it's dropped from the shared dict.
+    self._pitchref_gait_params = {
+      k: v for k, v in self._gait_params.items() if k != "sensor_name"
+    }
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
@@ -121,6 +137,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # (same sites A0's own foot_slip/foot_clearance terms use).
     self._foot_asset_cfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
     self._foot_asset_cfg.resolve(env.unwrapped.scene)
+    # WL-D arm 6 (2026-07-17): ankle_pitch joints for the roll-over/push-off intrinsic
+    # terms - left,right order matches _gait_params's offset order [0.0, 0.5].
+    self._ankle_asset_cfg = SceneEntityCfg(
+      "robot", joint_names=("left_ankle_pitch_joint", "right_ankle_pitch_joint"))
+    self._ankle_asset_cfg.resolve(env.unwrapped.scene)
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     # Stage D (2026-07-14): per-joint posture multipliers (pattern -> weight; unmatched
     # joints stay 1.0). NOT renormalized, so all-ones = the uniform penalty and raising
@@ -431,6 +452,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       intrinsic_sum = 0.0
       goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
       stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
+      pitchref_sum = pushoff_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       with torch.inference_mode():
         uenv = self.env.unwrapped
@@ -551,6 +573,27 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             cad = mdp_rewards.feet_gait(uenv, use_commanded_phase=True, **self._gait_params)
             r_lo = r_lo + self.ll_cadence_coef * cad
             cadence_sum += (self.ll_cadence_coef * cad).mean().item()
+          # WL-D arm 6 formulation A (2026-07-17): heel-to-toe ankle roll-over phase-lock
+          # to the probe-measured heel-strike/toe-off reference, gated command + SCHEDULED
+          # stance only (gate pin ii: phi is only well-defined on the schedule).
+          if self.hl_cadence and self.ll_pitchref_coef != 0.0:
+            pr = mdp_rewards.ankle_pushoff_pitchref(
+              uenv, asset_cfg=self._ankle_asset_cfg,
+              theta_hs=self.ll_pitchref_theta_hs, theta_to=self.ll_pitchref_theta_to,
+              k=self.ll_pitchref_k, sigma=self.ll_pitchref_sigma,
+              use_commanded_phase=True, **self._pitchref_gait_params)
+            r_lo = r_lo + self.ll_pitchref_coef * pr
+            pitchref_sum += (self.ll_pitchref_coef * pr).mean().item()
+          # WL-D arm 6 formulation B (2026-07-17): ankle push-off power burst, gated
+          # command + SCHEDULE AND ACTUAL CONTACT (stricter than A). Implemented but left
+          # untrained (coef 0) until formulation A's read (A1a_plan.md Arm 6 decision).
+          if self.hl_cadence and self.ll_pushoff_coef != 0.0:
+            po = mdp_rewards.ankle_pushoff_power(
+              uenv, asset_cfg=self._ankle_asset_cfg,
+              w=self.ll_pushoff_w, p_scale=self.ll_pushoff_p_scale,
+              use_commanded_phase=True, **self._gait_params)
+            r_lo = r_lo + self.ll_pushoff_coef * po
+            pushoff_sum += (self.ll_pushoff_coef * po).mean().item()
           # A1a: cost-of-transport training metric (dimensionless; gated to commanded motion).
           # Power sub-formula deduped onto the shared helper (2026-07-17, WL-D) - the
           # window/floor/signed-distance logic below stays a deliberately separate
@@ -647,6 +690,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/footslip_pen": footslip_sum / n_steps,
         "ll/footclear_pen": footclear_sum / n_steps,
         "ll/energy_pen": energy_sum / n_steps,
+        "ll/pitchref_rew": pitchref_sum / n_steps,
+        "ll/pushoff_rew": pushoff_sum / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
         "hl/cot_pen": cot_pen_sum / (n_steps // self.c),  # per-window mean (0 when off)
         **{f"hl/{k}": v for k, v in hl_losses.items()},

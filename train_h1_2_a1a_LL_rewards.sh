@@ -32,6 +32,11 @@
 #   LL_ENERGY         float (default 0.0)          -> arm 4d; >0 tags _energyXpXX
 #   ANKLE_ANCHOR      True|False (default False)   -> arm 5 (weight fixed at 4.0 via the
 #                     rl_cfg default); True tags _ankle
+#   LL_PITCHREF       float (default 0.0)          -> arm 6 formulation A (heel-to-toe
+#                     roll-over); >0 tags _pitchrefXpXX. theta_hs/theta_to/sigma/k stay
+#                     at the rl_cfg probe-derived defaults (not swept here). Formulation
+#                     B (ll_pushoff_coef) stays untrained (A1a_plan.md Arm 6 decision) -
+#                     no knob exposed in this script.
 #   NUM_ENVS, MAX_ITER
 #
 # Examples:
@@ -52,6 +57,8 @@
 #   sbatch --export=ALL,LL_ENERGY=0.05 train_h1_2_a1a_LL_rewards.sh
 #   # arm 5:
 #   sbatch --export=ALL,ANKLE_ANCHOR=True train_h1_2_a1a_LL_rewards.sh
+#   # arm 6 (formulation A only):
+#   sbatch --export=ALL,LL_PITCHREF=0.5 train_h1_2_a1a_LL_rewards.sh
 
 eval "$($WORK/miniconda3/bin/conda shell.bash hook)"
 conda activate unitree_mjlab_h1_2_rl
@@ -78,6 +85,7 @@ LL_FOOTSLIP=${LL_FOOTSLIP:-0.0}
 LL_FOOTCLEAR=${LL_FOOTCLEAR:-0.0}
 LL_ENERGY=${LL_ENERGY:-0.0}
 ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
+LL_PITCHREF=${LL_PITCHREF:-0.0}
 NUM_ENVS=${NUM_ENVS:-4096}
 MAX_ITER=${MAX_ITER:-10001}
 
@@ -122,9 +130,14 @@ ANKLE_FLAG=""; ANKLE_TAG=""
 [[ "$ANKLE_ANCHOR" == "True" ]] && ANKLE_FLAG="--agent.ll-posture-anchor-ankle-roll True" \
   && ANKLE_TAG="_ankle"
 
-RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${ANKLE_TAG}_s${SEED}"
+# Arm 6 (formulation A only - see A1a_plan.md Arm 6): tagless at 0.0/off.
+PR_FLAG=""; PR_TAG=""
+awk "BEGIN{exit !($LL_PITCHREF > 0)}" && PR_FLAG="--agent.ll-pitchref-coef ${LL_PITCHREF}" \
+  && PR_TAG="_pitchref$(echo $LL_PITCHREF | tr '.' 'p')"
 
-echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  ankle_anchor=${ANKLE_ANCHOR}  seed=${SEED}"
+RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${ANKLE_TAG}${PR_TAG}_s${SEED}"
+
+echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  seed=${SEED}"
 
 python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS} \
@@ -132,7 +145,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --agent.seed ${SEED} \
     --agent.ll-cadence-coef ${LL_CADENCE_COEF} \
     $CAD_FLAG \
-    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $ANKLE_FLAG \
+    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $ANKLE_FLAG $PR_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

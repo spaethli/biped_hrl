@@ -73,12 +73,23 @@ def main() -> None:
     plo, phi = float(plo), float(phi)
     pin = float(hrl.get('pin_period', 0.0))
     nomh = float(hrl['nominal_root_height'])
-    r = cfg['commands']['base_velocity']['ranges']
-    gscale = np.array([(r['lin_vel_x'][1]-r['lin_vel_x'][0])/2,
-                       (r['lin_vel_y'][1]-r['lin_vel_y'][0])/2,
-                       (r['ang_vel_z'][1]-r['ang_vel_z'][0])/2], float)
     ll = ort.InferenceSession(f'{onnx_dir}/low_level.onnx', providers=prov)
     hl = ort.InferenceSession(f'{onnx_dir}/high_level.onnx', providers=prov)
+    # Mirror hrl::GoalSpace::freeze_scale (State_RLHRL.cpp, WL-B 2026-07-16): the g -> V*
+    # scale is a trained-policy property baked into the HL ONNX metadata, not something to
+    # re-derive from deploy.yaml's command ranges (those are the operator's safety clamp and
+    # may legitimately differ, e.g. narrowed lin_vel_x/ang_vel_z). Only the velocity prefix
+    # is used here (delta mode, hl_velocity_goals_only).
+    meta = hl.get_modelmeta().custom_metadata_map
+    if 'goal_scale' in meta:
+      gscale = np.array([float(x) for x in meta['goal_scale'].split(',')])[:3]
+    else:
+      print('[REPLICA] high_level.onnx carries no goal_scale metadata (pre-2026-07-16 '
+            'export) -> falling back to deploy.yaml command ranges (legacy, may be stale).')
+      r = cfg['commands']['base_velocity']['ranges']
+      gscale = np.array([(r['lin_vel_x'][1]-r['lin_vel_x'][0])/2,
+                         (r['lin_vel_y'][1]-r['lin_vel_y'][0])/2,
+                         (r['ang_vel_z'][1]-r['ang_vel_z'][0])/2], float)
   else:
     net = ort.InferenceSession(f'{onnx_dir}/policy.onnx', providers=prov)
 

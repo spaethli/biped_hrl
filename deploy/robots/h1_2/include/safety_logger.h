@@ -15,14 +15,27 @@
 #include <vector>
 #include "h1_2_limits.h"
 
+// Process-wide (NOT per-instance) entry counter: State_RLBase (A0) and State_RLHRL (A1)
+// each own a SEPARATE SafetyLogger object, so a per-instance counter would restart at 0
+// the first time the OTHER FSM type is entered, colliding with entries already written
+// by the first type to the same shared file. 2026-07-17 finding (2nd round): a session
+// that ran A0 first, then switched to A1, needs entry ids that stay unique across that
+// switch, not just across repeated entries into the same type.
+inline int g_safety_logger_entry = -1;
+
 class SafetyLogger
 {
 public:
     // Enabled only if base_path is non-empty (H1_2_SAFETY_LOG set).
     bool enabled() const { return !base_.empty(); }
 
-    // Called once from State entry. Writes the meta JSON immediately so it
-    // exists even if the run crashes, and writes the CSV header row.
+    // Called once per State ENTRY (every `h`/`o` press), not once per process, and A0/A1
+    // use SEPARATE SafetyLogger instances (see g_safety_logger_entry above). Whether to
+    // truncate is decided by whether the file already exists on disk (robust across BOTH
+    // repeated entries into one FSM type AND switching between A0 and A1), not by this
+    // instance's own memory of having run before -- an instance that has never run yet
+    // (e.g. A1's, the first time you press `h` after already having used A0) must still
+    // append, not wipe out what the other type already wrote this session.
     void init(const std::string& base_path, const std::vector<float>& joint_ids_map,
               float tilt_limit, float fall_acc_thresh, float control_dt)
     {
@@ -30,6 +43,11 @@ public:
         if (base_.empty()) return;
         n_ = (int)joint_ids_map.size();
         dt_ = control_dt;
+        g_safety_logger_entry++;  // every entry gets a new id, incl. the first (starts at 0)
+        std::ifstream existing(base_ + ".csv");
+        bool first_entry = !existing.good();
+        existing.close();
+        if (!first_entry) return;  // re-entry (this type or the other): append, keep tick_
         tick_ = 0;
 
         // --- meta json (single source of truth for the analyzer) ---
@@ -58,8 +76,8 @@ public:
         for (int i = 0; i < n_; i++) buf_ << ",meas_q" << i;
         for (int i = 0; i < n_; i++) buf_ << ",meas_dq" << i;
         buf_ << ",quat_w,quat_x,quat_y,quat_z,acc_x,acc_y,acc_z";
-        buf_ << ",alpha,trig_joint,trig_tilt,trig_fall\n";
-        // Truncate/create the file and write the header now.
+        buf_ << ",alpha,trig_joint,trig_tilt,trig_fall,entry\n";
+        // Truncate/create the file and write the header now (first entry only).
         std::ofstream(base_ + ".csv", std::ios::trunc) << buf_.str();
         buf_.str("");
         rows_since_flush_ = 0;
@@ -79,7 +97,7 @@ public:
         buf_ << ',' << quat[0] << ',' << quat[1] << ',' << quat[2] << ',' << quat[3];
         buf_ << ',' << acc[0]  << ',' << acc[1]  << ',' << acc[2];
         buf_ << ',' << alpha << ',' << (trig_joint?1:0) << ',' << (trig_tilt?1:0)
-             << ',' << (trig_fall?1:0) << '\n';
+             << ',' << (trig_fall?1:0) << ',' << g_safety_logger_entry << '\n';
         // Periodic flush as crash insurance (~5 s at 500 Hz). Infrequent blocking write.
         if (++rows_since_flush_ >= 2500) flush();
     }

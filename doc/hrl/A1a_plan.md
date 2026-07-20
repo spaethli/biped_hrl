@@ -735,7 +735,7 @@ weight magnitude, NOT tuned, expect a second pass); arm 5 (`ll_posture_anchor_an
 arm 7/8/9 (`ENV_VARIANT=explicit_pd|wide_dr|corr_noise`); A0+energy
 (`ENERGY_COEF=0.05`). Results pending.
 
-### Arm 6 (research only, no training arm) — heel-to-toe roll-over / ankle push-off
+### Arm 6 — heel-to-toe roll-over / ankle push-off (researched -> approved 2026-07-17; formulation A trains)
 
 Two prior-work lines ground this: **Siekmann et al., "Sim-to-Real Learning of All
 Common Bipedal Gaits via Periodic Reward Composition"** (arXiv:2011.01387) - the origin
@@ -752,40 +752,167 @@ trajectory exists -> exp kernel, consistent with `track_linear_velocity`/
 `duty` threshold):
 
 ```
-phi_i = leg_phase_i / duty   (in [0,1), defined only while foot i is in stance)
+phi_i = leg_phase_i / duty   (in [0,1), scheduled-stance progress)
 theta_ref(phi) = theta_hs + (theta_to - theta_hs) * (1 - cos(pi * phi^k)) / 2
-r_pitch = exp( -(1/sigma^2) * sum_i 1[stance_i] * (theta_i - theta_ref(phi_i))^2 )
+r_pitch = 1[|cmd| > cmd_thresh] * exp( -(1/sigma^2) * sum_i 1[sched_stance_i] * (theta_i - theta_ref(phi_i))^2 )
 ```
 
 using the `ankle_pitch` joint angle directly as the foot-pitch proxy (no new sensor).
 `k>1` concentrates the rotation late in stance, matching the real ankle-angle curve
 (flat through midstance, rapid near push-off) rather than a naive symmetric raised-
-cosine. **Open item before implementing:** verify the `ankle_pitch` sign convention
-(axis `0 1 0`, range `[-0.897, 0.524]`, nominal standing `-0.3`) empirically - which
-direction is dorsiflexion vs. plantarflexion - by reading the joint angle at a
-heel-strike vs. toe-off instant in an existing replay, before fixing `theta_hs`/`theta_to`.
+cosine. Gate pins (2026-07-17 review): (i) **command-gated** like every other gait
+term - the phase clock keeps running at stand, so an ungated r_pitch rewards
+ankle-marching in place and fights the arm-3 stand-still term; (ii) the stance gate
+is the **scheduled** window (`leg_phase < threshold`), not actual contact - `phi` is
+only well-defined on the schedule, and `feet_gait` already pushes contact to match
+it; (iii) `duty` must read the SAME threshold source `feet_gait` uses (it becomes a
+per-env tensor if the parked d(T) schedule ever un-parks - do not hardcode 0.55 twice).
 
 **Formulation B - ankle push-off power burst** (a *maximization/bonus* problem - no
 upper target -> must be bounded-ABOVE, not a raw unbounded ratio, per the same
 clamp-discipline that motivated the `cost_of_transport_penalty` clamp above):
 
 ```
-P_i = tau_ankle_pitch_i * theta_dot_ankle_pitch_i
-g_i = 1[ phi_i in [1-w, 1) ]                      (w ~ 0.15-0.2, the terminal-stance window)
+P_i = tau_ankle_pitch_i * theta_dot_ankle_pitch_i     (signed per-joint power - a new
+                                                       2-line expression, NOT mech_power,
+                                                       which is abs-summed over all joints)
+g_i = 1[ phi_i in [1-w, 1) ] * 1[ contact_i ]         (w ~ 0.15-0.2, terminal stance;
+                                                       schedule AND actual contact)
 r_pushoff = sum_i g_i * ( 1 - exp( -ReLU(P_i) / P_scale ) )
 ```
 
 saturates toward 1 per foot as push-off power grows, instead of rewarding unbounded
 torque-cranking during the gated window (the failure mode this project already hit
 once, when an uncapped HL action std blew up chasing a weak gradient). `ReLU` so only
-forward-delivering push-off power is rewarded, not absorption/eccentric work.
+forward-delivering push-off power is rewarded, not absorption/eccentric work. Gate pin
+(2026-07-17 review): B requires **schedule AND actual contact** (unlike A) - phase-only
+gating lets the LL harvest the bonus by driving the ankle in the air after an early
+liftoff; power without ground contact is thrash, not propulsion. **Known watch item
+(monitor in replay, not a redesign):** ReLU keeps the positive half of any ankle
+oscillation inside the window, so dithering nets reward; the saturation caps it at the
+same ceiling as genuine push-off and the window is short, so this is a replay check,
+not a blocker.
 
-Both reuse existing plumbing only (`feet_gait`'s phase math, the `mech_power`
-primitive) - no new sensors needed. A harder third option (center-of-pressure
+Both reuse `feet_gait`'s phase math; no new sensors needed. A harder third option
+(center-of-pressure
 progression heel->toe, using the foot's 7 individual collision sub-geoms) was
 considered and parked: `feet_ground_contact` nets each foot's contact into one scalar
 (`reduce="netforce"`), so this would need new per-geom contact sensing - flagged as a
 stretch goal, not specced.
 
-**Status:** specced, not implemented, not trained. Liam is checking this spec with the
-delegation/planning chat before any code or training slot is committed.
+**Constants probe (REQUIRED first, offline, no cluster):** one instrumented replay
+pass on the batch-base checkpoint fixes every guessed constant at once: (i) the
+`ankle_pitch` sign convention (axis `0 1 0`, range `[-0.897, 0.524]`, nominal standing
+`-0.3`) - which direction is dorsiflexion vs. plantarflexion, read at a heel-strike vs.
+toe-off instant; (ii) measured `theta_hs`/`theta_to` from the actual angles at those
+events (an exp kernel imprints a wrong reference HARD - do not hand-pick these); (iii)
+peak terminal-stance ankle-pitch power -> `P_scale`. Only `sigma` and `k` remain free
+knobs after the probe.
+
+**Decision (planning-chat review + Liam go, 2026-07-17):** implement BOTH terms as
+LL-intrinsic coefficients defaulting to 0.0 (byte-identical baseline, matching the
+batch discipline), run the probe, then train **formulation A only** as the arm-6 slot,
+on the same batch base as the other arms (arm-calmed cadence-HL + cot0.2, i.e. the
+promoted default config - clean batch member; a winner consolidation retrains
+everything anyway). B stays implemented-but-untrained until A's
+read. A shapes the roll-over character (the named defect); B rewards the propulsive
+event and sits in direct tension with the CoT objective (it pays for ankle power the
+CoT term taxes - theoretically fine, push-off should cut contralateral collision
+absorption which `mech_power` also counts as cost, but harder to predict).
+
+**Status:** spec amended + approved 2026-07-17 (gates pinned, probe-first); probe run,
+both formulations implemented, formulation A trained + benched (2026-07-17/18). **Does
+NOT clear the winner bar as trained at `coef=0.5`** (tracking regresses) — a coef sweep
+is the natural next step; not yet run (out of this hand-off's one-run scope).
+
+**Constants probe (2026-07-17, D2 checkpoint, 64 envs x 900 steps, `vx=1.0` pinned, duty
+read live off the loaded runner — never a second hardcoded copy):** sign convention:
+more-negative `ankle_pitch` = plantarflexion (push-off), confirmed empirically (correlates
+with positive signed ankle power in the same window, not just assumed from the URDF axis).
+`theta_hs = -0.253 rad` (std 0.125, n=6528 scheduled heel-strikes), `theta_to = -0.275 rad`
+(std 0.073, n=6592 scheduled toe-offs); nominal standing -0.300. Peak terminal-stance power
+(per-cycle, ReLU'd, `w=0.175`, n=4707 cycles) is heavily right-skewed: median 8.7W / p90
+39.7W / max 149.3W — `P_scale` uses **p90 (40W), not the median**: at the median, today's
+already-typical cycles would sit near saturation and kill the improvement gradient; p90
+keeps the typical cycle (~9W) at only ~20% of saturation while the best cycles (40-150W)
+sit at 63-98%. Free knobs (not probe-measured): `sigma=0.15 rad` (anchored to
+`env_cfgs.py`'s existing `std_walking` ankle_pitch tolerance), `k=2`.
+
+**Implementation:** `mdp.ankle_pushoff_pitchref` (A) + `mdp.ankle_pushoff_power` (B) added
+to `rewards.py`, both reusing a factored-out `_gait_schedule()` helper (pulled out of
+`feet_gait`'s inline phase/duty math, gate pin iii — verified byte-identical) so the duty
+threshold is never a second hardcoded copy. `ll_pitchref_coef`/`ll_pushoff_coef` + their
+shape params (`theta_hs`/`theta_to`/`sigma`/`k`, `w`/`p_scale`) added to `HrlRunnerCfg`
+with the probe-derived defaults above; wired into `hrl_runner.py`'s LL intrinsic next to
+the cadence term, gated on `hl_cadence` (same guard as arm 1, since both read
+`env.hrl_phase`/`hrl_period`). Both default to 0.0; smoke-verified byte-identical baseline
+at 0, sane nonzero values independently and together, and correctly inert (no crash) when
+`hl_cadence=False`.
+
+**Training (2026-07-17/18, LOCAL not cluster):** `a1a_cot0p2_cad0p5_pitchref0p5_s42`,
+formulation A only (B stays untrained per the approved decision), `ll_pitchref_coef=0.5`
+— **not probe-derived**, there is no A0 term to mirror the magnitude from, so it's matched
+to `ll_cadence_coef`'s own weight as the closest analog (same phase-gated, bounded-[0,1]
+kernel family) — flag this the same way arms 1/2/4's first-guess magnitudes are flagged:
+untuned, expect a second pass. 10001 it / 4096 envs / seed 42, `model_10000`, 0 falls
+throughout training (W&B `8gs72pzd`).
+
+**Caveat on the comparator:** the cluster's own 15-run batch control hadn't synced to this
+local machine at bench time, so **D2** (`2026-07-14_16-03-57_..._rs20_s42`) stands in — same
+base-config lineage (arm-calmed weights + cadence-HL + cot0.2) but a different
+checkpoint/seed lineage than whatever the cluster batch's own arm-6 slot converges to.
+Re-diff against the cluster batch control once it lands.
+
+**Bench (`model_10000`, 64x600x2, vs D2):**
+
+| run | agg vx | agg vy | agg CoT | power (W) | fall | ss@0.5 (t90) | ss@1.0 (t90) | HL err vx | LL err vx |
+|---|---|---|---|---|---|---|---|---|---|
+| D2 (pre-arm6) | 0.064 | 0.055 | 0.898 | 316.5 | 0 | 0.034 (0.40s) | 0.041 (0.73s) | 0.055 | 0.064 |
+| arm6-A (pitchref 0.5) | 0.099 | 0.082 | **0.707** | **231.5** | 0 | 0.066 (0.65s) | 0.098 (1.02s) | 0.114 | 0.139 |
+
+**Roll-over character (replay, `vx=1.0` pinned, 64x900):**
+
+| run | theta_hs | theta_to | ROM | RMSE to ref (k=2) | terminal-window dither |
+|---|---|---|---|---|---|
+| D2 (pre-arm6) | -0.252 ± 0.126 | -0.278 ± 0.073 | -0.026 | 0.114 rad | 0.330/step |
+| arm6-A (pitchref 0.5) | -0.238 ± 0.027 | -0.280 ± 0.025 | -0.042 | **0.031 rad** | **0.254/step** |
+
+Reads (honest, 2026-07-17/18): (i) **the roll-over character DID improve as intended** —
+RMSE to the raised-cosine reference dropped 3.7x (0.114→0.031 rad), heel-strike angle
+variance dropped 4.7x (std 0.126→0.027), and ROM grew 65% (-0.026→-0.042 rad): the LL now
+reaches a materially more consistent, larger-swing ankle trajectory. The formulation-B
+watch item (terminal-window ankle dither) went DOWN, not up, under A (0.330→0.254
+sign-changes/step) — no early warning sign for B's later gate. (ii) **but tracking
+regresses substantially and does NOT clear the winner bar** ("improves without regressing
+holds/tracking/falls"): aggregate err_vx +55%, err_vy +49%; hold `ss_err` roughly doubles
+at both 0.5 and 1.0 m/s with slower `t90`. The goal probe shows this is a real LL-capacity
+conflict, not noise: LL reach error on vx nearly doubles (0.064→0.139) and the
+realized/requested follow-through ratio collapses (0.743→0.130) — the LL now under-reaches
+the HL's velocity delta far more than before. (iii) energy is a genuine, unambiguous win —
+CoT 0.898→0.707 (-21%), power 316W→231W (-27%), plausibly because scheduled ankle push-off
+recovers propulsion that used to come from elsewhere in the gait. (iv) falls: no
+regression, 0 in every eval cell for both checkpoints. **Read: `coef=0.5` is too strong**
+(never tuned — see the training note above) — the roll-over term is winning a real budget
+fight against velocity tracking inside the shared LL capacity. A coef sweep (e.g.
+0.1-0.3) is the natural next step before any verdict on formulation A; not run here (out
+of this hand-off's scope — one training run, formulation A only, per the approved
+decision). Planning-chat call on whether/how to sweep.
+
+**Correction (2026-07-19-20, Liam's visual replay at pinned `vx=0.9`): the roll-over is
+NOT visible** — reconciled with, not contradicting, the RMSE-to-reference win above. The
+probe-measured reference itself has almost no amplitude: `theta_hs -0.253 -> theta_to
+-0.275` is a ROM of ~0.022 rad (**1.3 degrees**), because it was measured off the
+PRE-arm-6 gait, which barely rolled over in the first place (probe methodology,
+2026-07-17: "measured... do not hand-pick" per the spec, applied to a gait that didn't
+have the target behavior yet). Formulation A can therefore only train tighter conformance
+to that near-flat reference — it structurally cannot induce a bigger, more human-like
+push-off swing: post-training ROM only grew from ~1.5 to ~2.4 degrees (still far under
+Winter-style human ankle push-off ROM, tens of degrees). The 3.7x RMSE improvement is
+real (tighter, lower-variance tracking of the tiny target) but not what "fixes the named
+defect" looks like visually. **Net read, revised: arm 6 formulation A, as specced and
+probe-calibrated, does not fix the visual roll-over defect and costs real tracking —
+weaker candidate than the other WL-D arms.** The crux is a chicken-and-egg limit in the
+probe-first methodology itself (measuring the reference off a gait that doesn't yet do
+the thing the reward is meant to induce) — whether to hand-pick a larger,
+biomechanically-anchored reference instead (reopening the spec) is a planning-chat
+decision, out of this hand-off's scope.

@@ -303,6 +303,48 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``mdp/rewards.py``, same term the A0+energy S4' control uses) into the LL intrinsic -
   the most direct mirror candidate, since it targets the CoT gap itself rather than a
   proxy for it. 0 disables."""
+  ll_pitchref_coef: float = 0.0
+  """WL-D arm 6, formulation A (2026-07-17, approved): heel-to-toe ankle roll-over
+  phase-locking - matches ``ankle_pitch`` to a raised-cosine reference interpolated
+  between the measured heel-strike/toe-off angles over ``feet_gait``'s own scheduled-
+  stance progress (never a second hardcoded duty threshold). Command + SCHEDULED-stance
+  gated (not actual contact - phi is only well-defined on the schedule). Requires
+  ``hl_cadence`` (reads ``env.hrl_phase``/``hrl_period``). See ``mdp.ankle_pushoff_pitchref``
+  and ``A1a_plan.md`` Arm 6. 0 disables (byte-identical)."""
+  ll_pitchref_theta_hs: float = -0.253
+  """Measured ankle_pitch angle (rad) at scheduled heel-strike - constants probe on the
+  D2 checkpoint (2026-07-17, n=6528 events, std 0.125); nominal standing is -0.3."""
+  ll_pitchref_theta_to: float = -0.275
+  """Measured ankle_pitch angle (rad) at scheduled toe-off - constants probe on the D2
+  checkpoint (2026-07-17, n=6592 events, std 0.073). More negative than ``theta_hs`` =
+  the plantarflexion (push-off) direction for this joint's sign convention, confirmed
+  empirically (correlates with positive signed ankle power in the same window)."""
+  ll_pitchref_sigma: float = 0.15
+  """Exp-kernel tolerance (rad) on the pitch-reference tracking error. Free knob (not
+  probe-measured); anchored to ``env_cfgs.py``'s existing ``std_walking`` ankle_pitch
+  tolerance (h1_2/env_cfgs.py, 0.15) as the natural in-codebase reference."""
+  ll_pitchref_k: float = 2.0
+  """Raised-cosine phase exponent - ``k>1`` concentrates the pitch rotation late in
+  stance (matching the real ankle-angle curve: flat through midstance, rapid near
+  push-off). Free knob (not probe-measured)."""
+  ll_pushoff_coef: float = 0.0
+  """WL-D arm 6, formulation B (2026-07-17, approved): ankle push-off power burst -
+  a saturating bonus (``1 - exp(-ReLU(P)/P_scale)``) on signed ankle-pitch power in the
+  terminal-stance window, gated SCHEDULE **and** actual contact (stricter than formulation
+  A - phase-only gating would let the LL harvest the bonus by driving the ankle in the
+  air after an early liftoff). Implemented but left UNTRAINED (stays 0) until formulation
+  A's read - planning-chat decision, ``A1a_plan.md`` Arm 6. Requires ``hl_cadence``. See
+  ``mdp.ankle_pushoff_power``."""
+  ll_pushoff_w: float = 0.175
+  """Terminal-stance window width (``phi in [1-w, 1)``) - midpoint of the spec's
+  0.15-0.2 range, matching the constants probe's own window."""
+  ll_pushoff_p_scale: float = 40.0
+  """Power scale (W) the saturating bonus is calibrated against - the D2 checkpoint's
+  p90 per-cycle terminal-stance ReLU'd power (constants probe, 2026-07-17, n=4707
+  cycles: median 8.7W / p90 39.7W / max 149.3W). p90, not the median: at P_scale=median
+  the LL's already-typical cycles would sit near saturation and kill the improvement
+  gradient; p90 keeps today's typical cycle (~9W) at only ~20% of saturation while
+  today's best cycles (40-150W) sit at 63-98%."""
   ll_goal_kernel: Literal["l2", "exp"] = "exp"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =

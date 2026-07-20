@@ -52,7 +52,15 @@ public:
         }
 
         env->robot->update();
-        step_ = 0;
+        // step_ drives the telemetry timestamp (t = step_*step_dt) and the HL firing
+        // schedule (step_ % c_); only zero it on the FIRST entry this process, so re-
+        // entries (retries within one session) don't collide their `t` back onto an
+        // earlier attempt's (2026-07-17: this + the truncate-on-init bug were silently
+        // destroying failed attempts' telemetry before a later successful retry).
+        if (first_entry_) {
+          step_ = 0;
+          first_entry_ = false;
+        }
 
         // Deploy-gate telemetry (W3); same output base as the flight recorder.
         if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
@@ -125,6 +133,7 @@ private:
     float pin_period_{0.0f};   // >0 = freeze the LL phase clock at this period (bring-up pin)
     Eigen::VectorXf target_;  // held window target V* (refreshed by the HL every c steps)
     long step_{0};
+    bool first_entry_{true};  // gates the step_ reset to the process's first enter() only
 
     // Optional synthetic noise on the goal-space state s (per-dim std; 0 = off). Lets us
     // mimic the real-robot estimator noise on velocity/height in sim (where s is exact).

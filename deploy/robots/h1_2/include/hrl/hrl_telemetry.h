@@ -17,24 +17,39 @@ namespace hrl
 class Telemetry
 {
 public:
-    static constexpr size_t FLUSH_ROWS = 512;  // ~10 s at 50 Hz
+    // ~2.5 s at 50 Hz -- was 512 (~10 s), matching the safety_logger's flush cadence.
+    // 2026-07-17 finding: a session that ended abruptly (not a clean FSM exit) lost the
+    // final ~2-10 s of _hrl.csv telemetry -- including, in one case, the actual fall --
+    // while the safety CSV's tighter cadence still had it. exit() calls flush() too, so
+    // this only matters for non-clean process ends (crash/kill), which is exactly when
+    // the data matters most.
+    static constexpr size_t FLUSH_ROWS = 128;
 
     // base: output path base (H1_2_SAFETY_LOG); writes <base>_hrl.csv. goal_dim sizes
-    // the s/target columns. Disabled (no-op) until init() is called.
+    // the s/target columns. Disabled (no-op) until init() is called. Called once per
+    // STATE ENTRY, not once per process: only the first entry this process truncates/
+    // writes the header; later re-entries append, so an earlier attempt (e.g. one that
+    // fell) survives a later successful attempt in the same session instead of being
+    // silently overwritten (2026-07-17 finding). Each row also carries an `entry` id,
+    // since `t` alone (only advances while actively in this state) won't show a gap
+    // between separate attempts.
     void init(const std::string& base, int goal_dim)
     {
+        bool first_entry = path_.empty() || path_ != base + "_hrl.csv";
         path_ = base + "_hrl.csv";
         goal_dim_ = goal_dim;
         rows_.clear();
         rows_.reserve(FLUSH_ROWS);
+        entry_++;
+        enabled_ = true;
+        if (!first_entry) return;  // re-entry: keep the existing file, just bump entry_
         FILE* f = std::fopen(path_.c_str(), "w");
         if (!f) return;
         std::fprintf(f, "t,cmd_vx,cmd_vy,cmd_wz");
         for (int i = 0; i < goal_dim_; ++i) std::fprintf(f, ",s%d", i);
         for (int i = 0; i < goal_dim_; ++i) std::fprintf(f, ",tgt%d", i);
-        std::fprintf(f, ",period,hip_pitch_l,hip_pitch_r,act_rate\n");
+        std::fprintf(f, ",period,hip_pitch_l,hip_pitch_r,act_rate,entry\n");
         std::fclose(f);
-        enabled_ = true;
     }
 
     bool enabled() const { return enabled_; }
@@ -45,7 +60,7 @@ public:
     {
         if (!enabled_) return;
         std::vector<float> row;
-        row.reserve(7 + 2 * goal_dim_);
+        row.reserve(8 + 2 * goal_dim_);
         row.push_back(t);
         row.insert(row.end(), cmd, cmd + 3);
         row.insert(row.end(), s.data(), s.data() + goal_dim_);
@@ -54,6 +69,7 @@ public:
         row.push_back(hip_pitch_l);
         row.push_back(hip_pitch_r);
         row.push_back(act_rate);
+        row.push_back((float)entry_);
         rows_.push_back(std::move(row));
         if (rows_.size() >= FLUSH_ROWS) flush();
     }
@@ -76,6 +92,7 @@ private:
     bool enabled_{false};
     std::string path_;
     int goal_dim_{0};
+    int entry_{-1};  // pre-incremented in init() -> first entry logs as 0
     std::vector<std::vector<float>> rows_;
 };
 

@@ -44,12 +44,157 @@
   replica (A0 + HRL, both scenes, delay knob, band, full chain, reads deployed YAML +
   exported ONNX). Pre-session sanity + plant/latency A/B instrument. Validated: A0 and
   keeper both pass the chain at 2 ms on the vendor plant.
+- **G2.0 pre-check (2026-07-17, headless, WL-B) — found 3 issues, 1 still open:**
+  1. Bug (fixed): a variable name collision in `bridge_replica.py` (`c` = HL period,
+     shadowed every tick by the swing-clearance instrument's per-contact loop variable,
+     also `c`) crashed the script outright on any `--policy hrl` run. Renamed to `con`.
+  2. Process error (caught + fixed): re-exporting the goal-scale metadata fix, I sourced
+     the wrong checkpoint — `A1a_deploy_plan.md`/`worklines.md` name the 2026-07-09
+     run as "the keeper", but the ONNX actually staged in `exported/` (confirmed via its
+     `run_path` metadata) is the newer arm-calm/rs20 candidate
+     (`2026-07-14_16-03-57_a1_td3_pose0p5shw16-4_ar0p02_cadhl_cot0p2_kl0p01_rs20_s42`,
+     **this is the arm-weighted policy, and it IS deployable** — nothing blocks it). I
+     briefly overwrote the staged pair with the wrong checkpoint's export (weight diff
+     up to 2.15 vs. the original); caught via a weight-identity check, restored, and
+     re-exported the correct checkpoint (weight-identical to what was staged, max diff
+     0.0; parity LL 2.7e-05 / HL 3.2e-06). **Docs still calling the 07-09 run "the
+     keeper" are stale** — the arm-calm/rs20 run is what is actually staged today.
+  3. **Open finding — latency x goal-scale interaction:** `bridge_replica.py`'s own
+     `gscale` was still deriving from `deploy.yaml` ranges (legacy path), not the ONNX
+     `goal_scale` metadata the C++ fix now reads — so the tool wasn't exercising the
+     same scale the real deploy does (only yaw differed: legacy 0.5 vs trained 1.0).
+     Fixed to read the metadata (mirrors `hrl::GoalSpace::freeze_scale`). Re-running the
+     chain with the TRUE trained yaw scale (1.0): **0 ms and 2 ms delay still pass
+     cleanly** (calmer than before), but **4 ms delay now FALLS during takeover**
+     (pitch 1.04 rad, height collapses to 0.41 m; deterministic, reproduced twice) —
+     this passed under the old, incorrectly-halved yaw scale. Bridge delay is
+     quantized to the 500 Hz control tick, so 0/2/4 ms are the only 3 distinct buckets
+     in this range (2.2-2.8 ms all alias to the "2 ms" bucket, 3.0-4.0 ms to "4 ms").
+     A yaw-scale-only isolation sweep at the 4 ms bucket is **non-monotonic**: 0.5/0.6/
+     0.9 pass, 0.7/0.8/1.0 fail (at different phases each) — a knife-edge sensitivity,
+     not a clean trend, consistent with the W2 latency/PD-energy-injection mechanism
+     (small parameter changes tip the closed loop in/out of instability). The stress
+     (harsh/damped) scene is fully robust at 4 ms with the corrected scale. Documented
+     real bridge latency is ~2-4 ms, i.e. this failure mode sits right at the edge of
+     what the live bridge may actually exhibit — **treat takeover (the `h` key, first
+     ~3s) as the highest-risk moment in the next session** until this is resolved or
+     better characterized.
+     **Startup-ramp mitigation tested headlessly (2026-07-17) — result: unreliable, not
+     adopted.** Linearly ramping the HL goal-scale multiplier 0->1 after takeover begins:
+     0.3/0.5/0.75/1.0 s all still fell (0.5 s even fell harder, later, in "stand");
+     2.0 s passed the FULL chain; **2.5 s (more conservative) then failed at "stop"**, a
+     phase every shorter/no-ramp run had passed. Not measurement noise (the sim is
+     deterministic) — the same latency/PD chaos as the W2 post-mortem, and it means a
+     hand-tuned ramp duration cannot be trusted as a fix: passing at one value gives no
+     assurance about nearby values. Do not adopt a fixed-duration ramp off a single
+     passing sweep point. Open options: (a) a slew-rate limit on |delta V*| per HL tick
+     instead of a time-based scale ramp (bounds step-discontinuities directly rather
+     than through a clock; untested, may be more robust to this chaos); (b) treat the
+     safety filter + flight recorder as the real backstop and use the live bridge to
+     characterize whether actual DDS latency reaches the risky 3-4 ms band in practice
+     (the replica's `--delay-ms` is a knob, not a measurement); (c) a training-side
+     quiescent-|g| regularizer (WL-D territory, slower) or an actual latency reduction
+     (bridge engineering, bigger lever) as root fixes instead of a deploy-side patch on
+     a closed loop that is already marginal at this delay.
+- **Flight-recorder bug found + fixed (2026-07-17):** `SafetyLogger::init()`
+  (`safety_logger.h`) and `hrl::Telemetry::init()` (`hrl_telemetry.h`) truncated their CSV
+  and reset their tick counter on EVERY FSM entry (every `h` press), not once per process
+  — so a failed attempt's telemetry was silently destroyed the moment a later attempt in
+  the same session was logged. This is why the first live re-run (`2026-07-17_11-40-42`)
+  showed a clean no-fall file despite Liam observing a fall earlier that session: the
+  fall's data no longer existed by the time it was inspected. Fixed: both loggers now
+  append across re-entries within one process and tag every row with a new `entry` id;
+  `deploy_gate_analyzer.py` segments on `entry` changes too and no longer drops a fallen
+  segment under the 3s `MIN_SEG_S` floor (a fast fall must never be filtered out).
+  Rebuilt, confirmed clean.
+- **Live re-run (2026-07-17, `2026-07-17_12-01-08`, post-fix) — 9 attempts recovered,
+  2 real findings:**
+  1. **Entry-tilt sensitivity, Liam's hypothesis confirmed but not a clean threshold, and
+     likely NOT a real hardware risk.** Per-entry tilt-at-`h`-press vs. outcome:
+     0.3/1.6-13.9/20.2 deg all fine (height stayed >=1.1); **40.2 deg -> stumble, height
+     dipped to 0.74**. So "not upright at entry" does predict trouble, but 20 deg alone
+     was NOT enough to trigger it — a fuzzy band, not a hard cutoff. Liam's note: on the
+     real robot `h` is only pressed once genuinely upright (~5 deg), well inside the
+     always-fine range here, so this is a loose-sim-GUI-testing artifact (pressing `h`
+     mid-lean), not a required deploy-side fix.
+  2. **A second finding, corrected mechanism (Liam's read, not chaos): step-from-stand vs.
+     ramped acceleration, matching the documented `bridge_replica.py` "historical bridge
+     killer" case (0->1.0/0.5-from-stand), not "the same command randomly failing."** One
+     entry started essentially perfectly upright (2.5 deg) and ran cleanly through a
+     GRADUAL ramp cmd 0 -> 0.2 -> 0.3 -> 0.4 -> 0.5 (13.4 s, fine); after returning to 0 it
+     then took 0.5 again as a DIRECT STEP from standing -> full collapse (height 0.14).
+     Liam's hypothesis: insufficient foot-lift/swing clearance during the sudden
+     acceleration demand, not a random latency flip. **Checked headlessly and it holds up
+     well**: same replica, same scene, same delay (0 ms), same step magnitude — the HRL
+     keeper's step-from-stand swing clearance is **0.050-0.057 m mean**, roughly HALF of
+     A0's **0.065-0.098 m** in the identical test. A concrete, matched-condition
+     difference, not proof of causation but a strong match for "foot lifting could be
+     responsible." **This is a gait/reward-shaping question (WL-D territory: the
+     swing-clearance metric + "raise clearance" lever already exist from WL-E, see
+     `docs/adr/0005` Amendment 2 item 1) — flagged here, not implemented by WL-B.**
+- **Flight-recorder bug, round 2 (2026-07-17): A0/A1 use SEPARATE `SafetyLogger`
+  instances** (`deploy/include/FSM/State_RLBase.h` vs. robot-local
+  `State_RLHRL.h`), so the round-1 fix (per-instance "have I run before" check) still let
+  the FIRST switch from A0 to A1 in a session truncate the file — A1's own instance had
+  never run before, so from ITS perspective it was still a "first entry." Fixed: the
+  truncate-vs-append decision now checks whether the CSV already exists ON DISK (robust
+  across different C++ objects), and the `entry` id is now a process-wide counter
+  (`g_safety_logger_entry`, a C++17 inline global in `safety_logger.h`), not per-instance,
+  so ids stay unique whether the retry is same-type or a cross-type switch. Rebuilt,
+  confirmed.
+- **Live re-run (2026-07-17, `2026-07-17_12-24-16`) — recorded BEFORE the round-2 fix
+  above, so the A0 portion of this session was confirmed lost (only `entry=0` present,
+  spanning what is actually just the A1 portion — A0's data was overwritten the moment
+  `h` was first pressed, exactly the round-2 bug). Liam confirmed operator workflow: fall
+  -> reset before retrying; no fall -> sometimes stop/restart without a reset — so despite
+  the single `entry` id, the by-command segments plus the safety filter's own discrete
+  `trig_fall` rising edges (a cleaner signal than height dips, since it marks genuine
+  alpha->1 escalations) give a trustworthy, largely-independent-trials failure count:
+  **0.5 m/s: 4 confirmed falls out of ~6 attempts (only ONE clean 23s pass); 1.0 m/s: 2/2
+  falls.** Critically, **the final step of a deliberate gradual ramp (0.2->0.3->0.4 all
+  clean) ALSO fell exactly at 0.5** — this revises the step-vs-ramp framing from the
+  previous entry: a controlled, gradual buildup fails too, so it is not purely a
+  step-transient/foot-clearance-at-the-moment-of-demand story. Read: **0.5+ m/s looks
+  marginal for this candidate in this bridge regardless of how the speed is reached** —
+  more consistent with a chronic gait/clearance shortfall (still fits Liam's swing-lift
+  hypothesis and the measured clearance gap vs A0) than a pure transient-shock mechanism.
+  Same WL-D routing as above; not a WL-B fix.
+- **W1 back-compat regression: PASS (2026-07-17).** Pre-velgoal 7-dim absolute-mode
+  checkpoint (`2026-06-18_10-10-27_a1_td3_relabel_absolute_no_warmstart_7k/model_7000.pt`)
+  exported clean (parity LL 1.1e-05 / HL 2.3e-05), swapped into `exported/` alongside a
+  legacy-style `deploy.yaml.w1_legacy_test` fixture (no velgoal/cadence keys, loaded via
+  `H1_2_DEPLOY_CFG` so the live config was never touched), ran the live bridge: no dim
+  errors, stood at cmd 0 for 19.1s (`2026-07-17_16-07-57`), no fall. Absent-key back-compat
+  confirmed still working. Live candidate restored and verified (`hl_target_mode=delta`,
+  `hl_velocity_goals_only=True` — the correct arm-calm/rs20 pair, not left mid-swap).
+- **G2.6 cadence modes: BOTH fell (2026-07-17)** — HL-owned (`2026-07-17_16-09-52`) and
+  pinned 0.625s (`2026-07-17_16-12-02`), held vx 0.5. HL-owned fell repeatedly and clearly
+  (4 episodes, height down to 0.03-0.2). Pinned looked clean in `_hrl.csv` alone (height
+  stayed 1.22) but the base safety CSV's `trig_fall` shows TWO real filter engagements
+  (alpha->1.0) at t=11.89s (recoverable stumble, height held) and t=20.45s (likely an
+  actual collapse, right at the very end) — **found only by cross-checking the raw
+  `trig_fall` column, not the HRL telemetry**, because `hrl_telemetry.h`'s buffer only
+  flushed every ~10s (or on a clean state exit), losing the tail on an abrupt session end
+  while the safety CSV's ~2.5s cadence kept it. **Fixed: `FLUSH_ROWS` 512->128 (~2.5s),
+  matching the safety logger; rebuilt.** Net read: cadence source (HL-owned vs pinned)
+  does NOT rescue held-0.5 stability — consistent with, and reinforcing, the existing
+  WL-D routing (chronic gait/clearance shortfall at 0.5+ m/s, not a cadence-mechanism
+  question). No further WL-B action; not re-testing until WL-D's fix lands.
 
 Operational gated checklist for `A1a_plan.md` Plan v2 stage D. Grilled 2026-07-14.
 Execution is gate-by-gate; no gate starts before its blockers pass. The battery
 (phases G1+G2) is checkpoint-agnostic: it runs once now on the current keeper
 (pipeline shakedown) and re-runs cheaply on every M2 candidate. Hardware (G3) only
 on the M2 winner.
+
+**Scope note (2026-07-20): this doc now covers TWO deploy tracks.** The A1 keeper track
+(everything below, as written) and the **A0-first hardware track** (Liam's call: the
+first real-robot deployment is the flat A0 policy, not the hierarchy). Both are owned by
+WL-B and share one bridge, one replica, one flight recorder and one C++ tree, so they are
+not separate worklines. The A0 track's ladder, its carry-overs and the four A0-specific
+items are in "A0-first hardware track" near the end of this doc; read that section FIRST
+if you are working the A0 path, since it drops roughly half the gates below as
+hierarchy-only.
 
 ## Decisions locked (grill session 2026-07-14)
 
@@ -159,7 +304,13 @@ Exit rule: all blocking gates pass on the SAME candidate + the exact config
 | **E1** | Onboard odometry availability + quality: in low-level mode on the real H1-2, log whatever publishes velocity/height (rt/sportmodestate or equivalent) during FixStand, manual perturbation, and (if available) a Unitree-controller walk; score noise std and bias drift against references (tape-measure walks, stopwatch). **Must be a BASE (pelvis) velocity estimate** (2026-07-15 finding: an IMU/torso-frame velocity destabilizes the LL via the goal channel; the bridge sensor was retargeted to pelvis for the same reason). | The topic exists in low-level mode AND supplies base-frame vx/vy with noise/bias within the DR-trained envelope (bias_range 0.1); height usable. FAIL -> decision returns to the user (custom estimator vs absolute-V* retrain). | G3 |
 | **E2** | IMU convention: standing in FixStand, verify `a_world_z = (R a_imu).z - 9.81 ~ 0` (specific-force assumption behind the fall trigger). | Within tolerance; no false fall trigger over >= 60 s standing. | G3 |
 
-## Phase G3: real robot (M2 winner only; gantry/harness)
+## Phase G3: real robot (A1 track: M2 winner only; gantry/harness)
+
+**Scoping correction (2026-07-20):** "M2 winner only" is the **A1 track's** entry rule, not
+a global one. It gated hardware on the arm-calmed HRL candidate back when A1 was the only
+deploy target. The A0-first track has its own entry rule (see "A0-first hardware track");
+A0 does not wait on any M2 candidate. The session protocol, abort rule and per-gate bars
+below apply unchanged to both tracks.
 
 Session protocol for every gate: SAFETY_FILTER=1 build verified, flight recorder
 auto-on, roles assigned (operator with remote, spotter, harness minder), E-stop
@@ -263,6 +414,119 @@ tilt/fall keep the ramped whole-body hold; trig_joint in the flight log now mean
 1.0-step at 2 ms delay with no filter, so the freeze (not the gait) was the fall cause.
 Review note: this changes safety behavior; revisit the response design before hardware
 (G3.0) — a per-joint clamp is what the H1-2 firmware does anyway.
+
+## A0-first hardware track (added 2026-07-20, Liam's call; owned by WL-B)
+
+**Decision: the first sim-to-real deployment is A0 (`State_RLBase`, key `o`), not the A1
+keeper.** Kept inside WL-B rather than opened as a new workline: it reuses the same live
+bridge, the same `bridge_replica.py`, the same flight recorder / `deploy_gate_analyzer`,
+the same E gates and the same C++ tree. A separate workline would buy nothing and would
+create a second editor of `deploy/`, which is exactly the collision WL-B's ownership rule
+exists to prevent.
+
+**Entry rule (replaces "M2 winner only" for this track):** A0 goes to hardware once its
+own G1/G2 gates are recorded and the four A0-specific items below are closed. It does not
+wait on WL-D, on M2, or on the A1 keeper.
+
+### What A0 inherits unchanged (no rework)
+
+- **W2 vendor plant.** Validated with A0 itself as the test policy (full chain at 0/2/4 ms
+  in the replica; 87 s live walking, zero safety triggers, post-mortem "Solution 1").
+- **W3 telemetry + `deploy_gate_analyzer.py`**, including the round-2 logger fix: A0 and A1
+  hold SEPARATE `SafetyLogger` instances, and the truncate decision is now disk-based with
+  a process-wide `entry` id, so an `o`-then-`h` session no longer destroys A0's rows.
+- **W4 ONNX parity** (A0 optB passes), **E1/E2**, **G3.0 protocol**, **rollback rules**.
+
+### What does NOT apply to A0 (drop from its ladder)
+
+Roughly half the A1 ladder is hierarchy machinery with no A0 counterpart:
+
+- All goal-scale work (F2 baking, ONNX metadata pinning, the C++ `freeze_scale` path).
+  A0 has no goal space, so it cannot have a goal-scale bug.
+- **The open 4 ms latency x goal-scale knife-edge finding** (G2.0 pre-check item 3) is
+  goal-scale-specific and does NOT block A0: A0 passes 0/2/4 ms cleanly on the vendor plant.
+- W1/W5 HRL structure keys, `hl_vel` input, velgoal mapping, `pin_period`.
+- **G2.6 cadence modes.** A0's `gait_phase` is a fixed 0.6 s YAML clock that matches its
+  training clock exactly; there is no HL period to pin or hand over.
+- **Decision 2 (estimator-noise DR, M2 DR-on/DR-off variants).** A0's actor never consumes
+  base velocity (`deployment.md:99`; the flat config also deletes `height_scan` from actor
+  and critic at `config/h1_2/env_cfgs.py:184-185`, so the deploy.yaml 7-term obs list is
+  complete and correct - verified 2026-07-20). The pelvis-vs-IMU failure that nearly killed
+  the keeper (post-mortem issue 2) is structurally unreachable for A0: no goal channel, no
+  V*-s feedback. E1 still runs, but a noisy real estimator degrades A0 far less.
+
+### A0-specific items to close before hardware (the actual new work)
+
+1. **Safety-filter terminal behavior is still the UN-fixed variant on A0 (highest-value
+   item).** `State_RLBase.cpp:101-144`: any policy-controlled joint outside `h1_2_limits.h`
+   sets `joint_hold`, which ramps `alpha` to 1 and drives
+   `q_cmd = (1-alpha)*action + alpha*q_meas` on all 27 joints. That is exactly the chasing
+   hold the 2026-07-16 post-mortem identified as degenerating to damping-only torque and
+   *completing* a recoverable A1 stumble (tilt only 0.196) into a fall. The A1 fix
+   (per-joint command clamp) was deliberately scoped "State_RLHRL only, A0 untouched", so
+   A0 still carries the mechanism. **Action: measure before deciding.** Run a bridge walk
+   with the flight recorder and check whether A0's gait actually grazes the limits the way
+   A1a's did (`trig_joint` active 40% of session, stops grazed 0.01-0.2 rad every stride).
+   If A0 does not graze, leaving the hold as-is is defensible and the G3.0 terminal-behavior
+   choice stands as written. If it does graze, port the clamp to `State_RLBase` before
+   hardware. This is a cheap measurement, not a speculative code change.
+2. **`h1_2_limits.h` vs. the sim model disagreement is now BLOCKING for A0** (knee
+   [-0.26, 2.05] vs. scene XML [-0.12, 2.19]). It was flagged as "audit against the
+   official URDF before hardware" during the A1 post-mortem; on the A0-first path it gates
+   the first hardware session, because A0's filter reads those same limits and item 1's
+   whole-body hold is what fires on a false positive.
+3. **Formal G2 recording pass for A0.** A0's current evidence is real but informal (the
+   87 s live walk and the replica chain passes were produced while debugging W2's plant,
+   not as recorded gates). Re-run G2.1/G2.2/G2.3/G2.4/G2.7 against A0's exact deploy build
+   with the analyzer on, so the G2.2 achieved-vx and stride numbers exist as the parity
+   reference G3.2/G3.3 score against.
+4. **Arms: split-vs-live is an A0-specific call.** Decision 7 ("split first, live later")
+   was written because the A1 keeper's arms were wild. A0-optB's arms are already calm in
+   sim (bench `ub_arm_vel` 0.143 and `pose_dev` 0.0004, vs the A1a keeper's 0.50-0.64 and
+   ~70x). Split (`hold_joint_ids` 12-26) is still the right first hardware session (fewer
+   actuated joints, fewer failure modes, and it is the locked hardware config), but the
+   live-arms step is materially less risky for A0 than decision 7 assumed and need not wait
+   for a full stage-D close.
+
+### A0 gate ladder
+
+Bars are the A1 track's bars unless noted; parity references are A0's own mjlab numbers.
+
+| Gate | A0 status / what to do | Reference numbers |
+|---|---|---|
+| **G1.1** | Bench + holds already exist for `a0_v2_optB_rs20_baseline`. Re-record only if the deployed ONNX is re-exported from a different run. | err_vx 0.085, CoT 0.537, 0 falls; ss@0.5 **0.055** (t90 0.6 s), ss@1.0 **0.077** (t90 0.9 s) |
+| **G1.2** | ✅ A0 optB passes `onnx_parity.py` (W4). Single net, `velocity/v0/exported/policy.onnx`, no goal-scale metadata to check. | max abs diff < 1e-4 |
+| **G2.0** | ✅ informally (loads and runs live). Fold into the item-3 recording pass. | no dim/FSM errors |
+| **G2.1** | Record: stand at cmd 0, 60 s, analyzer on. | action-rate within ~1.5x A0's mjlab stand level |
+| **G2.2** | Record: held vx 0.3/0.5/1.0 (>=30 s each) + backward -0.3, strafe +-0.3, yaw +-0.5. Deploy YAML clamps vx [-0.5, 1.0], vy/wz +-0.5 (pure operator clamp for A0: no goal scale derives from these). | achieved vx within +-0.05 m/s of G1.1; stride within +-0.05 s |
+| **G2.3** | Record: 0 -> 0.5 -> 0, and 0 -> 1.0 from stand (the historical killer; A0 passes it in the replica at 0/2/4 ms). | 0 falls, clean return to stand |
+| **G2.4** | Record in split mode (`hold_joint_ids` 12-26), per item 4. | same bars as G2.1-G2.3 |
+| **G2.5** | **N/A for A0** (no estimator-fed goal channel). | - |
+| **G2.6** | **N/A for A0** (fixed 0.6 s clock). | - |
+| **G2.7** | Record: stress scene, held 0.5 + steps at 0.5. | 0 falls at 0.5 (BLOCKING); 1.0 advisory |
+| **E1/E2** | Run as written. E1's bar is softer for A0 (estimator quality is not in A0's control loop), but E2 (IMU convention / false fall trigger) is unchanged and still blocking. | per Phase E |
+| **G3.0-G3.3** | As written, with item 1's terminal-behavior decision made first. | G3.3 = repeatable free walk |
+
+### DR ruling for the A0 deploy candidate (2026-07-20)
+
+**Deploy the current A0 policy and test; do NOT pre-emptively widen DR.** A0 already
+trains with push kicks (0.5 m/s linear, 0.52-0.78 rad/s angular, every 5-6 s), foot
+friction (0.3, 1.6), base-CoM offset (+-5 cm/axis), encoder bias (+-0.015 rad) and obs
+noise on ang_vel / gravity / joint_pos / joint_vel (`velocity_env_cfg.py:192-262`; the
+`push_robot` pop at `config/h1_2/env_cfgs.py:148` is play-mode-only, so training keeps it).
+What is deliberately absent (joint friction/damping/armature, actuation delay, motor
+strength) is ADR-0005's explicit scoping to A2's Wide DR, not an oversight.
+
+Rationale: (i) the validation ladder above is built to catch what extra DR would blindly
+compensate for, and A0 has already cleared the one failure mode that actually bit this
+project (latency instability, replica 0/2/4 ms); (ii) **WL-E is the precedent against
+guessing** - it started from "A0 barely lifts its feet, it must need friction", measured
+it, and falsified the plant attribution (the cause was training-side clearance shaping);
+(iii) if hardware does fail, the flight recorder plus this ladder localizes the factor, and
+WL-D arms 7/8/9 (explicit-PD actuation, the unitree_rl_gym perturbation package,
+correlated obs-noise) are already specced as targeted reactive fixes. Margin for the first
+attempt comes from the G3 protocol (harness, spotter, E-stop rehearsal, abort-on-filter-
+engagement), not from pre-inflating training DR on a guess.
 
 ## Rollback rules
 

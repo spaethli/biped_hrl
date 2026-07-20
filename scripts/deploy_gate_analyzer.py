@@ -46,13 +46,22 @@ def main() -> None:
   goal_dim = s.shape[1]
   height = s[:, 6] if goal_dim >= 7 else None
 
-  # Segment on command changes (commands are HELD between inputs).
+  # Segment on command changes (commands are HELD between inputs) AND on `entry` changes
+  # (2026-07-17: separate FSM re-entries/retries within one session — e.g. a fall then a
+  # successful retry — no longer overwrite each other's telemetry, but at the same held
+  # command they'd otherwise merge into one segment here without this).
   change = np.any(np.diff(cmd, axis=0) != 0, axis=1)
+  if "entry" in data.dtype.names:
+    change = change | (np.diff(data["entry"]) != 0)
   bounds = [0, *(np.nonzero(change)[0] + 1), len(t)]
   segs = []
   for a, b in zip(bounds[:-1], bounds[1:]):
     dur = t[b - 1] - t[a]
-    if dur < MIN_SEG_S:
+    fell = height is not None and bool(height[a:b].min() < FALL_HEIGHT)
+    # A fall segment is exactly the event this tool must not hide, even if it happened
+    # fast (the takeover falls found 2026-07-17 collapsed in ~1-1.5s, well under this
+    # floor) -- only the MIN_SEG_S floor filters out ordinary sub-3s key-press blips.
+    if dur < MIN_SEG_S and not fell:
       continue
     c = cmd[a]
     ach = s[a:b, :3].mean(axis=0)
@@ -72,7 +81,7 @@ def main() -> None:
     seg["stride_s"] = None if np.isnan(stride) else round(stride, 3)
     if height is not None:
       seg["height_min"] = round(float(height[a:b].min()), 3)
-      seg["fell"] = bool(height[a:b].min() < FALL_HEIGHT)
+      seg["fell"] = fell
     segs.append(seg)
 
   hdr = ("t0", "dur_s", "cmd", "achieved", "err_vx", "err_vy", "err_yaw",
