@@ -76,6 +76,24 @@ public:
         for (int i = 0; i < n_; i++) buf_ << ",meas_q" << i;
         for (int i = 0; i < n_; i++) buf_ << ",meas_dq" << i;
         buf_ << ",quat_w,quat_x,quat_y,quat_z,acc_x,acc_y,acc_z";
+        // cmd_* = commanded twist (keyboard/joystick, both FSMs). ach_* = ground-truth body-
+        // frame base velocity from the sim bridge's SportModeState (2026-07-21, WL-B0) — SIM
+        // ONLY, added for sim-to-sim validation (e.g. A0 achieved-vx) and for correlating a
+        // fall with what was commanded at the time (the flight recorder previously had no
+        // command column at all). Reads 0 on real hardware: same estimator gap as E1, the
+        // SportModeState publisher goes silent once a custom low-level controller has command.
+        buf_ << ",cmd_vx,cmd_vy,cmd_wz,ach_vx,ach_vy,ach_vz";
+        // phase_sin/phase_cos = the gait-clock observation AS THE POLICY SAW IT (post
+        // stand-mask), from the robot-local gait_phase_cmd term (2026-07-21, defect 0).
+        // (0,0) under cmd 0 is correct; (0,0) while a command is held means the clock is
+        // dead, which is precisely the bug the joystick-hardcoded shared term caused.
+        buf_ << ",phase_sin,phase_cos";
+        // trig_joint MEANING (A1 since 2026-07-16, A0 since 2026-07-23): "at least one
+        // commanded joint was clamped to its h1_2_limits.h bound this tick", with NO hold
+        // effect. It no longer contributes to alpha, which is now a pure tilt/fall
+        // indicator for both FSM types. Older CSVs mean the opposite ("a MEASURED joint
+        // left range -> whole-body hold engaged"), so trig_joint=1 with alpha>0 in an A0
+        // capture dated before 2026-07-23 is the OLD semantics — do not mix the two eras.
         buf_ << ",alpha,trig_joint,trig_tilt,trig_fall,entry\n";
         // Truncate/create the file and write the header now (first entry only).
         std::ofstream(base_ + ".csv", std::ios::trunc) << buf_.str();
@@ -87,7 +105,8 @@ public:
     void record(const std::vector<float>& raw_q,
                 const float* meas_q, const float* meas_dq,
                 const float quat[4], const float acc[3],
-                float alpha, bool trig_joint, bool trig_tilt, bool trig_fall)
+                float alpha, bool trig_joint, bool trig_tilt, bool trig_fall,
+                const float cmd[3], const float ach_vel[3], const float phase[2])
     {
         if (base_.empty()) return;
         buf_ << (tick_++ * dt_);
@@ -96,6 +115,9 @@ public:
         for (int i = 0; i < n_; i++) buf_ << ',' << meas_dq[i];
         buf_ << ',' << quat[0] << ',' << quat[1] << ',' << quat[2] << ',' << quat[3];
         buf_ << ',' << acc[0]  << ',' << acc[1]  << ',' << acc[2];
+        buf_ << ',' << cmd[0] << ',' << cmd[1] << ',' << cmd[2];
+        buf_ << ',' << ach_vel[0] << ',' << ach_vel[1] << ',' << ach_vel[2];
+        buf_ << ',' << phase[0] << ',' << phase[1];
         buf_ << ',' << alpha << ',' << (trig_joint?1:0) << ',' << (trig_tilt?1:0)
              << ',' << (trig_fall?1:0) << ',' << g_safety_logger_entry << '\n';
         // Periodic flush as crash insurance (~5 s at 500 Hz). Infrequent blocking write.

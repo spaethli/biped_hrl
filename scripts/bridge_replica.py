@@ -8,7 +8,9 @@ HL-owned cadence + pelvis-frame goal state). Gains/scales/hrl params come from t
 YAMLs and the exported/ ONNX, so this tests what actually ships.
 
 Chain per run: FixStand(band) -> policy takeover(band) -> stand(free) -> step to
---step-vx from stand -> stop -> walk --walk-vx. Prints one line per phase +
+--step-vx2 (0.5) from stand -> stop -> step to --step-vx (1.0) from stand -> stop ->
+walk --walk-vx -> stop -> walk --walk-vy (strafe) -> stop -> walk --walk-wz (turn)
+(the last two dropped by --skip-lateral). Prints one line per phase +
 `[REPLICA] {json}`.
 
 Uses (validated 2026-07-15/16): plant A/B tests, latency sweeps, pre-session sanity on a
@@ -37,11 +39,31 @@ import yaml
 
 SCENE_DIR = '/opt/unitree_mujoco/unitree_robots/h1_2'
 DEPLOY = 'deploy/robots/h1_2/config/policy'
+# Mirrors deploy/robots/h1_2/include/h1_2_limits.h (h1_2_joint_names / h1_2_joint_limits,
+# corrected 2026-07-21) -- same order as FIX_KP/FIX_KD/the action vector (both legs, waist,
+# both arms). Keep in sync with the header by hand; there is no shared source of truth.
+JOINT_NAMES = ['left_hip_yaw', 'left_hip_pitch', 'left_hip_roll', 'left_knee',
+               'left_ankle_pitch', 'left_ankle_roll',
+               'right_hip_yaw', 'right_hip_pitch', 'right_hip_roll', 'right_knee',
+               'right_ankle_pitch', 'right_ankle_roll', 'waist_yaw',
+               'left_shoulder_pitch', 'left_shoulder_roll', 'left_shoulder_yaw', 'left_elbow',
+               'left_wrist_roll', 'left_wrist_pitch', 'left_wrist_yaw',
+               'right_shoulder_pitch', 'right_shoulder_roll', 'right_shoulder_yaw', 'right_elbow',
+               'right_wrist_roll', 'right_wrist_pitch', 'right_wrist_yaw']
+JOINT_LIMITS = np.array([
+  (-0.43, 0.43), (-3.14, 2.50), (-0.43, 3.14), (-0.12, 2.19), (-0.8973, 0.5236), (-0.2618, 0.2618),
+  (-0.43, 0.43), (-3.14, 2.50), (-3.14, 0.43), (-0.12, 2.19), (-0.8973, 0.5236), (-0.2618, 0.2618),
+  (-2.35, 2.35),
+  (-3.14, 1.57), (-0.38, 3.40), (-2.66, 3.01), (-0.95, 3.18), (-3.01, 2.75), (-0.4625, 0.4625), (-1.27, 1.27),
+  (-3.14, 1.57), (-3.40, 0.38), (-3.01, 2.66), (-0.95, 3.18), (-2.75, 3.01), (-0.4625, 0.4625), (-1.27, 1.27),
+], float)
 FIX_KP = np.array([250,250,250,400,80,40, 250,250,250,400,80,40, 600,
                    250,400,80,80,20,20,20, 250,400,80,80,20,20,20], float)
 FIX_KD = np.array([6.5,6.5,6.5,10,1.5,0.4, 6.5,6.5,6.5,10,1.5,0.4, 6,
                    6,10,2,2,0.5,0.5,0.5, 6,10,2,2,0.5,0.5,0.5], float)
-FIX_Q = np.array([0,-0.3,0,0.5,-0.2,0, 0,-0.3,0,0.5,-0.2,0, 0,
+# Aligned to the policy nominal 2026-07-23 (was hip_pitch -0.3 / ankle_pitch -0.2), matching
+# deploy/robots/h1_2/config/config.yaml FixStand qs — hand-synced, no shared source of truth.
+FIX_Q = np.array([0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0, 0,
                   0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0], float)
 
 
@@ -51,7 +73,12 @@ def main() -> None:
   p.add_argument('--scene', default='scene.xml', help='scene.xml (vendor) | scene_stress.xml')
   p.add_argument('--delay-ms', type=float, default=2.0, help='feedback latency on q/dq (PD + obs)')
   p.add_argument('--walk-vx', type=float, default=0.5)
+  p.add_argument('--walk-vy', type=float, default=0.5, help='held lateral (strafe) command')
+  p.add_argument('--walk-wz', type=float, default=0.5, help='held yaw (turn) command')
   p.add_argument('--step-vx', type=float, default=1.0, help='held command stepped straight from stand')
+  p.add_argument('--step-vx2', type=float, default=0.5, help='second, gentler step-from-stand command')
+  p.add_argument('--skip-lateral', action='store_true',
+                 help='drop the vy/wz phases (old vx-only chain, for quick smoke checks)')
   p.add_argument('--onnx-dir', default=None, help='override exported/ dir (candidate checkpoints)')
   p.add_argument('--plant', choices=('scene', 'nominal'), default='scene',
                  help='nominal = override joint armature/frictionloss/damping in-memory '
@@ -68,10 +95,6 @@ def main() -> None:
   prov = ['CPUExecutionProvider']
   if args.policy == 'hrl':
     hrl = cfg['hrl']
-    c = int(hrl['c'])
-    plo, phi = (map(float, hrl['cadence_period_range'])) if hrl.get('hl_cadence') else (0.35, 1.0)
-    plo, phi = float(plo), float(phi)
-    pin = float(hrl.get('pin_period', 0.0))
     nomh = float(hrl['nominal_root_height'])
     ll = ort.InferenceSession(f'{onnx_dir}/low_level.onnx', providers=prov)
     hl = ort.InferenceSession(f'{onnx_dir}/high_level.onnx', providers=prov)
@@ -81,6 +104,18 @@ def main() -> None:
     # may legitimately differ, e.g. narrowed lin_vel_x/ang_vel_z). Only the velocity prefix
     # is used here (delta mode, hl_velocity_goals_only).
     meta = hl.get_modelmeta().custom_metadata_map
+    # `c` and the cadence source/range are PER-CANDIDATE (baked into the HL ONNX at
+    # export), not deploy.yaml properties -- deploy.yaml's `hrl.hl_cadence` is a single
+    # flag for whichever checkpoint is currently staged. Reading it here instead of the
+    # metadata silently mis-decodes any --onnx-dir candidate whose own hl_cadence_source
+    # disagrees with the staged deploy.yaml (caught 2026-07-22: fix0p8 trained with a
+    # FIXED 0.8s clock (`hl_cadence_source=random`, HL action dim 3, no period channel),
+    # but deploy.yaml's live candidate has `hl_cadence_source=hl` -> IndexError reading a
+    # non-existent 4th action dim).
+    c = int(meta['c'])
+    hl_owns_period = meta.get('hl_cadence_source', 'random') == 'hl'
+    plo, phi = (float(x) for x in meta['cadence_period_range'].split(','))
+    pin = float(hrl.get('pin_period', 0.0))
     if 'goal_scale' in meta:
       gscale = np.array([float(x) for x in meta['goal_scale'].split(',')])[:3]
     else:
@@ -128,7 +163,10 @@ def main() -> None:
   last_a = np.zeros(27)
   tgt = offset.copy()
   target = np.zeros(7)
-  phase_acc, period, ks = [0.0], [0.6 if pin <= 0 else pin] if args.policy == 'hrl' else [0.6], [0]
+  phase_acc, ks = [0.0], [0]
+  period = [pin if pin > 0 else plo] if args.policy == 'hrl' else [0.6]
+  act_delta = [0.0]  # mean |a_t - a_{t-1}| at the last policy tick (the project's action_rate)
+  clamp_oor = [np.zeros(27, dtype=bool)]  # which joints the last policy tick clamped (trig_joint)
 
   def frames():
     w, x, y, z = d.qpos[3:7]
@@ -138,7 +176,7 @@ def main() -> None:
     return R, np.array([0, 0, -1.0]) @ R
 
   def pol(cmd):
-    nonlocal last_a, tgt, target
+    nonlocal last_a, tgt, target, act_delta
     R, grav = frames()
     q_d, dq_d = hist[0]
     ph = phase_acc[0] if args.policy == 'hrl' else (d.time % 0.6) / 0.6
@@ -157,13 +195,21 @@ def main() -> None:
         target[:3] = s[:3] + gscale * g[:3]  # delta mode, velocity goal prefix
         target[3:6] = [0, 0, -1.0]
         target[6] = nomh
-        if pin <= 0:
+        if pin <= 0 and hl_owns_period:
           period[0] = plo + (g[3] + 1) * 0.5 * (phi - plo)
       ks[0] += 1
       phase_acc[0] = (phase_acc[0] + 0.02 / period[0]) % 1.0
       a = ll.run(None, {'obs': np.concatenate([policy, target - s]).astype(np.float32)[None]})[0][0]
+    act_delta[0] = float(np.abs(a - last_a).mean())
     last_a = a.copy()
-    tgt = offset + scale * a
+    # State_RLHRL clips the commanded position to h1_2_joint_limits before it ever reaches
+    # the motor (State_RLHRL.cpp:373-376, `trig_joint` in the flight log) -- found missing
+    # here 2026-07-22 while diagnosing the arm5 zero-command bridge failure: without this,
+    # the replica's PD was driving off the RAW (potentially further-out-of-range) target,
+    # which is not what the real bridge/hardware ever does once a joint rides its stop.
+    raw_tgt = offset + scale * a
+    clamp_oor[0] = (raw_tgt < JOINT_LIMITS[:, 0]) | (raw_tgt > JOINT_LIMITS[:, 1])
+    tgt = np.clip(raw_tgt, JOINT_LIMITS[:, 0], JOINT_LIMITS[:, 1])
 
   results = []
   min_swing = round(0.1 / m.opt.timestep)  # sub-0.1s air time = contact chatter, not a step
@@ -171,13 +217,32 @@ def main() -> None:
   phases = [('fixstand', 6.0, 'fix', True, (0, 0, 0)),
             ('takeover', 3.0, 'pol', True, (0, 0, 0)),
             ('stand', 5.0, 'pol', False, (0, 0, 0)),
-            (f'step{args.step_vx}', 6.0, 'pol', False, (args.step_vx, 0, 0)),
-            ('stop', 3.0, 'pol', False, (0, 0, 0)),
-            (f'walk{args.walk_vx}', 8.0, 'pol', False, (args.walk_vx, 0, 0))]
+            (f'step{args.step_vx2}vx', 6.0, 'pol', False, (args.step_vx2, 0, 0)),
+            ('stop1', 3.0, 'pol', False, (0, 0, 0)),
+            (f'step{args.step_vx}vx', 6.0, 'pol', False, (args.step_vx, 0, 0)),
+            ('stop2', 3.0, 'pol', False, (0, 0, 0)),
+            (f'walk{args.walk_vx}vx', 8.0, 'pol', False, (args.walk_vx, 0, 0))]
+  if not args.skip_lateral:
+    phases += [('stop3', 3.0, 'pol', False, (0, 0, 0)),
+               (f'walk{args.walk_vy}vy', 8.0, 'pol', False, (0, args.walk_vy, 0)),
+               ('stop4', 3.0, 'pol', False, (0, 0, 0)),
+               (f'walk{args.walk_wz}wz', 8.0, 'pol', False, (0, 0, args.walk_wz))]
   for label, dur, mode, band, cmd in phases:
     n = int(dur / m.opt.timestep)
     qv = []
     apex = []  # swing apex heights (either foot) completed in this phase
+    # State_RLHRL's per-joint COMMAND CLAMP (State_RLHRL.cpp:373-376, `trig_joint` in the
+    # flight log): the raw policy target gets clipped to h1_2_joint_limits whenever it
+    # would command past the mechanical stop (now applied in pol(), not just measured --
+    # an earlier version of this instrument computed the duty cycle but kept driving the
+    # PD off the unclamped target, which is not what the real bridge/hardware ever does).
+    # The C++ clamp itself doesn't destabilize (no hold effect since 2026-07-16), but a
+    # joint riding its clamp every tick was the flagged discriminator hypothesis for the
+    # arm5 zero-command bridge failure.
+    pol_ticks = 0
+    clamp_ticks = 0
+    clamp_per_joint = np.zeros(27, dtype=int)
+    act_rates = []  # per-policy-tick mean |Δaction| (the project's action_rate metric)
     for i in range(n):
       q_d, dq_d = hist[0]
       if mode == 'fix':
@@ -186,6 +251,12 @@ def main() -> None:
       else:
         if i % decim == 0:
           pol(np.array(cmd, float))
+          pol_ticks += 1
+          act_rates.append(act_delta[0])
+          oor = clamp_oor[0]
+          if oor.any():
+            clamp_ticks += 1
+            clamp_per_joint += oor.astype(int)
         d.ctrl[:] = kp * (tgt - q_d) + kd * (0 - dq_d)
       if band:
         dx = np.array([0, 0, 3]) - d.qpos[:3]
@@ -219,16 +290,24 @@ def main() -> None:
     w, x, y, z = d.qpos[3:7]
     pitch = float(np.arcsin(np.clip(2 * (w*y - z*x), -1, 1)))
     fell = bool(d.qpos[2] < 0.7) or abs(pitch) > 0.5
+    trig_duty = round(clamp_ticks / pol_ticks, 3) if pol_ticks else None
+    top_joints = sorted(((JOINT_NAMES[j], round(int(clamp_per_joint[j]) / pol_ticks, 3))
+                         for j in range(27) if clamp_per_joint[j] > 0),
+                        key=lambda kv: -kv[1])[:3] if pol_ticks else []
     rec = {'phase': label, 'qvel_rms': round(float(np.mean(qv)), 3),
+           'act_rate': round(float(np.mean(act_rates)), 3) if act_rates else None,
            'pitch': round(pitch, 3), 'height': round(float(d.qpos[2]), 3), 'fell': fell,
            'steps': len(apex),
            'clr_mean': round(float(np.mean(apex)), 4) if apex else None,
-           'clr_max': round(float(np.max(apex)), 4) if apex else None}
+           'clr_max': round(float(np.max(apex)), 4) if apex else None,
+           'trig_joint_duty': trig_duty, 'trig_joint_top': top_joints}
     results.append(rec)
     clr = f"steps={rec['steps']:3d} clr={rec['clr_mean']:.3f}/{rec['clr_max']:.3f}" \
         if apex else 'steps=  0'
-    print(f"  {label:12s} qvel_rms={rec['qvel_rms']:.3f} pitch={rec['pitch']:+.3f} "
-          f"h={rec['height']:.3f} {clr} {'FELL' if fell else 'ok'}")
+    tj = f" trig_joint={trig_duty:.2f}({top_joints[0][0]})" if top_joints else ''
+    ar = f" act_rate={rec['act_rate']:.3f}" if rec['act_rate'] is not None else ''
+    print(f"  {label:12s} qvel_rms={rec['qvel_rms']:.3f}{ar} pitch={rec['pitch']:+.3f} "
+          f"h={rec['height']:.3f} {clr}{tj} {'FELL' if fell else 'ok'}")
     if fell:
       break
   out = {'policy': args.policy, 'scene': args.scene, 'plant': args.plant,

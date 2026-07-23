@@ -43,7 +43,35 @@ repo doc is canonical for project facts; the memory may *point* to it.
 - Findings-ledger entries should carry enough identity to find the run again:
   run name, log dir, W&B run id, key metrics.
 
-### Conciseness budget (prevent doc bloat)
+### Routine sync vs. a requested restructuring/cleanup pass
+
+The "Conciseness budget" below governs the **routine** mode of this skill: routing one
+new fact at a time into an already-healthy doc. When the user instead explicitly asks to
+**restructure, clean up, or shrink** the `doc/hrl/` planning docs (`A1a_plan.md`,
+`A1a_deploy_plan.md`, `worklines.md`, and their siblings for future architectures) — a
+different, stricter rule applies, because **these docs are the user's primary thesis
+report source material**, not disposable working notes: he queries them later for "what
+happened and why" when writing the report, and a condensed "final state only" rewrite
+destroys exactly the methodology narrative (what was tried, why it failed, how the root
+cause was found) a thesis needs. Git history is not a substitute for this — the docs
+themselves are the working knowledge base.
+
+For a restructuring pass on these docs:
+- **Default action is reorganize-in-place**: promote current-status dashboards to the
+  top, fix identified stale status fields (✅/⬜/dates that no longer match later
+  sections), improve headings/section order/navigability. This is not "cutting."
+- **Only trim two things**: (a) content that is genuinely unimportant to the report or
+  its results (not just verbose), or (b) a literal duplicate of a fuller copy that
+  already lives elsewhere in the doc set — and even then, point to the canonical copy,
+  never delete the only copy of something.
+- **Do not condense, summarize, or cut**: narrative detail, numbers, superseded/dead-end
+  findings, or the blow-by-blow of "bug found → fixed → re-measured" sagas, even when
+  they read like a messy chronological journal. That messiness ledger *is* the report
+  material.
+- When in doubt whether a specific cut loses retrievable detail, keep it, or ask before
+  making it — don't guess toward brevity.
+
+### Conciseness budget (prevent doc bloat) — routine-sync mode only
 
 Each sync should leave the doc **roughly flat in length** — a milestone *retires* stale
 text, it doesn't only append. Concretely:

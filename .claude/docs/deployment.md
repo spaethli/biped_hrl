@@ -11,13 +11,23 @@ Setup scripts (**source them, don't execute**):
 - `source setup_all_robot.sh` → `H1_2_DOMAIN_ID=0`, `NETWORK=enp11s0`,
   `CFG=deploy_real.yaml` → run `h1_2_real`
 
+**GOTCHA — deploy-config fixtures must exist in BOTH policy dirs** (2026-07-22): `CtrlFSM`
+constructs EVERY registered state at startup, and `State_RLBase` (`velocity/v0`) and
+`State_RLHRL` (`velocity_hrl/v0`) both read the SAME `H1_2_DEPLOY_CFG` name and both call
+`YAML::LoadFile(policy_dir/params/<name>)`. So a fixture present in only one dir makes
+`h1_2_ctrl` die at startup with a yaml-cpp **`BadFile`** exception ("bad file"), before any
+state runs — even if you only intend to use the other one. This bit `deploy.yaml.g2_4_split_test`,
+which existed only under `velocity/v0`; the A1 twin was added 2026-07-22. When adding any new
+fixture, create it in both dirs (`g26_pinned` and `w1_legacy_test` already follow this).
+
 FSM states + keyboard: `i`=FixStand, `o`=Velocity/walk, `p`=Passive.
 Velocity keys: `w/s`=fwd/bwd, `a/d`=strafe, `q/e`=turn (clamped to training ranges),
 `1`-`9`=held vx 0.1-0.9, `0`=stop (2026-07-16, for held-command gates; `w`=vx **1.0**,
 the range edge — use numbers first).
 Config: `deploy/robots/h1_2/config/config.yaml` (`keyboard_transitions`).
-Observation assembly: `deploy/robots/h1_2/src/State_RLBase.cpp`
-(`keyboard_velocity_commands`).
+Observation assembly: `deploy/robots/h1_2/include/h1_2_observations.h`
+(`keyboard_velocity_commands`; moved there from `State_RLBase.cpp` on 2026-07-21 with the
+`gait_phase_cmd` fix, see A1a_deploy_plan.md "Defect 0 FIXED").
 
 ## Bridge plant (RESOLVED 2026-07-15 — faithful + stress variant)
 
@@ -162,8 +172,8 @@ yaml ranges" and a wrong-dim throw); `onnx_parity.py` re-passes (LL 4.2e-05, HL 
   narrow ranges under `absolute`** — `State_RLHRL` warns. `delta` is the A1 default and what
   is deployed, so this does not bite today.
 
-Bridge footnote: `keyboard_velocity_commands` (`State_RLBase.cpp:27`) reads the ranges into a
-`cfg` var and **never uses it** (key map hardcoded, `w`=1.0) — the sim bridge has no clamp at
+Bridge footnote: `keyboard_velocity_commands` (`include/h1_2_observations.h`) reads the ranges
+into a `cfg` var and **never uses it** (key map hardcoded, `w`=1.0) — the sim bridge has no clamp at
 all, so don't validate a command limit there. Only the joystick path clamps.
 
 **Test knob:** `deploy.yaml` `hrl.state_noise: {velocity, orientation, height}` injects per-step

@@ -30,6 +30,10 @@
 #   LL_FOOTSLIP       float (default 0.0)          -> arm 4b; >0 tags _footslipXpXX
 #   LL_FOOTCLEAR      float (default 0.0)          -> arm 4c; >0 tags _footclearXpX
 #   LL_ENERGY         float (default 0.0)          -> arm 4d; >0 tags _energyXpXX
+#   LL_ACTION_RATE    float (default 0.02)          -> WL-D combo batch (2026-07-23)
+#                     "smoothness" lever / A0-mirror action-rate weight; != 0.02 tags
+#                     _arXpXX (A0's own action_rate_l2 weight is 0.05, vs A1's tuned 0.02
+#                     default - see rl_cfg.py ll_action_rate_coef docstring)
 #   ANKLE_ANCHOR      True|False (default False)   -> arm 5 (weight fixed at 4.0 via the
 #                     rl_cfg default); True tags _ankle
 #   LL_PITCHREF       float (default 0.0)          -> arm 6 formulation A (heel-to-toe
@@ -71,6 +75,8 @@
 #   sbatch --export=ALL,LL_FOOTSLIP=0.25 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --export=ALL,LL_FOOTCLEAR=1.0 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --export=ALL,LL_ENERGY=0.05 train_h1_2_a1a_LL_rewards.sh
+#   # WL-D combo batch (2026-07-23), e.g. combo1 arm4d+smoothness:
+#   sbatch --export=ALL,LL_ENERGY=0.05,LL_ACTION_RATE=0.05 train_h1_2_a1a_LL_rewards.sh
 #   # arm 5:
 #   sbatch --export=ALL,ANKLE_ANCHOR=True train_h1_2_a1a_LL_rewards.sh
 #   # arm 6 (formulation A only):
@@ -104,6 +110,7 @@ LL_ANGMOM=${LL_ANGMOM:-0.0}
 LL_FOOTSLIP=${LL_FOOTSLIP:-0.0}
 LL_FOOTCLEAR=${LL_FOOTCLEAR:-0.0}
 LL_ENERGY=${LL_ENERGY:-0.0}
+LL_ACTION_RATE=${LL_ACTION_RATE:-0.02}
 ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
 LL_PITCHREF=${LL_PITCHREF:-0.0}
 LL_PUSHOFF=${LL_PUSHOFF:-0.0}
@@ -148,6 +155,12 @@ EN_FLAG=""; EN_TAG=""
 awk "BEGIN{exit !($LL_ENERGY > 0)}" && EN_FLAG="--agent.ll-energy-coef ${LL_ENERGY}" \
   && EN_TAG="_energy$(echo $LL_ENERGY | tr '.' 'p')"
 
+# WL-D combo batch (2026-07-23): ll_action_rate_coef override (smoothness lever / A0
+# action-rate mirror). Default 0.02 is the rl_cfg default, so only tag on divergence.
+AR_FLAG=""; AR_TAG=""
+awk "BEGIN{exit !($LL_ACTION_RATE != 0.02)}" && AR_FLAG="--agent.ll-action-rate-coef ${LL_ACTION_RATE}" \
+  && AR_TAG="_ar$(echo $LL_ACTION_RATE | tr '.' 'p')"
+
 # Arm 5: the ankle-roll posture anchor (weight fixed at 4.0 via the rl_cfg default).
 ANKLE_FLAG=""; ANKLE_TAG=""
 [[ "$ANKLE_ANCHOR" == "True" ]] && ANKLE_FLAG="--agent.ll-posture-anchor-ankle-roll True" \
@@ -175,9 +188,9 @@ MIR_FLAG=""; MIR_TAG=""
 awk "BEGIN{exit !($LL_MIRROR > 0)}" && MIR_FLAG="--agent.ll-mirror-coef ${LL_MIRROR}" \
   && MIR_TAG="_mirror$(echo $LL_MIRROR | tr '.' 'p')"
 
-RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${ANKLE_TAG}${PR_TAG}${PO_TAG}${SYM_TAG}${MIR_TAG}_s${SEED}"
+RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${AR_TAG}${ANKLE_TAG}${PR_TAG}${PO_TAG}${SYM_TAG}${MIR_TAG}_s${SEED}"
 
-echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
+echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
 
 python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS} \
@@ -185,7 +198,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --agent.seed ${SEED} \
     --agent.ll-cadence-coef ${LL_CADENCE_COEF} \
     $CAD_FLAG \
-    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $ANKLE_FLAG $PR_FLAG $PO_FLAG $SYM_FLAG $MIR_FLAG \
+    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $AR_FLAG $ANKLE_FLAG $PR_FLAG $PO_FLAG $SYM_FLAG $MIR_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

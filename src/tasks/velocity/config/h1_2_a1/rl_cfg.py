@@ -311,24 +311,40 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   gated (not actual contact - phi is only well-defined on the schedule). Requires
   ``hl_cadence`` (reads ``env.hrl_phase``/``hrl_period``). See ``mdp.ankle_pushoff_pitchref``
   and ``A1a_plan.md`` Arm 6. 0 disables (byte-identical)."""
-  ll_pitchref_theta_hs: float = -0.253
-  """Measured ankle_pitch angle (rad) at scheduled heel-strike - constants probe on the
-  D2 checkpoint (2026-07-17, n=6528 events, std 0.125); nominal standing is -0.3."""
-  ll_pitchref_theta_to: float = -0.275
-  """Measured ankle_pitch angle (rad) at scheduled toe-off - constants probe on the D2
-  checkpoint (2026-07-17, n=6592 events, std 0.073).
+  ll_pitchref_theta_hs: float = -0.4913
+  """Ankle_pitch angle (rad) at scheduled heel-strike.
 
-  **Correction 2026-07-20: the original sign-convention claim here was WRONG.** The
-  2026-07-17 probe inferred direction from a correlational signal (theta_hs vs theta_to)
-  smaller than its own noise and concluded "more negative = plantarflexion." A
-  forward-kinematics sweep of the XML (no policy/dynamics - just how the toe moves as
-  the joint angle changes) proves the opposite: increasing ``ankle_pitch`` moves the toe
-  DOWN (plantarflexion); decreasing moves it UP (dorsiflexion). So ``theta_to <
-  theta_hs`` here means the D2 baseline trends toward DORSIFLEXION (toe-lift) at
-  toe-off, not push-off - this reference was calibrating formulation A toward the same
-  defect it was meant to fix, just at an amplitude too small to see. Not retrained as of
-  this correction (planning-chat call) - see ``A1a_plan.md`` Arm 6 for the read that
-  surfaced this (arm 6 formulation B, direction-corrected 2026-07-20)."""
+  **Recalibrated 2026-07-22** (was -0.253). The original 2026-07-17 probe measured this
+  off the D2 baseline and inferred its direction from a correlational signal smaller
+  than its own noise, concluding "more negative = plantarflexion" - backwards. A
+  forward-kinematics XML sweep (no policy/dynamics involved) proved the opposite:
+  increasing ``ankle_pitch`` moves the toe DOWN (plantarflexion); decreasing moves it UP
+  (dorsiflexion). Confirmed empirically 2026-07-22: training formulation A on the old
+  (backwards) reference at coef 0.1/0.2 drove the LL toward dorsiflexion at toe-off even
+  MORE consistently than the flawed reference itself asked for (93.7%/97% of bouts ended
+  more dorsiflexed, not more plantarflexed) - the same class of bug formulation B had,
+  confirmed rather than just suspected.
+
+  Re-measured from the direction-corrected, genuinely-plantarflexing `pushoff0p5_pscale0p5`
+  checkpoint (arm 6 formulation B, `P_scale=0.5`, the sweep's biggest correctly-signed
+  ROM: +13.4 degrees) instead of the pre-arm-6 D2 baseline - this also fixes formulation
+  A's second problem (the old reference's ~1.3 degree ROM was too small to ever be
+  visible, even tracked perfectly). n=4969 scheduled heel-strike events, std 0.117."""
+  ll_pitchref_theta_to: float = -0.2575
+  """Ankle_pitch angle (rad) at scheduled toe-off.
+
+  **Recalibrated 2026-07-22** (was -0.275, see `ll_pitchref_theta_hs` for the full
+  direction-bug correction). Re-measured from the same direction-corrected
+  `pushoff0p5_pscale0p5` checkpoint as `theta_hs` - `theta_to > theta_hs` now (ROM
+  +0.234 rad, +13.4 degrees), i.e. the reference correctly trends toward plantarflexion
+  (push-off) at toe-off, not dorsiflexion. n=5026 scheduled toe-off events, std 0.040.
+
+  Caveat carried over from the source checkpoint (`A1a_plan.md` Arm 6): that checkpoint's
+  push-off also had the worst ankle-roll (inversion) coupling of the whole sweep
+  (roll/pitch ratio 1.78) - formulation A only reads/rewards `ankle_pitch`, so it cannot
+  inherit that specific side effect mechanically, but the underlying whole-body policy
+  tendency to compensate via roll when pitch is pushed hard may still show up here too -
+  watch for it in formulation A's own roll-coupling check."""
   ll_pitchref_sigma: float = 0.15
   """Exp-kernel tolerance (rad) on the pitch-reference tracking error. Free knob (not
   probe-measured); anchored to ``env_cfgs.py``'s existing ``std_walking`` ankle_pitch

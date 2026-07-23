@@ -3,6 +3,7 @@
 #include "unitree_articulation.h"
 #include "isaaclab/envs/mdp/observations/observations.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
+#include "h1_2_observations.h"  // robot-local terms: keyboard_velocity_commands, gait_phase_cmd
 
 #include <filesystem>
 #include <sstream>
@@ -62,13 +63,27 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     }
     pin_period_ = hrl["pin_period"] ? hrl["pin_period"].as<float>() : 0.0f;
     if (hl_obs_vel_ || velgoal_) goal_space_->task_dim();  // enforce velocity-first prefix
-    // The LL entrains to its gait_phase obs clock. The C++ term integrates
+    // The LL entrains to its gait-clock obs. The C++ term integrates
     // global_phase += dt/period from its YAML params node, which aliases env->cfg
     // (yaml-cpp handles share storage) — so writing this key retunes the clock
     // phase-continuously, exactly like training's hrl_period buffer. Pin now if asked;
     // the HL rewrites it per window unless pinned (see policy_step).
+    // Resolve the term name once: live configs use the robot-local `gait_phase_cmd`
+    // (2026-07-21 defect-0 fix), older fixtures still name the shared `gait_phase`.
+    // Writing a key that isn't the one the obs manager bound would CREATE it and the
+    // cadence would silently stop reaching the clock, so bind the node, don't guess.
+    // `const` probe first (yaml-cpp's non-const operator[] would INSERT the missing key);
+    // then take the writable node, since the period is written back through it.
+    const YAML::Node pol_ro = env->cfg["observations"]["policy"];
+    const char* phase_key = pol_ro["gait_phase_cmd"] ? "gait_phase_cmd"
+                          : pol_ro["gait_phase"]     ? "gait_phase" : nullptr;
+    if (phase_key)
+        phase_params_ = env->cfg["observations"]["policy"][phase_key]["params"];
+    if (!phase_params_)
+        throw std::runtime_error("[HRL] deploy yaml has no gait_phase_cmd/gait_phase term "
+                                 "under observations.policy — the LL clock is unbound.");
     if (pin_period_ > 0.0f)
-        env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"] = pin_period_;
+        phase_params_["period"] = pin_period_;
     // Optional goal-state noise (default off) to emulate real-robot estimator noise in sim.
     state_noise_std_ = goal_space_->noise_std(hrl["state_noise"]);
     if (state_noise_std_.cwiseAbs().sum() > 0.0f) {
@@ -239,6 +254,9 @@ void State_RLHRL::policy_step()
     const Eigen::Vector3f v_world = highstate_->velocity();
     const Eigen::Vector3f lin_vel_b = env->robot->data.root_quat_w.conjugate() * v_world;
     const float height = highstate_->position().z();
+    // Cached for the flight recorder (run() doesn't otherwise see command/achieved-vel).
+    last_lin_vel_b_ = lin_vel_b;
+    if (command.size() == 3) last_cmd_ = Eigen::Vector3f(command[0], command[1], command[2]);
     Eigen::VectorXf s = goal_space_->state(env.get(), lin_vel_b, height);
 
     // Emulate real-robot state-estimator noise on the goal feedback (no-op if std all 0).
@@ -270,7 +288,7 @@ void State_RLHRL::policy_step()
             if (cadence_dim_ && pin_period_ <= 0.0f) {
                 const float period =
                     period_lo_ + (g_vec[gd] + 1.0f) * 0.5f * (period_hi_ - period_lo_);
-                env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"] = period;
+                phase_params_["period"] = period;
             }
         }
     }
@@ -292,8 +310,7 @@ void State_RLHRL::policy_step()
         }
         last_action_ = action;
         // The live phase clock in every mode (yaml default / ctor pin / HL-written).
-        const float period =
-            env->cfg["observations"]["policy"]["gait_phase"]["params"]["period"].as<float>();
+        const float period = phase_params_["period"].as<float>();
         telemetry_.record(step_ * (float)env->step_dt, command.data(), s, target_, period,
                           env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar);
     }
@@ -366,10 +383,15 @@ void State_RLHRL::run()
     if (safety_logger_.enabled()) {
         float quat[4] = { q.w(), q.x(), q.y(), q.z() };
         float acc[3]  = { lin_acc_b.x(), lin_acc_b.y(), lin_acc_b.z() };
+        // cmd/ach_vel are the values cached by the last policy_step() (2026-07-21, WL-B0) —
+        // A1 already computed both for the goal-space state s; this just also logs them.
+        float cmd[3]     = { last_cmd_.x(), last_cmd_.y(), last_cmd_.z() };
+        float ach_vel[3] = { last_lin_vel_b_.x(), last_lin_vel_b_.y(), last_lin_vel_b_.z() };
         safety_logger_.record(action,
                               env->robot->data.joint_pos.data(),
                               env->robot->data.joint_vel.data(),
-                              quat, acc, alpha, joint_hold, tilt_safety, fall_detected);
+                              quat, acc, alpha, joint_hold, tilt_safety, fall_detected,
+                              cmd, ach_vel, isaaclab::g_gait_phase_obs);
     }
 #else
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {

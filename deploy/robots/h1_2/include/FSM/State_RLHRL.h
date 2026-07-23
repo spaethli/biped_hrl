@@ -131,6 +131,9 @@ private:
     int cadence_dim_{0};       // 1 = HL owns the stride period (hl_cadence, source=hl, learned)
     float period_lo_{0.35f}, period_hi_{1.0f};  // cadence_period_range (tanh affine map)
     float pin_period_{0.0f};   // >0 = freeze the LL phase clock at this period (bring-up pin)
+    // The gait-clock term's `params` node (aliases env->cfg): writing ["period"] retunes
+    // the LL clock live. Bound in the ctor to whichever term name the yaml uses.
+    YAML::Node phase_params_;
     Eigen::VectorXf target_;  // held window target V* (refreshed by the HL every c steps)
     long step_{0};
     bool first_entry_{true};  // gates the step_ reset to the process's first enter() only
@@ -144,6 +147,11 @@ private:
     // H1_2_SAFETY_LOG is set (independent of SAFETY_FILTER). Flushed in exit().
     hrl::Telemetry telemetry_;
     std::vector<float> last_action_;  // for the logged action-rate scalar
+
+    // Cached for the SafetyLogger CSV (2026-07-21, WL-B0): computed in policy_step() at
+    // step_dt cadence, read by run() at the 1kHz control loop, same split as last_action_.
+    Eigen::Vector3f last_cmd_{0, 0, 0};
+    Eigen::Vector3f last_lin_vel_b_{0, 0, 0};  // sim-only ground truth, ~0 on real hardware
 
     std::thread policy_thread;
     bool policy_thread_running = false;
