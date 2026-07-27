@@ -3,13 +3,22 @@
 //
 // Two-file output (base path from H1_2_SAFETY_LOG):
 //   <base>.csv        standard CSV, one header row + one row per control tick
+//                      (decimated to ~500 Hz; a tick with trig_joint/trig_tilt/
+//                      trig_fall set is NEVER decimated, so every raw joint-limit
+//                      violation and every tilt/fall event is still captured at
+//                      the full control rate)
 //   <base>_meta.json  static config written once at init (limits, names, dt)
 //
 // Hot-path safe: record() only appends a formatted line to an in-RAM string
 // buffer (no syscall). The file is written on periodic flush (~5 s) and on exit.
+// Floats are logged at 4 significant digits (2026-07-27, file-size reduction) --
+// plenty for joint angles/velocities, well past the sensor noise floor.
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -43,6 +52,12 @@ public:
         if (base_.empty()) return;
         n_ = (int)joint_ids_map.size();
         dt_ = control_dt;
+        buf_ << std::setprecision(4);  // significant digits, not decimal places
+        // Decimate quiet ticks to ~500 Hz (control loop runs at 1/control_dt, e.g. 1000 Hz).
+        // record() ignores this factor and always logs a tick when a safety trigger fires,
+        // so this only shrinks the file -- it never drops a joint clamp or a tilt/fall event.
+        constexpr float kTargetLogHz = 500.0f;
+        log_every_ = std::max(1, (int)std::lround((1.0f / kTargetLogHz) / control_dt));
         g_safety_logger_entry++;  // every entry gets a new id, incl. the first (starts at 0)
         std::ifstream existing(base_ + ".csv");
         bool first_entry = !existing.good();
@@ -109,7 +124,13 @@ public:
                 const float cmd[3], const float ach_vel[3], const float phase[2])
     {
         if (base_.empty()) return;
-        buf_ << (tick_++ * dt_);
+        long this_tick = tick_++;
+        // alpha > 0 covers the hold ramp-down tail (up to H1_2_RAMP_CYCLES ticks after
+        // trig_joint/trig_tilt/trig_fall all clear) -- without it, decimation could drop
+        // rows from that tail and undercount engaged_ticks/engaged_time_s downstream.
+        bool trig = trig_joint || trig_tilt || trig_fall || alpha > 0.0f;
+        if (!trig && (this_tick % log_every_) != 0) return;  // decimated quiet tick, skip
+        buf_ << (this_tick * dt_);
         for (int i = 0; i < n_; i++) buf_ << ',' << raw_q[i];
         for (int i = 0; i < n_; i++) buf_ << ',' << meas_q[i];
         for (int i = 0; i < n_; i++) buf_ << ',' << meas_dq[i];
@@ -120,7 +141,9 @@ public:
         buf_ << ',' << phase[0] << ',' << phase[1];
         buf_ << ',' << alpha << ',' << (trig_joint?1:0) << ',' << (trig_tilt?1:0)
              << ',' << (trig_fall?1:0) << ',' << g_safety_logger_entry << '\n';
-        // Periodic flush as crash insurance (~5 s at 500 Hz). Infrequent blocking write.
+        // Periodic flush as crash insurance (~5 s at the quiet-tick 500 Hz logged rate; more
+        // often during a safety-trigger burst, since those log every tick). Infrequent
+        // blocking write.
         if (++rows_since_flush_ >= 2500) flush();
     }
 
@@ -138,6 +161,7 @@ private:
     int n_{0};
     float dt_{0.001f};
     long tick_{0};
+    int log_every_{1};
     std::ostringstream buf_;
     int rows_since_flush_{0};
 };

@@ -81,7 +81,15 @@ def main():
     df = pd.read_csv(csv_path)
     joints = meta["joints"]
     t = df["t"].to_numpy()
-    n = len(df)
+    control_dt = meta["control_dt"]
+    n_rows = len(df)
+    # True control-tick count, NOT the logged row count: the flight recorder (2026-07-27)
+    # decimates quiet ticks to ~500 Hz while always logging a tick in full when a safety
+    # trigger fires, so n_rows < true tick count outside trigger bursts. tick_ increments
+    # by exactly 1 every control cycle regardless of decimation, so t[-1] = last_tick *
+    # control_dt reconstructs the true count exactly (and matches n_rows on older,
+    # pre-decimation CSVs where every tick was logged).
+    n_ticks = int(round(float(t[-1]) / control_dt)) + 1 if n_rows else 0
 
     # --- filter engagement ---
     alpha = df["alpha"].to_numpy()
@@ -96,13 +104,14 @@ def main():
 
     report = {
         "source": str(csv_path),
-        "n_ticks": n,
-        "duration_s": round(float(t[-1]) if n else 0.0, 3),
-        "control_dt": meta["control_dt"],
+        "n_ticks": n_ticks,
+        "n_rows_logged": n_rows,
+        "duration_s": round(float(t[-1]) if n_rows else 0.0, 3),
+        "control_dt": control_dt,
         "filter": {
             "engaged_ticks": int(engaged.sum()),
-            "engaged_frac": round(float(engaged.mean()), 5) if n else 0.0,
-            "engaged_time_s": round(float(engaged.sum()) * meta["control_dt"], 3),
+            "engaged_frac": round(float(engaged.sum()) / n_ticks, 5) if n_ticks else 0.0,
+            "engaged_time_s": round(float(engaged.sum()) * control_dt, 3),
             "trig_joint_ticks": int(trig_joint.sum()),
             "trig_tilt_ticks": int(trig_tilt.sum()),
             "trig_fall_ticks": int(trig_fall.sum()),
@@ -112,12 +121,12 @@ def main():
         },
         "raw_policy_violations": {
             "total": raw_total,
-            "rate": round(raw_total / n, 5) if n else 0.0,
+            "rate": round(raw_total / n_ticks, 5) if n_ticks else 0.0,
             "per_joint": raw_per,
         },
         "measured_violations": {
             "total": meas_total,
-            "rate": round(meas_total / n, 5) if n else 0.0,
+            "rate": round(meas_total / n_ticks, 5) if n_ticks else 0.0,
             "per_joint": meas_per,
         },
     }
@@ -127,7 +136,8 @@ def main():
 
     # human-readable summary
     f = report["filter"]
-    print(f"Analyzed {n} ticks ({report['duration_s']} s) from {csv_path.name}")
+    print(f"Analyzed {n_ticks} ticks ({report['duration_s']} s, {n_rows} rows logged) "
+          f"from {csv_path.name}")
     print(f"  Filter engaged: {f['engaged_frac']*100:.1f}% of ticks "
           f"({f['engaged_time_s']} s)  "
           f"[joint x{f['n_joint_events']}, tilt x{f['n_tilt_events']}, fall x{f['n_fall_events']}]")
