@@ -29,9 +29,9 @@ ADR-0005 for WL-E — this file summarizes and points there, it does not restate
 | WL | What | Owner chat | State |
 |---|---|---|---|
 | **A** | Planning, sequencing, doc/gate ownership, hand-offs | THIS chat | live |
-| **B** | Deploy pipeline (plan: `A1a_deploy_plan.md`). Split 2026-07-20 into **B0 = A0-first hardware (PRIORITY)** and **B1 = A1 keeper** — same shared `deploy/` tree, one bridge, one flight recorder; kept inside WL-B rather than a new workline for exactly that reason. Both tracks' full gate ladders, defect history, and hardware-session logs live in `A1a_deploy_plan.md`; only a rolled-up status is kept here. | WL-B chat(s); ONE deploy chat at a time (shared `deploy/` tree) | **B0 (A0-first):** first real-hardware session ran 2026-07-23 (split arms, `a0_v2_optB_rs20_baseline`). Full G2 bridge battery passed 2026-07-22; on the robot itself: no falls, but a persistent ~3-5° backward pitch lean present even at stand (sim-absent), **ROOT CAUSE of the stumbling FOUND 2026-07-23: A0's safety filter fires the whole-body hold on joint overshoots as small as 0.002 rad (0.1°)** — trig_joint 4.56% of rows, alpha reaching 1.00, tilt/fall both zero; limits verified CORRECT in both sim and deploy, the difference is MuJoCo silently clamping vs hardware tripping the hold. **This is the same defect fixed for A1 on 2026-07-16 and never ported to A0** (my 2026-07-22 "empirically closed" verdict was bridge-only and is withdrawn). Port delegated (WL-B0a below). The ~3-5° backward lean is a SEPARATE, still-unexplained finding (present in a run with zero filter engagement): head-mass hypothesis FALSIFIED (head-off has the largest lean; CoM arithmetic off ~40x — removing the head fixed harness interference, tripling walk time 34/12s→97s), and the FixStand-mismatch hypothesis WITHDRAWN (Liam: FixStand qs stop commanding after takeover, so it cannot cause a sustained lean — correct). Investigation delegated (WL-B0b below). E-stop chain corrected: `p`→Passive is primary, Ctrl+C is NOT a verified stop (no signal handler), true out-of-process kill still needed before further sessions. **B1 (A1 keeper):** candidate LOCKED = `arm4d` (`ll_energy_coef=0.05`) — the only A1 candidate that passes the live bridge (2026-07-22, all directions incl. 0→w step-from-stand); D2/old keeper/arm3/arm4c all fail live on twitch, not clearance (action_rate splits cleanly, A0 0.57-0.75 vs A1 0.92-1.28); arm5 (ankle-roll) CATASTROPHIC fail with a since-explained mechanism (bilateral ankle-roll+hip-roll saturation decaying a lateral command to zero). Headless replica sweep (2026-07-22) confirms arm4d 6/6 clean, matches live. **Open for B1:** full live G2 battery on arm4d (not yet run). Full detail, dated session-by-session → `A1a_deploy_plan.md`. |
+| **B** | Deploy pipeline (plan: `A1a_deploy_plan.md`). Split 2026-07-20 into **B0 = A0-first hardware (PRIORITY)** and **B1 = A1 keeper** — same shared `deploy/` tree, one bridge, one flight recorder; kept inside WL-B rather than a new workline for exactly that reason. Both tracks' full gate ladders, defect history, and hardware-session logs live in `A1a_deploy_plan.md`; only a rolled-up status is kept here. | WL-B chat(s); ONE deploy chat at a time (shared `deploy/` tree) | **B0 (A0-first):** first real-hardware session 2026-07-23 found two separate causes of the "drunk stumbling" and disentangled them. (1) The safety-filter whole-body joint-limit hold arms on real hardware (fires on overshoots as small as 0.002 rad) — the same defect fixed for A1 on 2026-07-16, never ported to A0. **Ported + hardware-confirmed 2026-07-23 (WL-B0a)**: 225.8 s of continuous free walking, filter never engaged once. (2) A persistent ~3-5° backward stand lean, independent of the filter — **decomposed 2026-07-23/24 (WL-B0b) into two near-even causes** via three independent pitch estimates (IMU, kinematics, statics): a constant −0.031 rad (1.8°) encoder→attitude map error (**open**, closes with a 15-min inclinometer session, decision rules written) and excess knee droop from unmodelled leg mass (**resolved 2026-07-24**: real leg is 18.60 kg vs the model's 15.40 kg; model fix staged in `docs/adr/0006`, held until after the inclinometer session so both fixes land together). Also resolved this session: the E-stop out-of-process-kill question (LAN-cable pull verified on hardware). **Open for B0:** the inclinometer session; a second G3.3 walk + the user's qualitative sign-off. Full detail → `A1a_deploy_plan.md`. **B1 (A1 keeper):** candidate LOCKED = `arm4d` (`ll_energy_coef=0.05`) — passes the live bridge (2026-07-22, all directions) and **replicates on a second seed (2026-07-24, WL-D combo batch)**; D2/old keeper/arm3/arm4c/arm5 all ruled out (twitch, not clearance — see WL-D row). **Open for B1:** full live G2 gate battery on arm4d (not yet run). Full detail → `A1a_deploy_plan.md`. |
 | **C** | HL held-command fix: verify HIRO-relabel hold-bias suspect, fix if real | closed | **CLOSED 2026-07-16 — FALSIFIED.** See verdict below; full evidence → `A1_findings.md`. |
-| **D** | Reward/gait lever batch (energy, gait quality, symmetry) | WL-D chat(s) | **Batch winner: `arm4d` (`ll_energy_coef=0.05`)** — CoT −48%, calmest A1 in the batch, now the B1 deploy candidate (see WL-B row — validated live 2026-07-22). S4′'s honest disconfirmer fired: A0+energy matches the energy saving without regressing tracking, so "the hierarchy buys energy" is unsupported by this batch. Arms 6 (heel-toe push-off, 2 formulations + a sign-bug found/fixed) and 10 (L/R gait symmetry, 2 formulations) shipped and trained; neither clears the winner bar cleanly (tracking cost / no measurable effect). **Arm 6 update (2026-07-23): a second, cross-formulation ankle-roll (inversion/eversion) confound was found alongside BOTH formulations' pitch motion (worst case ratio 1.78, neither formulation reads/rewards ankle_roll at all - a whole-body-policy side-channel, not a reward-shape bug) - an `ll_posture_anchor_ankle_roll=True` anchor test on formulation A (coef=0.1) killed it cleanly (roll/pitch ratio 1.59→0.006) while barely touching the pitch motion (+6.3°→+5.8°) and improving tracking/CoT too. Current best arm-6 candidate: formulation A + coef=0.1 + ankle-roll anchor; visibility on replay not yet re-checked, and the anchor not yet tested against formulation B's own (worse) confound.** Full batch tables (g)/(h)/(i) + Arm 6/Arm 10 sagas → `A1a_plan.md`. **Pending**: 3 combination arms + arm4d seed-2 (hand-off below, not yet launched). |
+| **D** | Reward/gait lever batch (energy, gait quality, symmetry) | WL-D chat(s) | **Batch winner: `arm4d` (`ll_energy_coef=0.05`)** — CoT −48%, calmest A1 in the batch, now the B1 deploy candidate (see WL-B row — validated live 2026-07-22). S4′'s honest disconfirmer fired: A0+energy matches the energy saving without regressing tracking, so "the hierarchy buys energy" is unsupported by this batch. Arms 6 (heel-toe push-off, 2 formulations + a sign-bug found/fixed) and 10 (L/R gait symmetry, 2 formulations) shipped and trained; neither clears the winner bar cleanly (tracking cost / no measurable effect). **Arm 6 update (2026-07-23): a second, cross-formulation ankle-roll (inversion/eversion) confound was found alongside BOTH formulations' pitch motion (worst case ratio 1.78, neither formulation reads/rewards ankle_roll at all - a whole-body-policy side-channel, not a reward-shape bug) - an `ll_posture_anchor_ankle_roll=True` anchor test on formulation A (coef=0.1) killed it cleanly (roll/pitch ratio 1.59→0.006) while barely touching the pitch motion (+6.3°→+5.8°) and improving tracking/CoT too. Current best arm-6 candidate: formulation A + coef=0.1 + ankle-roll anchor; visibility on replay not yet re-checked, and the anchor not yet tested against formulation B's own (worse) confound.** Full batch tables (g)/(h)/(i) + Arm 6/Arm 10 sagas → `A1a_plan.md`. **Combo batch CLOSED 2026-07-24** (6 combination arms + arm4d seed-2, tables (m)/(n)/(o)): **arm4d REPLICATES on seed 123** (CoT 0.489 vs 0.462, act 0.934 vs 0.923, vx 0.060 vs 0.063 — all inside noise; the deploy candidate and the energy claim no longer rest on one seed, and the 2-seed spread is now measured at ±5.8% CoT / ±1.2% act). **No combo beats arm4d**; combinations were non-additive in all 6 cases. Only genuinely promising thread: **combo1 (`ll_action_rate_coef` 0.02→0.05) cuts act 0.923→0.837**, the lowest of any A1 and ~8x the seed spread, but still ~30% above A0's 0.644 — blocker narrowed, NOT closed; costs +12% CoT and lateral tracking, and it made `ub_arm_vel` slightly WORSE (0.300→0.320). Energy 0.10 (−7.1% CoT) is within the ±5.8% seed spread → NOT resolvable on n=1 (guard passed though: entrainment intact, cadence_rew 0.4486). **combo6 (all six A0 LL rewards mirrored at A0's weights) falsifies "copy A0's rewards to get A0's smoothness"**: act 0.951 (no better than arm4d) while probe HL/LL err vx tripled to 0.181/0.225 and holds fell below A0 — A1's action-rate gap is not a missing-reward-terms problem. Next probe: `ll_action_rate_coef` sweep past 0.05 (0.08/0.12) on the arm4d base at ≥2 seeds. |
 | **E** | Training-nominal realism + IsaacGym parity audit | closed | **CLOSED 2026-07-17.** See verdict below; full evidence → ADR-0005 Amendment 2. |
 
 ## WL-C verdict (2026-07-16): FALSIFIED — the held-command "HL hold degeneracy" never existed
@@ -110,7 +110,7 @@ Full evidence → ADR-0005 Amendment 2. Summary:
    fix and retrain; arm8 wide-DR regresses tracking in sim, needs a bridge-replica
    verdict; arm9 correlated-noise is free/within noise).
 
-## Active hand-off prompt: WL-B0a — A0 safety-filter clamp port + FixStand pose alignment (PENDING)
+## Hand-off prompt: WL-B0a — A0 safety-filter clamp port + FixStand pose alignment (✅ DONE 2026-07-23, kept for the record)
 
 Model: **opus/fable class.** The port is mechanical (proven code exists), but it is the safety
 path on a real robot with people beside it — a wrong clamp index or a broken tilt/fall path is
@@ -158,7 +158,7 @@ Tasks, in order:
    - fixtures deploy.yaml.w1_legacy_test and deploy.yaml.g2_4_split_test still load. NOTE:
      every fixture must exist in BOTH velocity/v0/params and velocity_hrl/v0/params or
      h1_2_ctrl dies at startup with yaml-cpp BadFile (see .claude/docs/deployment.md).
-5. Write the exact key script for Liam's hardware re-run. Report into A1a_deploy_plan.md
+5. Write the exact key script for the user's hardware re-run. Report into A1a_deploy_plan.md
    (A0-first track, house style, honest reads) + sync the WL-B row in doc/hrl/worklines.md.
 
 Do not touch: training code (src/), reward terms, td3.py, the A1 deploy config
@@ -166,10 +166,16 @@ Do not touch: training code (src/), reward terms, td3.py, the A1 deploy config
 evidence, record it, do not chase it).
 ```
 
-## Active hand-off prompt: WL-B0b — the real-robot backward lean (INVESTIGATION, reasoning required)
+## Active hand-off prompt: WL-B0b — the real-robot backward lean (DELIVERED 2026-07-23, kept for provenance)
+
+**DELIVERED.** Result: the lean is a near-even sum of TWO causes (a −0.031 rad
+encoder→attitude map error, and excess knee droop under a ~22% higher standing load).
+Full hypothesis table, arithmetic, and the closing hardware procedure live in
+`A1a_deploy_plan.md` → "THE BACKWARD LEAN, DECOMPOSED". The prompt below is kept only as
+provenance for what was asked.
 
 Model: **opus/fable class.** Cross-system mechanism diagnosis (training model <-> deploy <->
-hardware), several live hypotheses, no cheap oracle. **Liam explicitly wants the reasoning and
+hardware), several live hypotheses, no cheap oracle. **the user explicitly wants the reasoning and
 the discriminating evidence, not just a verdict** — the prompt enforces that. Paste into a
 fresh chat:
 
@@ -178,7 +184,7 @@ Investigate why the real H1-2 stands and walks with a persistent BACKWARD pitch 
 not exist in simulation. This is an INVESTIGATION, not an implementation task. Spec-first per
 CLAUDE.md; change no constants without approval.
 
-**Reporting requirement (explicit, from Liam): do NOT return only a verdict.** For EVERY
+**Reporting requirement (explicit, from the user): do NOT return only a verdict.** For EVERY
 hypothesis you consider, report: the mechanism, the discriminating measurement, the NUMBER you
 measured, and whether it survived. Include the hypotheses you REJECTED and why — those are as
 valuable as the surviving one. Show your arithmetic wherever magnitudes decide the argument.
@@ -188,9 +194,9 @@ Read first: doc/hrl/A1a_deploy_plan.md sections "FIRST REAL-HARDWARE RUN (2026-0
 defect — SEPARATELY delegated, do not work on it).
 
 THE OBSERVATION: stand pitch -0.0608 / -0.0826 / -0.0913 rad across three real runs (3.5-5.2
-deg BACKWARD, confirmed visually by Liam) vs -0.0003 in the bridge. Walk pitch -0.0535 to
+deg BACKWARD, confirmed visually by the user) vs -0.0003 in the bridge. Walk pitch -0.0535 to
 -0.0654 vs +0.0014. Oscillation amplitude about the offset MATCHES sim (std ~0.016), so this
-is a DC posture bias, not an instability. Liam's behavioural report fits: forward walking and
+is a DC posture bias, not an instability. The user's behavioural report fits: forward walking and
 turning stable, backward and sideways worse, robot takes backward stabilisation steps.
 
 ALREADY RULED OUT — do not re-derive (you MAY re-open with better evidence):
@@ -199,7 +205,7 @@ ALREADY RULED OUT — do not re-derive (you MAY re-open with better evidence):
   x=+0.05 m shifts CoM ~1.4 mm where 3.5 deg needs ~55 mm. Removing the head fixed HARNESS
   INTERFERENCE (walk time 34/12 s -> 97 s), not the lean.
 - **FixStand pose mismatch: WITHDRAWN.** FixStand's qs stop commanding once the policy takes
-  over, so it cannot cause a sustained lean (Liam's argument; it is correct).
+  over, so it cannot cause a sustained lean (the user's argument; it is correct).
 - **Gait clock: WORKING** — phase alive exactly when |cmd|>=0.1 on hardware.
 - **Filter triggers: INDEPENDENT** — run 1 shows the full lean with ZERO filter engagement.
 - **Static IMU bias: WEAK** — read_all_joints static mean pitch +0.0119 rad (+0.68 deg), wrong
@@ -231,61 +237,13 @@ REQUIRED OUTPUT:
 - The hypothesis table (mechanism / test / measured number / survived?).
 - A ranked verdict naming the single best-supported cause, AND what would falsify it.
 - If a hardware measurement is needed, the EXACT procedure (what to level, what to log, how
-  long) so Liam can run it in one short session.
+  long) so the user can run it in one short session.
 - Whether the lean should affect A1 too (A1's LL consumes the same projected_gravity), i.e.
   does fixing it help both architectures.
 - Report into doc/hrl/A1a_deploy_plan.md as a new subsection + sync the WL-B row.
 
 Do not touch: the safety-filter clamp port (separately delegated), training code, reward
 terms, td3.py.
-```
-
-## Active hand-off prompt: WL-D — 3 combination arms + arm4d seed-2 (PENDING, not yet launched)
-
-Model: **sonnet class** for launch; escalate interpretation to the planning chat. Paste
-into a fresh chat:
-
-```
-Implement and launch 3 combination training arms for A1a on the cluster, plus a seed-2
-repeat of arm4d. Read first: doc/hrl/A1a_plan.md "WL-D batch results" (tables g/h/i) and
-doc/hrl/A1a_deploy_plan.md "Post-fix bridge session (2026-07-22)".
-
-Settled context (do NOT re-derive): the WL-D batch winner is **arm4d
-(`ll_energy_coef=0.05`)** — CoT 0.897->0.465 (-48%), power -51%, tracking unchanged, calmest
-A1 in the batch (action_rate 0.924 vs control 1.126), and the ONLY A1 candidate that passes
-the live bridge (2026-07-22). The A1 deploy blocker is SMOOTHNESS (A0 0.57-0.75 vs A1
-0.92-1.28 action_rate, no overlap). Ruled out: arm1 (cadence coef, monotonically worse),
-arm4b (footslip, worst arm), arm5 (ankle_roll - fails live at zero command), arm4c
-(clearance - fails live; clearance is NOT the blocker).
-
-**Base config for all three arms = arm4d itself.** Protocol per arm: 10001 iters, 4096
-envs, seed 42, cluster launch per .claude/docs/cluster.md, launcher
-`train_h1_2_a1a_LL_rewards.sh`. Comparator = arm4d
-(`2026-07-17_21-46-14_a1a_cot0p2_cad0p5_energy0p05_s42`), NOT D2.
-
-Arms:
-1. **arm4d + smoothness**: raise `ll_action_rate_coef` 0.02 -> 0.05. Highest priority -
-   directly attacks the remaining action-rate gap to A0, the measured deploy blocker.
-2. **arm4d + angmom**: add `ll_angmom_coef=0.025` (arm4a's value) - tests whether the two
-   best energy levers compose.
-3. **arm4d energy sweep**: `ll_energy_coef=0.10` (double). Guard: watch gait_match/ep_len
-   for penalty-domination collapse (the S4/S5 history in A1a_plan.md), report early if it
-   degrades.
-4. **arm4d + arm5 + arm4c** combined (ankle roll, low energy, foot clearance).
-5. **arm4c + smoothness** (one combination without cot in the LL).
-6. **all A0 LL rewards mirrored**, without cot in the LL.
-
-**Also launch, equally important: a SEED-2 repeat of arm4d** (seed 123, otherwise
-identical) - everything currently rests on one seed and the batch's own noise floor is
-~15% CoT.
-
-Bench each at model_10000 per the batch protocol (aggregate + --eval-cmd-vx 0.5/1.0 +
-[HOLDDIAG] + goal probe), report action_rate and ub_arm_vel prominently (the deploy
-metric). Combinations are NOT additive - report each combo against arm4d alone, flag any
-tracking regression honestly. Report into A1a_plan.md (extend stage-D tables) and sync
-this file's WL-D row.
-
-Do not touch: deploy/ (WL-B), td3.py/relabeling, the A0 deploy candidate.
 ```
 
 ## Completed hand-off prompts (archived — full prompt text superseded by results in canonical docs)
@@ -300,10 +258,14 @@ current doc state rather than reusing this text — the canonical docs have move
 | WL-D reward/gait lever batch (arms 1–9, 15 runs) | 2026-07-17 | `A1a_plan.md` "WL-D batch results" tables (g)/(h)/(i) |
 | WL-D arm 6 (heel-toe roll-over/push-off, probe-first, both formulations) | 2026-07-17 | `A1a_plan.md` "Arm 6" |
 | WL-D arm 10 (L/R gait symmetry, probe-first, both formulations) | 2026-07-20 | `A1a_plan.md` "Arm 10" |
+| WL-D combo batch (6 combination arms + arm4d seed-2) | 2026-07-23 | `A1a_plan.md` "WL-D combo batch" tables (m)/(n)/(o) |
+| WL-D combo follow-up (combos 7-9: stand_still/footclear x arm4d) + action-rate decomposition | 2026-07-24 | `A1a_plan.md` tables (t)/(u) + "Action-rate decomposition" + "Stepping-in-place" |
 | WL-E (training-nominal realism + IsaacGym parity audit) | 2026-07-16 | verdict above; ADR-0005 Amendment 2 |
 | WL-B0 (A0-first hardware track, items 1–5: joint-graze audit, `h1_2_limits.h` fix, G2 pre-checks, arms recommendation, E1/E2 prep) | 2026-07-16 | `A1a_deploy_plan.md` "A0-first hardware track" |
 | WL-B (original A1-keeper pipeline validation next-steps, pre-track-split) | 2026-07-16 | superseded by the B0/B1 split (2026-07-20); current status in the WL-B row above |
 | WL-B0/B1 headless candidate sweep (replica bridge, lateral+yaw extension) | 2026-07-22 | `A1a_deploy_plan.md` "Headless candidate sweep (2026-07-22)" |
+| WL-B0a (A0 safety-filter clamp port + FixStand pose alignment) | 2026-07-23 | `A1a_deploy_plan.md` "A0 CLAMP PORT"; hardware-confirmed (225.8 s free walk, filter never engaged), live G2.1-G2.3 cleared, new `scripts/bridge_session.py` |
+| WL-B0b (real-robot backward lean, investigation) | 2026-07-23 | `A1a_deploy_plan.md` "THE BACKWARD LEAN, DECOMPOSED"; 8-hypothesis table, 2 causes found, 5 falsified, hardware procedure + decision rules pending one session |
 
 ## Standing rule for the planning chat (WL-A)
 

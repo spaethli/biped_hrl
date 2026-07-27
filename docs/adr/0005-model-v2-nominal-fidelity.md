@@ -198,7 +198,7 @@ MujocoDeploy/h1_2/h1_2_handless.xml`) is `damping 1 / armature 0.1 / frictionlos
 0.2`, i.e. exactly the old harsh bridge plant; that plant's damping masks jitter, so
 "policies looked better on the old bridge" is not evidence of better transfer.
 
-**Standing decision (Liam's ruling, 2026-07-17): frictionloss stays 0; fric 0.1 is a
+**Standing decision (the user's ruling, 2026-07-17): frictionloss stays 0; fric 0.1 is a
 sanctioned option, not adopted.** Adopting it costs nothing in-sim and buys a small
 bridge robustness margin, but it invalidates every v2 checkpoint (A0 baseline, A1/A1a
 keepers) like the v1->v2 rebase did; that trade stays open for a later rebase window.

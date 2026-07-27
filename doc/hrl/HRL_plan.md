@@ -34,6 +34,10 @@ comparison-cleanliness rule, and reproducibility rules live in
 - **A1a HL-enrichment plan** (the chosen Track-A answer: HL minimizes cost-of-transport via a
   commanded gait cadence the flat command can't express; staged S0–S6) →
   `doc/hrl/A1a_plan.md` (design rationale: `docs/adr/0004-a1a-energy-cadence-hl-enrichment.md`).
+- **A0 model delta vs upstream `unitree_rl_mjlab`** (every actuator/plant difference
+  from the fork point, ranked by plausible causal weight for the first successful
+  hardware deployment; verified via direct `git diff` against `upstream/main`, not
+  reconstructed from memory) → `doc/hrl/A0_model_delta_vs_upstream.md`.
 - Architecture matrix, RQ2 rule, reproducibility → `.claude/docs/experiment-design.md`.
 - File paths / class map / obs dims → `.claude/docs/codebase-map.md`.
 - Cluster (SLURM) → `.claude/docs/cluster.md`. C++ deploy/ONNX → `.claude/docs/deployment.md`.

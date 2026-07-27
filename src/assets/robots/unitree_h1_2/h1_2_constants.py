@@ -37,7 +37,7 @@ def get_spec() -> mujoco.MjSpec:
 # ADR-0005 Amendment 2): the old "0.1 stalls training" evidence was a kl-0.005 +
 # torso/arm-hold confound; fric 0.1 at desired_kl 0.01 trains from scratch to baseline
 # quality (a0_v2_optB_fric0p1_kl01_s42: err_vx 0.083, 0 falls) and stays a sanctioned
-# option. Flipping it is a v2-style rebase (invalidates all checkpoints), Liam's call;
+# option. Flipping it is a v2-style rebase (invalidates all checkpoints), the user's call;
 # until then joint-friction fidelity lives in the deploy-sim eval and A2 Wide DR.
 # Stiffness/damping MUST stay in lockstep with the deploy YAML gain vectors
 # (deploy/robots/h1_2/config/policy/*/params/*.yaml).

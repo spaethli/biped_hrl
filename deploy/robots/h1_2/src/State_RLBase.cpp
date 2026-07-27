@@ -120,20 +120,21 @@ void State_RLBase::run()
     joint_hold = any_clamp;  // recorded as trig_joint in the flight log (no hold effect)
 
     // Rate-limited console notification (user's call 2026-07-23): clamping is normal-gait
-    // behaviour at 500 Hz so a per-event warn would spam, but full silence would hide a
+    // behaviour at kHz rate so a per-event warn would spam, but full silence would hide a
     // joint that is genuinely pinned. One line per second with the worst offender since the
     // last line. Statics, not members: State_RLBase.h is the SHARED deploy header (g1/go2/
     // a2 build against it) and this fix is scoped robot-local.
+    constexpr int WARN_PERIOD = 1000;  // control_dt = 0.001 (measured, not the 500 Hz assumed)
     static int warn_tick = 0, clamp_ticks = 0, warn_jid = -1;
     static float warn_over = 0.0f, warn_cmd = 0.0f;
     if (any_clamp) {
         clamp_ticks++;
         if (tick_over > warn_over) { warn_over = tick_over; warn_jid = tick_jid; warn_cmd = tick_cmd; }
     }
-    if (++warn_tick >= 500) {  // 500 Hz control loop
+    if (++warn_tick >= WARN_PERIOD) {
         if (clamp_ticks > 0)
-            spdlog::warn("[Safety] Clamp: {}/500 ticks, worst joint {} cmd={:.3f} over by {:.3f} rad",
-                clamp_ticks, warn_jid, warn_cmd, warn_over);
+            spdlog::warn("[Safety] Clamp: {}/{} ticks, worst joint {} cmd={:.3f} over by {:.3f} rad",
+                clamp_ticks, WARN_PERIOD, warn_jid, warn_cmd, warn_over);
         warn_tick = 0; clamp_ticks = 0; warn_jid = -1; warn_over = 0.0f; warn_cmd = 0.0f;
     }
 

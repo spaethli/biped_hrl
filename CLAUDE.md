@@ -149,7 +149,7 @@ analysis and the proposed change first.
 
 ### Issue tracker
 
-Issues tracked as GitHub issues in `liamlate/biped_hrl` via the `gh` CLI; external PRs are NOT a triage surface. See `docs/agents/issue-tracker.md`.
+Issues tracked as GitHub issues (repo inferred from `git remote -v`) via the `gh` CLI; external PRs are NOT a triage surface. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

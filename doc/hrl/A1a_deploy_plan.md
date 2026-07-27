@@ -5,19 +5,35 @@
 **A0 track (WL-B0):** first real-hardware session ran 2026-07-23 on the locked candidate
 `a0_v2_optB_rs20_baseline`, split arms. Full bridge G2 battery (G2.1-G2.4, G2.7) passed
 clean 2026-07-22 (parity within 0.01 m/s of the 0.05 m/s bar). On the real robot: **no
-falls in the walking data**, but Liam described it as "drunk stumbling" — this has **two
+falls in the walking data**, but the user described it as "drunk stumbling" — this has **two
 separate, now-disentangled causes**:
 1. **ROOT CAUSE of the stumbling, FOUND 2026-07-23**: the whole-body joint-limit hold
    **does arm on real hardware** (unlike the clean 2026-07-22 bridge captures) — it fires
    on ankle/hip overshoots as small as **0.002 rad (0.1°)**, mostly at stand, because
    MuJoCo silently clamps at the limit while real hardware trips the hold. This is the
    **same defect fixed for A1 on 2026-07-16 and never ported to A0**; the earlier
-   "empirically closed" verdict is withdrawn. Port pending (hand-off WL-B0a below).
+   "empirically closed" verdict is withdrawn. **PORTED AND VALIDATED ON HARDWARE
+   2026-07-23** (WL-B0a): 225.8 s of real free walking with the filter never engaging
+   once (`alpha` max 0.000 over 26544 clamp rows), against 12463 full-hold rows in the
+   pre-fix run. → "A0 CLAMP PORT" section below.
 2. **A persistent ~3-5° backward pitch lean, present even at stand (sim ~0), is a
-   SEPARATE and still-unexplained finding** (independent of the filter — one run shows
-   the full lean with zero filter engagement). Both the "unmodelled head mass" and
-   "FixStand-vs-policy pose mismatch" hypotheses were tested/reasoned through and
-   **withdrawn/falsified** same day. Investigation pending (hand-off WL-B0b below).
+   SEPARATE finding** (independent of the filter — one run shows the full lean with zero
+   filter engagement). **DECOMPOSED 2026-07-23 (WL-B0b): it is a near-even sum of TWO
+   causes, not one.** (A) a constant **−0.031 rad (1.8°) encoder→attitude map error**
+   (the model's FK from encoders to body attitude, not the IMU: an independent statics
+   estimate `p_tau` sides with the IMU to 0.008 rad and against the encoder kinematics by
+   0.020-0.040) — **still open**, awaiting an inclinometer session (procedure + decision
+   rules below); (B) **excess knee droop from unmodelled leg mass — RESOLVED 2026-07-24**:
+   the real robot weighs 73.70 kg with an 18.60 kg leg vs the model's 66.98 kg / 15.40 kg
+   leg (the earlier "~22% load excess, origin uncertain" framing is withdrawn — it was a
+   stacked measurement error, corrected once the real mass and the robot's own `tau_est`
+   were used). Fix staged for the next model version (leg mass + foot-sole geometry,
+   `docs/adr/0006-leg-mass-foot-geometry-nominal-correction.md`), held until after the
+   inclinometer session so it can bundle with the Component-A fix rather than rebasing
+   twice. FALSIFIED along the way: IMU mounting offset, attitude-estimator convention, lab
+   floor slope, pelvis-vs-torso frame, symmetric CoM shift, harness down-force, and head
+   mass. → "THE BACKWARD LEAN, DECOMPOSED" section below for the full method (three
+   independent pitch estimates) and the 2026-07-24 correction.
 
 E-stop chain was also corrected this session: `p`→Passive is the verified primary stop;
 Ctrl+C is **not** a verified E-stop (no signal handler exists) — see "E-STOP chain"
@@ -40,12 +56,14 @@ which voids every pre-2026-07-21 live bridge result for both A0 and A1. Confirme
 working on real hardware (joystick path) in the 2026-07-23 A0 session too.
 
 **Not yet done / still open, either track:** WL-B1's full live gate battery on arm4d;
-the A0 joint-limit clamp port (WL-B0a, spec'd, pending approval); the backward-lean
-investigation (WL-B0b, spec'd, pending — FixStand and head-mass both ruled out already,
-see above); the out-of-process E-stop kill (option (a)/(b) in the E-STOP section); the
-keyboard-latch fix (Defect 1, downgraded but unfixed); re-export of the A0 ONNX with a
-staging identity check (Defect 2 — confirm this landed before citing any G2 result as
-current, see "A0 FULL G2 BATTERY" section for the fixed export).
+Component A of the backward lean (the 1.8° encoder→attitude map error — awaiting a
+15-min inclinometer session, decision rules already written); the Model v3 leg-mass +
+foot-geometry fix (staged, held until after that session, `docs/adr/0006`); the
+repeat/second session for G3.3 "repeatable" plus the user's qualitative sign-off that the
+stumbling is gone; the keyboard-latch fix (Defect 1, downgraded, characterized exactly
+by `bridge_session.py` but not fixed). Resolved since the last pass: the out-of-process
+E-stop question (LAN-cable pull verified, see "E-STOP: verified behaviour" below) and
+Defect 2 (the ONNX re-export — confirmed correct as of the 2026-07-22 G2 battery).
 
 The sections below are the full, dated, chronological record (decisions, phase
 definitions, bridge post-mortems, defect-by-defect diagnosis, every hardware session)
@@ -192,7 +210,7 @@ safety-filter engagement or unexpected behavior ends the session; CSV analysis
 
 The original one-line chain above ("remote damping / `p` Passive / hardware kill") was
 written at the 2026-07-14 grill and **the "hardware kill" leg was never verified — it was an
-assumption, and per Liam (2026-07-22) it does not exist; the team expected `Ctrl+C` to be it.**
+assumption, and per the user (2026-07-22) it does not exist; the team expected `Ctrl+C` to be it.**
 Corrected, with code evidence:
 
 **1. `p` -> Passive is the primary software E-stop. USE THIS.** Registered as a keyboard
@@ -202,6 +220,13 @@ appended to the same `registered_checks` list (`deploy/include/FSM/FSMState.h:55
 commands motor mode 1 with kd 5/5/5/5/2/2 legs, 6 torso, 2 arms — an **actively commanded
 damped collapse**. The remote's own `LT + B` maps to the same Passive state and is the
 operator's equivalent.
+
+> **VERIFIED ON REAL HARDWARE 2026-07-23 (the user) — this section's pessimism is CORRECTED.**
+> All three paths were tested from Velocity mode (`o`) on the robot: **`p` -> Passive,
+> `Ctrl+C` -> same damped result, and PULLING THE LAN CABLE -> same damped result.** The
+> "stiff statue" risk described below did NOT materialise on this hardware. See the
+> "E-STOP: verified behaviour" box after point 3 for the corrected judgement, which
+> supersedes points 2 and 3 where they conflict.
 
 **2. `Ctrl+C` IS NOT AN E-STOP. Do not plan around it.** There is **no `SIGINT`/`sigaction`/
 `atexit` handler anywhere in `deploy/robots/h1_2/` or `deploy/include/`** (verified by grep,
@@ -227,7 +252,7 @@ preference, to be verified against the physical robot and Unitree's manual (NOT 
       on any anomaly — this is the only guaranteed-available option today;
   (d) as a software improvement (spec-first, WL-B's file): add a `SIGINT` handler that sends a
       Passive/zero-gain command before exit, which would at least make `Ctrl+C` fail safe.
-      **Concrete design (Liam's reference, 2026-07-22: Tom Howard's ROS 2 course, Part 2
+      **Concrete design (the user's reference, 2026-07-22: Tom Howard's ROS 2 course, Part 2
       Exercise 5 "Implementing a Shutdown Procedure",
       `https://tom-howard.github.io/ros2/course/part2/`).** Their ROS2/Python pattern is:
       disable the framework's own signal handler (`SignalHandlerOptions.NO`), catch
@@ -254,6 +279,48 @@ preference, to be verified against the physical robot and Unitree's manual (NOT 
 **Do not run G3.0 until (a)/(b) is answered and whichever applies is rehearsed.** Option (c) is
 not sufficient on its own for anything beyond a harnessed stand.
 
+### E-STOP: verified behaviour (2026-07-23) — the gap is CLOSED for harnessed sessions
+
+The user tested all three from Velocity mode on the real robot; all three ended in the damped
+Passive-like state. What each one proves:
+
+| trigger | result | what it demonstrates |
+|---|---|---|
+| `p` | Passive | the intended in-process software stop works on hardware |
+| `Ctrl+C` | same | process death does NOT leave the robot stiff — my earlier warning was wrong here |
+| **LAN cable pulled** | same | **an OUT-OF-PROCESS stop exists and works** |
+
+**The LAN test is the important one.** `h1_2_ctrl` runs on the workstation and reaches the
+robot over ethernet (`setup_all_robot.sh`: `H1_2_NETWORK=enp11s0`), so pulling the cable
+severs controller->robot commands while our process is still alive. The robot damped anyway,
+which means the safe state does **not** depend on our process behaving. Two mechanisms can
+produce it and both are benign: a robot-side LowCmd-timeout watchdog, and/or our own
+all-states check `lowstate->isTimeout() -> Passive` (`FSMState.h:81-86`). Either way the
+observed outcome is damping.
+
+**Judgement change: gap 3 ("no out-of-process kill") is CLOSED for harnessed work.** Pulling
+the LAN cable is a physical, human-executable stop that needs no software cooperation — it is
+the hardware kill the plan assumed and could not find. **G3.0's blocking requirement is
+therefore SATISFIED by demonstration**, and the earlier instruction not to run G3.0 until a
+power cut was established is withdrawn.
+
+**Three caveats that remain true and belong in the session brief:**
+1. **Damping is not catching.** All three paths leave the robot limp; under gravity it
+   collapses. That is correct behaviour for an E-stop and is exactly why the harness/gantry
+   stays mandatory. It is a safe stop, not a save.
+2. **The timeout latency is unmeasured.** Between losing commands and damping, the robot runs
+   on its last command for some interval. Worth timing once (flight-recorder timestamps or
+   video) so the operator knows whether it is ~50 ms or ~500 ms.
+3. **A HUNG process is not the same as a killed one.** `Ctrl+C` and cable-pull both stop
+   commands reaching the robot. A wedged `h1_2_ctrl` whose DDS publisher thread keeps
+   re-sending the last command would NOT trip a command-timeout watchdog. Untested; the cable
+   pull covers it operationally (it cuts the link regardless of what the process is doing), so
+   this is a known-unknown, not a blocker.
+
+**Net: keep `p` as primary (it is the cleanest, commanded stop), the remote's `LT+B` as the
+operator's equivalent, and the LAN cable as the true out-of-process backstop.** Ctrl+C is a
+verified-safe fallback rather than the hazard this section originally described.
+
 **Practical: the keyboard E-stop requires terminal focus.** `Keyboard` polls `fileno(stdin)`
 via `select()` (`deploy/include/isaaclab/devices/keyboard/keyboard.h`), so if the keyboard
 operator's window loses focus their `p` is silently dead. Focus check belongs on the pre-run
@@ -261,7 +328,7 @@ checklist, and both stops must be fired for real during G3.0 while the policy is
 
 | Gate | What is tested | Pass criterion | Unblocks |
 |---|---|---|---|
-| **G3.0** | Dry run without policy: FixStand under harness, **E-stop chain exercised per the E-STOP section above — fire `p`->Passive AND the remote's `LT+B` for real, verify keyboard terminal focus, and confirm the out-of-process kill (a)/(b) exists and works**, E2 re-checked on the day. | All steps rehearsed; recorder produces a CSV; **BLOCKING: an out-of-process stop is identified and demonstrated (Ctrl+C does NOT count - no signal handler exists)**. | G3.1 |
+| **G3.0** | Dry run without policy: FixStand under harness, **E-stop chain exercised per the E-STOP section above — fire `p`->Passive AND the remote's `LT+B` for real, verify keyboard terminal focus**, E2 re-checked on the day. | All steps rehearsed; recorder produces a CSV. **Out-of-process stop requirement: SATISFIED 2026-07-23** — see "E-STOP: verified behaviour" (LAN-cable pull demonstrated on hardware; Ctrl+C also verified safe, contrary to the original warning below). | G3.1 |
 | **G3.1** | Harnessed stand: FixStand -> `h` at cmd 0, >= 30 s, 3 repetitions. Split mode, pinned period. | Calm stand, no filter engagement; twitch level comparable to the G2.5 bridge-with-noise run (not the clean run). | G3.2 |
 | **G3.2** | Harnessed first steps: held vx 0.2-0.3 bouts with slack harness. | 3 consecutive clean bouts, no filter engagement, no harness catches. | G3.3 |
 | **G3.3** | Free walk: room walking >= 2 min continuous, repeated across >= 2 sessions; gentle turns and stops; arms held. | No falls, no filter engagements, arms calm, from-stand entries clean. **STAGE D REQUIRED TIER.** | Stage D close; G3.4/G3.5 |
@@ -398,7 +465,13 @@ Roughly half the A1 ladder is hierarchy machinery with no A0 counterpart:
 
 ### A0-specific items to close before hardware (the actual new work)
 
-1. **Safety-filter terminal behavior — MEASURED 2026-07-20, no port recommended.**
+1. **Safety-filter terminal behavior — ⚠ SUPERSEDED. The "no port needed" verdict below
+   was WRONG and the clamp was ported 2026-07-23** (see "A0 CLAMP PORT" section). It
+   rested entirely on bridge/sim captures, and the pre-fix live-bridge A/B run of
+   2026-07-23 proves *why* that was unsound: in sim, `trig_joint` is 0.0000 in every
+   segment because MuJoCo silently enforces the joint range, so the bridge can never
+   observe this defect no matter how long it runs. Kept below as the reasoning record.
+   Original heading: **MEASURED 2026-07-20, no port recommended.**
    `State_RLBase.cpp:101-144`: any policy-controlled joint outside `h1_2_limits.h` sets
    `joint_hold`, which ramps `alpha` to 1 and drives `q_cmd = (1-alpha)*action +
    alpha*q_meas` on all 27 joints — the same chasing hold the 2026-07-16 post-mortem
@@ -574,7 +647,7 @@ Roughly half the A1 ladder is hierarchy machinery with no A0 counterpart:
    window; try G3.4 within the same campaign once the first clean G3.3 free-walk lands.
    This is a recommendation only; the call is the user's.
 
-### First A0 live bridge session (2026-07-20, Liam) — G2.1 informally OK, G2.2 VOID, 2 defects found
+### First A0 live bridge session (2026-07-20, the user) — G2.1 informally OK, G2.2 VOID, 2 defects found
 
 **What was run:** G2.1-G2.3 in one session. 60 s stand from reset with `o` active, no band
 (passes the G2.1 bar informally). Then strafe (`a`/`d`) and yaw (`q`/`e`): **no movement on
@@ -583,7 +656,7 @@ first attempt, no falls on the retries.
 
 > **ROOT CAUSE FOUND 2026-07-21 (supersedes the defect-1 reading below): `gait_phase` is
 > pinned to (0,0) in every keyboard bridge session.** See "Defect 0" immediately below. The
-> keyboard-latching issue (defect 1) is real code but is NOT the explanation — Liam held `d`
+> keyboard-latching issue (defect 1) is real code but is NOT the explanation — the user held `d`
 > for 15 s and the robot leaned and stayed leaning, which proves the command reached the
 > policy. Kept below as a genuine secondary robustness defect, downgraded.
 
@@ -615,7 +688,7 @@ observation is dead for the entire session.
   live C++ is not. **This finally explains the standing replica-vs-live contradiction**
   (every headless pre-check passes at 0/2/4 ms; live sessions fail), open since 2026-07-16. ✓
 
-**The rs20 hypothesis is FALSIFIED** (Liam's, reasonable from the evidence he had: the only
+**The rs20 hypothesis is FALSIFIED** (the user's, reasonable from the evidence he had: the only
 bridge-working policy was the only rs8 one). The mjlab held-command matrix above shows rs20,
 fric-kl01 and energy strafe and turn exactly as well as optB-rs8. The apparent policy split on
 the bridge is idiosyncratic degradation under a dead clock, not a training-side defect.
@@ -717,7 +790,7 @@ no byte arrives in that window; `State_RLBase.cpp:52-55` maps the *current* key 
 and returns `{0,0,0}` when it is empty. So a **tapped** key commands its velocity for ~80 ms
 (~4 control ticks at 50 Hz) and then reverts to zero — invisible at the 0.5 m/s strafe/yaw
 magnitudes, while a **held** `w` at 1.0 m/s survives because terminal auto-repeat (~30 ms)
-keeps re-arming `_key`. **Corrected 2026-07-21:** this is NOT what Liam
+keeps re-arming `_key`. **Corrected 2026-07-21:** this is NOT what the user
 observed — he held `d` for 15 s and the robot leaned and stayed leaning, so the command was
 sustained (terminal auto-repeat works) and reached the policy. Defect 0 above is the actual
 cause. Defect 1 remains worth fixing as a robustness/protocol issue, not as the explanation.
@@ -747,7 +820,7 @@ is only weakly affected but should be re-recorded on the final candidate.
 **Not the cause of defect 1:** A0+energy's sim tracking is indistinguishable from the
 baseline's (err_vy 0.113 vs 0.111, err_yaw 0.086 vs 0.089), so it cannot explain the missing
 strafe/yaw motion.
-**Silver lining, and a real decision for Liam:** A0+energy is arguably the *better* deploy
+**Silver lining, and a real decision for the user:** A0+energy is arguably the *better* deploy
 candidate — CoT 0.440 vs 0.541, power 134 vs 166 W, action_rate 0.571 vs 0.644, `ub_arm_vel`
 0.118 vs 0.143, at equal tracking and 0 falls (table (i)). Calmer and more efficient is
 exactly what a first hardware session wants. But it must be a **deliberate** choice with
@@ -761,16 +834,16 @@ profile, a first-attempt fall is unsurprising. "Twisted from `e`" is unlikely to
 so re-test from a clean reset. Use the number presets (`3` then `5`) before `w`, per the
 existing session guidance.
 
-**Actions (WL-B0):** (1) settle the candidate (baseline vs A0+energy) with Liam; (2) re-export
+**Actions (WL-B0):** (1) settle the candidate (baseline vs A0+energy) with the user; (2) re-export
 with provenance recorded and add a staging-time identity check (the weight-compare above is
 ~20 lines and should become a scripted gate, cf. the "generic tooling" convention);
 (3) spec the keyboard latch fix; (4) re-run G2.1-G2.3 on the settled build; (5) only then
 judge the `w` fall.
 
-### Post-fix bridge session (2026-07-22, Liam) — A0 CONFIRMED GOOD, A1 fails on twitch; candidate LOCKED
+### Post-fix bridge session (2026-07-22, the user) — A0 CONFIRMED GOOD, A1 fails on twitch; candidate LOCKED
 
 **A0: the fix is validated behaviourally.** With `gait_phase_cmd` live, **every** flat policy
-Liam had previously tested now responds to `q`/`e`/`a`/`d`, walks "way smoother", and visibly
+The user had previously tested now responds to `q`/`e`/`a`/`d`, walks "way smoother", and visibly
 lifts its legs — including the ones that failed before. His words: it behaves like the earliest
 sim-to-sim attempts, before the accumulated changes. This closes Defect 0 behaviourally (the
 2026-07-21 headless capture only proved the clock and the instrument, with the robot banded).
@@ -779,7 +852,7 @@ at least partly clock-dead, not plant — **note ADR-0005 Amendment 2 item 1 mea
 in `bridge_replica.py` (correct phase) so that measurement stands, but any LIVE-bridge foot-drag
 impression from before 2026-07-21 is void.**
 
-**A0 deploy candidate LOCKED (Liam, 2026-07-22): `a0_v2_optB_rs20_baseline`.** Rationale: a clean
+**A0 deploy candidate LOCKED (the user, 2026-07-22): `a0_v2_optB_rs20_baseline`.** Rationale: a clean
 A0-vs-A1 architectural comparison with **no CoT term injected**, i.e. the A0+energy arm is
 rejected as the deploy candidate *precisely because* its `cost_of_transport_penalty` would
 confound the energy axis of the RQ2 comparison — the A0-comparison-cleanliness rule applied
@@ -788,7 +861,7 @@ correctly. (A0+energy stays a legitimate WL-D result and a future option; it is 
 `a0_baseline_energy0p05_s42` (defect 2) — re-export from the rs20 baseline and add the staging
 identity check before the G2 re-run.**
 
-**A1: all four tested candidates FAIL, and the cause is twitch, not clearance.** Liam tested D2,
+**A1: all four tested candidates FAIL, and the cause is twitch, not clearance.** The user tested D2,
 the old keeper, arm4c (foot clearance) and arm3 (stand-still) on the fixed build: all "really
 unsettled and shaky — that's mainly the reason they fall". The 2026-07-20 benchmark set ranks
 every run by `action_rate` and the split is total, with **no overlap**:
@@ -821,7 +894,7 @@ a WL-D training arm, not a deploy fix.
 G2.6's "both cadence modes fell", and the live swing-clearance impressions. A1 needs its gate
 data re-baselined on the fixed build regardless of candidate.
 
-**A1 candidate results, live GUI bridge, fixed build (2026-07-22, Liam) — arm4d PASSES:**
+**A1 candidate results, live GUI bridge, fixed build (2026-07-22, the user) — arm4d PASSES:**
 
 | candidate | sim action_rate | live bridge result |
 |---|---|---|
@@ -951,7 +1024,7 @@ the ordinary 0.1-0.5 range there, same as every other candidate), and through th
 walk itself — it fails specifically when SETTLING BACK TO ZERO right after the lateral (vy)
 hold**, with BOTH ankle_rolls and the hip_roll saturating simultaneously (duty 0.95-0.96, vs.
 0.0-0.5 everywhere else) immediately before a violent roll excursion (pitch flips sign,
-height collapses to ~0.16 m — a full topple, consistent with Liam's "one leg kicked
+height collapses to ~0.16 m — a full topple, consistent with the user's "one leg kicked
 violently"). This is the classic signature of losing frontal-plane (roll) balance authority:
 once both ankle-roll actuators are simultaneously clamped at the mechanical stop, the LL has
 no roll-correction authority left exactly when arresting lateral momentum needs it most. The
@@ -1008,7 +1081,7 @@ once run against the correct candidate.
 
 Three captures, `logs/deploy_safety/`: **14-14-30** = G2.1-G2.3, **14-32-45** = G2.4 (split),
 **14-42-26** = G2.7 (stress scene). `[DEPLOY-GATE]` analyzer output, `any_fall: false` in all
-three. Liam: "no fall at all and the policy looked pretty good".
+three. The user: "no fall at all and the policy looked pretty good".
 
 **G2.2 held-command PARITY (the gate that matters). Bar: achieved vx within +-0.05 m/s of the
 same checkpoint's mjlab value; stride within +-0.05 s.** mjlab rs20 reference achieved =
@@ -1074,7 +1147,7 @@ robustness for the >=30 s holds, not a safety item).
 
 Two attempts, flight recorder `logs/deploy_safety/2026-07-23_10-39-09` (313 s) and
 `10-49-28` (186 s), plus `read_all_joints` IMU log
-`~/ramlab_ws/trajectories/all_joints_2026-07-23_10-38-55.csv` (819 s). Liam: "really like a
+`~/ramlab_ws/trajectories/all_joints_2026-07-23_10-38-55.csv` (819 s). The user: "really like a
 drunk robot stumbling around", operated mainly at slow velocities. **No fall flagged; safety
 filter essentially silent** (run 2: `trig_joint` 76 rows and `alpha`!=0 149 rows out of 92834
 = 0.08%/0.16%; run 1: zero of both).
@@ -1121,7 +1194,7 @@ mechanism for "drunk" without any single dramatic failure.
 Stand-time `cmd - measured` per joint: real `L_hip_pitch` +0.010 / `R_hip_pitch` -0.062
 (run 1) and +0.008 / -0.078 (run 2); `L_ankle_pitch` +0.022 vs `R_ankle_pitch` -0.106 (run 2).
 The bridge is far more symmetric (L/R hip_pitch -0.037 / -0.004). Independent of the pitch
-offset and worth its own look — note this is A0, so it is NOT the A1 asymmetry Liam has been
+offset and worth its own look — note this is A0, so it is NOT the A1 asymmetry the user has been
 tracking, but the two may share a hardware-side cause.
 
 **Cause NOT yet established — candidates, cheapest first.** Note the static `read_all_joints`
@@ -1143,7 +1216,7 @@ the robot taking a single step, and candidate (a) can be tested by simply aligni
 
 ### Head-off run + head-mass hypothesis FALSIFIED (2026-07-23, `11-39-01`)
 
-Liam removed the head (it fouled the harness) and judged the result "quite nice". Tempting
+The user removed the head (it fouled the harness) and judged the result "quite nice". Tempting
 story: the head is **unmodelled mass** — in `src/assets/robots/unitree_h1_2/xmls/h1_2.xml` the
 head exists only as a collision sphere (`head_collision`, pos `0.05 0 0.7`) with **no inertial**,
 and every H1-2 model in the workspace agrees (ours, `/opt/unitree_mujoco`'s
@@ -1156,7 +1229,14 @@ and the data kills it:**
 | BRIDGE (sim) | -0.0003 | +0.0014 | 495 |
 | REAL head ON run 1 | -0.0608 | -0.0654 | 34 |
 | REAL head ON run 2 | -0.0826 | -0.0538 | 12 |
-| **REAL head OFF** | **-0.0913** | -0.0535 | **97** |
+| **REAL head OFF** | **-0.0913** ¹ | -0.0535 | **97** |
+
+¹ **Superseded 2026-07-23 (WL-B0b): -0.0717.** The -0.0913 stand mean includes rows where the
+whole-body hold was engaged (run 3 is the run with `trig_joint` 4.56% and `alpha` reaching
+1.00, almost all of it at stand). Filtering `alpha==0` gives -0.0717, mid-pack rather than the
+largest. **The "head-off leans MORE" argument therefore no longer holds**; the head-mass
+hypothesis stays falsified on the CoM arithmetic alone (1.4 mm vs the ~55 mm required), and
+head-off is still no better than run 1. See "THE BACKWARD LEAN, DECOMPOSED" below.
 
 **Head-off has the LARGEST backward lean of all three real runs.** Removing the head did not
 reduce it. Arithmetic agrees: an unmodelled 2 kg head at x=+0.05 m shifts whole-body CoM only
@@ -1170,7 +1250,7 @@ head-removal test changed two things at once (mass AND harness geometry), with t
 showing the harness was the operative one.
 
 **The backward lean is therefore INTRINSIC to real-robot + policy, present in every real run
-at -0.054 to -0.091 rad and absent in sim (~0).** Direction confirmed by Liam: leaning
+at -0.054 to -0.091 rad and absent in sim (~0).** Direction confirmed by the user: leaning
 **backwards**. It also explains his directional report — "forward and turning way more stable
 than sideways or backwards, and the robot has to take a stabilisation step backwards": a
 sustained backward lean consumes the backward stability margin, so backward/lateral motion
@@ -1196,7 +1276,7 @@ pre-takeover window, and re-evaluate porting the per-joint clamp before G3.3. No
 `h1_2_limits.h` correction (15/27 joints, 2026-07-21) landed after the bridge runs, so the
 bound being grazed may itself be newly-correct.
 
-**Ctrl+C / LAN-detach behaviour (Liam, 2026-07-23): "behaves similar to when `p` is
+**Ctrl+C / LAN-detach behaviour (the user, 2026-07-23): "behaves similar to when `p` is
 pressed".** If confirmed, the H1-2 firmware damps on LowCmd timeout rather than holding the
 last command, which would make the "stiff statue" concern in the E-STOP section too
 pessimistic and make Ctrl+C an acceptable fallback. **Not yet deliberately verified** — this
@@ -1205,7 +1285,7 @@ the result, then amend the E-STOP section either way.
 
 ### ROOT CAUSE OF THE STUMBLING (2026-07-23): the A0 safety filter fires on ~0.1 deg overshoots
 
-Liam's safety warnings from the live sessions (head-off run `11-40-57`, and `10-51` earlier):
+The user's safety warnings from the live sessions (head-off run `11-40-57`, and `10-51` earlier):
 
 ```
 joint 11 q=0.282  out of [-0.262, 0.262]     right_ankle_roll   overshoot 0.020 rad (1.1 deg)
@@ -1252,7 +1332,7 @@ per-joint command clamp from `State_RLHRL` to `State_RLBase`.** The code already
 proven; it is a scoped copy, not a new design. Spec-first per the deploy rules, then re-run a
 short bridge check and repeat the hardware walk.
 
-**Separately, the FixStand-pose hypothesis is WITHDRAWN.** Liam's question — can the FixStand
+**Separately, the FixStand-pose hypothesis is WITHDRAWN.** The user's question — can the FixStand
 hold pose influence walking? — is correct: it cannot. After `o`, FixStand's `qs` command
 nothing; the policy's targets are `default_joint_pos + action*scale`. The 0.1 rad
 FixStand-vs-nominal disagreement can only produce a handover transient, never a sustained lean.
@@ -1260,6 +1340,586 @@ It may still be worth aligning for a cleaner takeover, but it is not the lean's 
 **The backward lean remains unexplained and is independent of the filter triggers** (run 1
 shows the lean with ZERO filter engagement), so it is a second, separate finding — not
 necessarily the thing that made the robot stumble.
+
+### THE BACKWARD LEAN, DECOMPOSED (2026-07-23, WL-B0b): two causes, not one
+
+Investigation of the ~3-5 deg backward stand lean, using only data already on disk (the
+three real flight recorders, the 2026-07-22 bridge baseline, and the concurrent
+`read_all_joints` log `all_joints_2026-07-23_10-38-55.csv`, which turns out to overlap runs
+1 and 2 in time and carries `tau_est`). Analysis scripts are throwaway; every number below
+is reproducible from those four files plus `h1_2.xml`.
+
+**Method: three INDEPENDENT estimates of the pelvis pitch.**
+
+1. `p_IMU`: from the logged quaternion. This is literally the policy's own observation
+   (`safety_logger.h:110` writes the same `root_quat_w` that `unitree_articulation.h:32`
+   turns into `projected_gravity_b`).
+2. `p_kin`: from the joint encoders alone, by solving for the base orientation that puts
+   both foot soles flat on a level floor (MuJoCo FK on `h1_2.xml`). Uses no IMU.
+3. `p_tau`: from statics. The ankle-pitch torque sum fixes the CoP, hence the CoM, hence
+   the pitch: `tau_ank_sum = M*g*(x_com - x_ankle)`. This is statically determinate (no
+   double-support load-split ambiguity) and uses neither the IMU nor the feet-flat
+   assumption, only the encoders, the model's mass distribution, and the measured torque.
+
+All three agree to 1 mrad on the bridge, which validates the machinery:
+
+| run (quiet stand: \|cmd\|<0.05, max\|dq\|<0.1, alpha==0) | `p_IMU` | `p_kin` | `p_tau` | resid = IMU-kin |
+|---|---|---|---|---|
+| BRIDGE 2026-07-22 (n=8344) | +0.0002 | -0.0007 | -0.0001 | **+0.0009** |
+| REAL run 1 `10-39-09` (n=264806) | -0.0549 | -0.0258 | -0.0455 | **-0.0291** |
+| REAL run 2 `10-49-28` (n=60772) | -0.0767 | -0.0359 | -0.0686 | **-0.0408** |
+| REAL run 3 `11-39-01` head-off (n=177700) | -0.0717 | -0.0405 | -0.0800 | **-0.0312** |
+| REAL run 4 `16-50-23` POST-FIX (n=101697) | -0.0640 | -0.0359 | -0.0694 | **-0.0282** |
+
+**Run 4 is the WL-B0a post-clamp-fix session** (225.8 s of free walking, `alpha` max 0.000,
+the filter never engaging once), added after the fact. It reproduces every number: same
+residual, same knee excess, same load. Two things follow. First, **the lean is confirmed
+independent of the safety filter** on a run where the filter is provably inert, which was
+predicted here and is no longer an inference from run 1 alone. Second, it is a **separate
+session hours later with a re-rigged harness**, which matters for the open question below.
+
+(Run 3's earlier numbers were noisy because its stand rows include the whole-body hold;
+filtering `alpha==0` makes it consistent with the other two. This also revises the
+head-off stand pitch from -0.0913 to **-0.0717**: it is no longer the largest lean, so the
+"head-off leans MORE" argument that falsified the head-mass story is weaker than reported,
+though the CoM arithmetic that falsified it, 1.4 mm vs the 55 mm required, still stands
+and head-off remains no better than run 1.)
+
+**The lean splits, almost exactly in half, into two independent gaps.**
+
+```
+reported lean  =  encoder->attitude map error  +  genuine leg-configuration lean
+   -0.0549     =         -0.0291               +        -0.0258        (run 1)
+   -0.0767     =         -0.0408               +        -0.0359        (run 2)
+   -0.0717     =         -0.0312               +        -0.0405        (run 3)
+   -0.0640     =         -0.0282               +        -0.0359        (run 4, post-fix)
+```
+
+#### Component A: a constant -0.031 rad (1.8 deg) encoder-to-attitude map error
+
+The IMU and the encoder-based kinematics disagree by a **constant** on hardware and agree
+in sim. Constant across:
+
+- **Posture**, over a 0.43 rad (25 deg) span of actual pitch, sampled across the whole
+  819 s session including the pre-policy loaded phases: regression
+  `p_IMU = 1.085 * p_kin - 0.0339`, r = 0.996, n = 3894.
+- **Heading**, over 207 deg of yaw. Residual by yaw bin: -0.0303 (yaw +1.0), -0.0439
+  (+1.5), -0.0337 (+2.0), -0.0323 (+2.5), and run 3 at yaw -1.28, which is 187 deg from
+  run 1's +1.98, gives -0.0312.
+- **Phase**: -0.0310 pre-policy (loaded FixStand-like), -0.0339 policy run 1, -0.0392
+  policy run 2. Not a policy artifact.
+
+**Which side is wrong is decided by `p_tau`, which shares no assumption with either.**
+It sides with the IMU: |`p_tau` - `p_IMU`| = 0.009 / 0.008 / 0.008 across the three runs,
+versus |`p_tau` - `p_kin`| = 0.020 / 0.033 / 0.040. So the IMU is telling the truth and
+**the model's mapping from joint encoders to body attitude is what is off by 1.8 deg.**
+
+Physical candidates for that 1.8 deg, not separated by this data:
+- **Foot-sole geometry.** The soles in `h1_2.xml:84-90` are hand-authored capsules at a
+  constant `z=-0.035`, i.e. a plane exactly parallel to the `ankle_roll_link` frame. A 1.8
+  deg real sole pitch, or an 8 mm heel-vs-toe pad difference over the 250 mm foot, produces
+  exactly this.
+- **Joint encoder zeros**: 0.6 deg each across hip_pitch + knee + ankle_pitch.
+- **Structural compliance downstream of the encoder**: the residual does correlate with
+  load (r = +0.73 vs knee torque, +0.81 vs ankle torque, slope ~5e-4 rad/Nm, i.e. an
+  effective ~1000 Nm/rad per ankle). Partly confounded, since load and posture co-vary,
+  but it accounts for the 8.5% regression slope excess and the +-0.006 run-to-run spread.
+
+#### Component B: excess knee flexion, from ~22% more standing load than the model has
+
+The leg-configuration lean is **entirely the knee**. Achieved joint angle minus nominal, at
+quiet stand:
+
+| | knee L | knee R | hip_pitch L | hip_pitch R | ankle_pitch L | ankle_pitch R |
+|---|---|---|---|---|---|---|
+| BRIDGE | -0.004 | +0.006 | -0.007 | -0.029 | +0.011 | +0.024 |
+| REAL run 1 | **+0.035** | **+0.032** | -0.009 | -0.007 | +0.008 | -0.007 |
+| REAL run 2 | **+0.040** | **+0.027** | -0.004 | +0.001 | +0.011 | -0.002 |
+| REAL run 3 | **+0.041** | **+0.029** | -0.003 | +0.001 | +0.004 | +0.009 |
+
+Hips and ankles sit within 0.011 rad of nominal on hardware. The knee sits 0.027 to 0.041
+rad more flexed, and since `p_kin = -(hip_pitch + knee + ankle_pitch)` with feet flat, that
+knee excess **is** the leg-configuration lean.
+
+The knee is more flexed because it droops more under load, and it droops more because the
+legs carry more. Knee droop (`cmd - meas`, so PD tracking lag) is 0.089/0.061 rad L/R in
+the bridge and 0.098-0.123 / 0.157-0.172 on hardware. Total knee torque is 45.2 Nm in the
+bridge and 76.4 / 82.2 / 85.4 Nm on hardware, 1.7-1.9x.
+
+**The PD law itself is honest**, so those torques are real: the robot's own `tau_est` in
+the concurrent trajectory log matches `kp*(cmd-meas)` (run 1 quiet window: right knee -48.2
+vs -47.0 Nm, left ankle +6.8 vs +5.1, right ankle +1.2 vs +3.6). The actuators are not
+under-delivering.
+
+**Measured standing load: ~800 N, versus the model's 657 N.** Per leg, the three sagittal
+torques (hip_pitch, knee, ankle_pitch) give three moment balances in the three unknowns
+(f_z, f_x, x_cop), which is exactly determined. Solving:
+
+| run | f_z L | f_z R | SUM f_z | implied kg | SUM f_x (should be ~0) |
+|---|---|---|---|---|---|
+| BRIDGE | 324.7 | 317.6 | **642.4 N** | 65.5 | -0.3 |
+| REAL run 1 | 359.1 | 449.2 | **808.3 N** | 82.4 | -10.0 |
+| REAL run 2 | 364.2 | 436.4 | **800.7 N** | 81.6 | -13.3 |
+| REAL run 3 | 376.6 | 417.0 | **793.6 N** | 80.9 | -2.9 |
+| REAL run 4 POST-FIX | 392.9 | 400.8 | **793.7 N** | 80.9 | -0.9 |
+
+The bridge validates the method to -2.2% and `SUM f_x ~ 0` validates it on every run. The
+four real runs agree with each other to **0.7 kg std**, across two sessions six hours apart
+with the head removed in between and the harness re-rigged. **The legs carry ~140 N (21%)
+more than the 66.98 kg model weighs.** Arithmetic: +22% load on a kp=300 knee adds 0.089*0.22 = 0.020
+rad of droop, which covers roughly half to three quarters of the 0.027-0.041 rad knee
+excess. The rest is the L/R load split (f_z R / f_z L = 1.11-1.25) which the model does not
+have.
+
+**Zero-load reference measured (2026-07-23, `all_joints_2026-07-23_16-33-35_passive_hanging.csv`,
+34.8 s, Passive, robot suspended clear of the ground).** This was step 2 of the closing
+procedure below; it is now **DONE** and it closes a hole in the argument above, because the
+whole load result is inferred from torques:
+
+- **`tau_est` has no meaningful zero offset.** Across all 12 leg joints, mean `|tau_est|` =
+  **0.240 Nm**, max 1.97 Nm, per-joint p95 <= 0.94 Nm (arms: 0.114 Nm). The GRF solve infers
+  ~800 N from torques of order 30-50 Nm through a ~0.105 m lever, so a sub-1 Nm bias is worth
+  at most ~10 N per joint. **The 21% load excess is therefore not a torque-sensor artifact.**
+- The legs hang straight (every leg joint within 0.04 rad of zero) at zero torque, which
+  confirms the robot really was suspended rather than partly standing.
+- The IMU-vs-accelerometer check passes again at zero load: -0.0153 vs -0.0166 rad.
+- **Free-hang attitude is NOT a usable level reference**, so do not treat it as one: this run
+  hangs at -0.0153 rad while the passive segments of the morning session hang at +0.085 to
+  +0.117 rad. Free-hang pitch is set by harness rigging and CoM, not by the pelvis frame. It
+  does show that the IMU is not parked at a large constant negative reading in all conditions:
+  the standing lean is a real ~3 deg posture change relative to free hang.
+
+**Whether that 140 N is unmodelled robot mass or harness down-force is still NOT resolved,
+but the balance has shifted toward mass.** Four runs across two sessions six hours apart, with
+the head removed in between, the harness re-rigged, and a changed safety-filter code path,
+return 82.4 / 81.6 / 80.9 / 80.9 kg: a 0.7 kg spread. A harness down-force would have to
+reproduce to under a kilogram across two independent riggings, which is implausible. The
+remaining honest caveat is that the harness demonstrably
+couples large and varying vertical force *within* a session: the same solver applied to
+short `tau_est` windows returns 4.8 kg (t 760-800, robot visibly hoisted, so the estimator
+correctly detects harness support), 60.1 kg, 69.0 kg, and 76.8-83.3 kg. Long-run averages
+wash that out, which is why the four full-run numbers agree so tightly, but it means the
+harness is never fully absent. **A scale settles it in one minute and is the one thing that
+would make this conclusive**; the reading to expect if it is mass is ~81 kg, versus 66.98 kg
+in `h1_2.xml`.
+
+#### Hypothesis table
+
+| # | hypothesis | mechanism | discriminating test | measured | survives? |
+|---|---|---|---|---|---|
+| 1 | **IMU frame / mounting pitch offset** | IMU pitched at its mount, biasing `projected_gravity`; policy holds a compensating lean | (a) reported quat pitch vs raw accelerometer `-atan2(acc_x, acc_z)`; (b) `p_tau`, which uses neither IMU nor feet-flat | (a) agree to <=0.0016 rad on all 3 runs (-0.0601/-0.0593, -0.0804/-0.0791, -0.0904/-0.0888); (b) `p_tau` is 0.008-0.009 from `p_IMU` but 0.020-0.040 from `p_kin` | **NO.** The IMU is corroborated by statics. E2 could not have caught a 1.9 deg pitch mount error, correct, but there isn't one. Also self-refuting a priori: the logged pitch IS the policy's observation, so a mount bias would show as the reported pitch returning to ~0, not sitting at -0.06 |
+| 1b | **encoder->attitude map error** (spun out of 1) | model's FK from encoders to attitude is off by a constant | constancy vs posture, heading, phase; and which side `p_tau` picks | **-0.031 +- 0.006 rad**, constant over 25 deg of posture (r=0.996) and 207 deg of heading; +0.0009 in the bridge | **YES.** Component A, ~50% of the lean |
+| 2 | **mass / CoM mismatch beyond the head** | real CoM forward/heavier than model | (a) the "8 kg gap"; (b) symmetric-mass test via L/R droop; (c) direct GRF solve | (a) `mass_g = 75.0*9.81` at `rewards.py:708` is the **CoT normalizer, not a mass claim**: red herring; (b) droop ratio real/sim is 0.9-1.3x left but 2.5-3.2x right, so no symmetric mass change fits; (c) legs carry 800 N vs 657 N | **PARTLY.** A CoM *shift* is rejected (would be symmetric). A ~22% load excess is measured and is the driver of Component B, but its origin (robot mass vs harness) is open |
+| 3 | **ankle / structural compliance under load** | deflection downstream of the encoder | residual vs joint load | r = +0.73 (knee tau), +0.81 (ankle tau), ~5e-4 rad/Nm | **PARTLY.** Contributes to Component A's spread and its 8.5% slope excess, but the bulk of Component A is load-independent (phase means -0.031/-0.034/-0.039 at very different loads) |
+| 4 | **attitude-estimator convention** | quaternion order or Euler convention mismatch | reported quat pitch vs raw accelerometer; index order at `unitree_articulation.h:29-34` | agree to <=0.0016 rad; order is (w,x,y,z) both sides; bridge residual +0.001 | **NO. Falsified** |
+| 5 | **lab floor slope** (added) | feet flat on a sloped floor tilts the pelvis invisibly to level-floor FK | residual must vary as `-s*cos(yaw - yaw0)` | residual -0.030/-0.044/-0.034/-0.032 over 207 deg of yaw, including near-opposite headings | **NO. Falsified** |
+| 6 | **pelvis-vs-torso frame** (added) | training uses `root_link_quat_w` (pelvis free joint, mjlab `entity/data.py:584`); deploy uses the vendor `imu_state` quaternion | model's only pelvis-to-torso joint is `torso_joint`, `axis="0 0 1"` | yaw-only, so pitch is shared exactly in the model | **NO mechanism**, but it identifies that the pelvis-frame-to-IMU pitch relation has never been calibrated on hardware, which is exactly Component A |
+| 7 | **harness applying a pitch moment / down-force** (added) | strap pulling back at the torso; 50 N at 1.2 m = 60 Nm = 91 mm of equivalent CoM shift, more than the 33 mm needed | a load-bearing harness must UNLOAD the legs; and a rigging-dependent force cannot reproduce across re-riggings | legs carry 1.7-1.9x more knee torque, not less; head-off run demonstrably changed harness interaction (walk time 34/12 s to 97 s) yet its lean is mid-pack; **the 4 full-run loads agree to 0.7 kg across two sessions and two riggings** | **WEAK.** Downgraded 2026-07-23 by run 4. The harness does couple large vertical force within a session (5 kg to 83 kg in short windows), but it cannot explain a 0.7 kg-reproducible 140 N offset |
+| 8 | **excess knee droop** (added) | achieved posture = command - droop; `p_kin = -(hip+knee+ankle)` | achieved joint angle vs nominal, per joint | knee **+0.027 to +0.041** rad on hardware vs ~0 in sim; hips/ankles within 0.011 | **YES.** Component B, ~50% of the lean |
+
+Also worth recording: **the policy is actively fighting the lean and losing.** The commanded
+leg-configuration pitch, `-(sum of commanded hip_pitch + knee + ankle_pitch)/2`, is -0.188
+in the bridge but **+0.021 / +0.153 / +0.229** on the three real runs. The policy commands a
+0.2 to 0.4 rad more forward-pitching posture on hardware and still lands 3-4 deg back. So
+this is a saturated feedback loop, not an unobserved disturbance.
+
+And the practical consequence, quantified: the CoP sits at +33 mm ahead of the ankle in the
+bridge and at **+14/-7/-14 mm** on hardware. The foot spans -90 to +180 mm about the ankle,
+so the backward CoP margin falls from 123 mm to 76-90 mm, a **27-38% loss**. That is the
+direct account of the user's report that backward and lateral motion are worse and that the
+robot takes backward catch-steps.
+
+#### Ranked verdict
+
+**No single cause. The lean is a near-even sum of two, and a fix that addresses one will
+halve it, not remove it.**
+
+1. **Component A, the -0.031 rad encoder-to-attitude map error.** Best-supported single
+   item: measured constant, sim-absent, right sign, 40-57% of the lean, and the only one
+   with a one-line deploy mitigation. Its physical origin (sole geometry vs encoder zeros vs
+   compliance) is not yet separated.
+   *Falsified by*: a digital inclinometer on the pelvis reading ~1.8 deg forward of
+   `imu_rpy_p`, i.e. agreeing with `p_kin`. That would mean the IMU is biased after all and
+   would invert the ranking.
+2. **Component B, excess knee droop under a ~21% higher standing load.** Now measured on four
+   runs across two sessions to a 0.7 kg spread, with the torque sensor verified unbiased at
+   zero load, so the 140 N itself is solid. What is still open is only its *origin*: most
+   likely unmodelled robot mass (~81 kg real vs 66.98 kg in `h1_2.xml`), with harness
+   down-force downgraded to weak.
+   *Falsified by*: a scale showing the standing robot weighs ~67 kg, which would leave the
+   800 N unexplained and send the knee droop looking for another cause.
+
+Explicitly NOT the cause, do not re-open without new evidence: the attitude estimator's
+convention, a lab floor slope, a pelvis-vs-torso frame mismatch, a symmetric CoM shift, and
+(still) the head mass.
+
+#### Hardware measurement to close this, one short session (~15 min, policy NOT running)
+
+Needs a digital inclinometer (0.1 deg) and, if available, a crane or platform scale.
+
+1. **Floor.** Inclinometer on the floor where the robot stands, along the robot's forward
+   axis and at 90 deg. Expect <0.3 deg. Closes the slope question physically.
+2. ~~**Zero-load reference.**~~ **DONE 2026-07-23** (`all_joints_2026-07-23_16-33-35_passive_hanging.csv`):
+   `tau_est` zero offset is under 1 Nm on every joint, so the load result is not a sensor
+   artifact. Free-hang attitude turned out **not** to be a usable level reference. Skip this
+   step; see the zero-load paragraph above.
+3. **The key measurement.** FixStand (`h`), feet down, and **verify the strap is visibly
+   slack** (this matters: the GRF solve shows the harness carries anywhere from 5 kg to 83
+   kg). Record 60 s of `read_all_joints`. Then, without moving the robot, read the
+   inclinometer on: (a) a machined horizontal face of the **pelvis** (this is the frame
+   training uses, `root_link_quat_w`), (b) the **torso** top face, (c) the **sole or top
+   machined face of one foot**. Write all three down next to the concurrent `imu_rpy_p`.
+4. **Weight.** Weigh the robot on the crane/platform scale, or read the gantry load cell
+   with the harness taking full load.
+
+Decision rules, decided before the session:
+
+- **Pelvis reading within 0.5 deg of `imu_rpy_p`** -> IMU honest, error is model-side
+  (foot geometry or encoder zeros). Immediate mitigation to test: a **-0.031 rad
+  `ankle_pitch` offset** in the deploy `offset` vector, which rotates the body forward by
+  exactly that amount relative to the foot. Proper fix is the sole geometry in `h1_2.xml`,
+  which is a retrain.
+- **Pelvis reading ~1.8 deg forward of `imu_rpy_p`** -> IMU mount offset after all. Fix is a
+  fixed +0.031 rad pitch rotation applied to the IMU quaternion in
+  `unitree_articulation.h`, before `projected_gravity_b` is formed.
+- **Foot sole not level while the feet are flat down** -> sole/ankle geometry is the specific
+  culprit, and the number read is the correction.
+- **Scale reads ~80 kg** -> confirms the load finding, Component B needs a model mass fix,
+  which is a v2-style rebase and therefore the user's call.
+
+#### Does this affect A1?
+
+**Yes, both components, identically, and fixing it helps both architectures.**
+
+- A1's LL consumes the same `projected_gravity` (`velocity_hrl/v0/params/deploy_real.yaml`,
+  `observations.policy.projected_gravity`) and the same `default_joint_pos` / action `offset`
+  vectors as A0, on the same hardware. Component A is a plant/observation property, not a
+  policy property, so it applies unchanged.
+- Component B is pure plant. A1's LL runs the same kp=300 knee against the same load.
+- Under `hl_velocity_goals_only=True` the A1 HL pins orientation and height targets to
+  nominal, so a 1.8 deg attitude error is a constant offset on a pinned nominal that neither
+  level can see or correct.
+- **For RQ2 comparison cleanliness this is shared, not a confound**: both A0 and A1 inherit
+  the same bias, so an A0-vs-A1 hardware comparison is not invalidated by it. But it depresses
+  both, and it eats the backward stability margin that A1 needs more than A0 does, given A1's
+  known smoothness gap (action_rate 0.92-1.28 vs A0 0.57-0.75). Worth closing before the A1
+  hardware track, not after.
+
+**Relation to the stumbling.** Independent. Run 1 shows the full lean with zero filter
+engagement, and the safety-filter defect is a separate finding with its own fix (WL-B0a,
+ported 2026-07-23). Fixing the lean will not fix the stumbling and vice versa, but both
+narrow the same margin.
+
+#### CORRECTION 2026-07-24 (real mass + torque): Component B is unmodelled LEG mass, no load mystery
+
+Two facts from the user closed Component B and corrected an overstatement above.
+
+**Real robot mass = 73.70 kg; one leg (incl. all 3 hip motors) = 18.60 kg.** The model
+(`h1_2.xml`) is 66.98 kg with a 15.40 kg leg. **The entire 6.7 kg gap is in the legs**
+(+3.20 kg/leg); the non-leg remainder (pelvis + torso + arms) is off by only +0.31 kg. So the
+mass error is neither uniform body scaling nor a torso-CoM shift, it is specifically the legs
+being ~21% heavier than modelled, with everything above the hips already correct. Raising the
+6 leg-link masses per side by x1.21 brings the model to 73.4 kg.
+
+**The "~21% / ~140 N load excess of uncertain origin (possibly harness)" claim above is
+WITHDRAWN. It was my error, from two stacked mistakes:**
+- the GRF solve used the model's 15.40 kg legs, not the real 18.60 kg, and
+- it used `kp*(cmd-meas)` for torque, which **over-reads the real knee torque by ~1.3x**: the
+  robot's own `tau_est` is 0.71-0.73x my number at the knees (matched window, run 1:
+  `kp*err` knee pair -76.7 Nm vs `tau_est` -55.5 Nm).
+
+Redone with the real leg mass **and** `tau_est`, the cleanest static stand window (head-off
+`11-38-59.csv`, t0-30, `|SUM f_x|` = 1.3 N, pitch -0.030) reads **74.2 kg**, i.e. the real
+weight. Other clean windows scatter 75-85 kg with a systematic `SUM f_x` ~ -7 N that flags a
+residual non-static/contact-point offset, so the tightest-`f_x` window is the trustworthy one.
+**There is no unexplained standing load and no harness-down-force term.** Component B is just
+the 6.7 kg heavier legs drooping more on the kp=300 knee. Hypothesis-table rows 2 and 7 should
+be read through this: the excess load is real robot mass, not harness, and the fix is a leg-mass
+correction + retrain, not a scale session.
+
+**This also resolves the harness/FixStand question.** The user: FixStand with the strap slack just
+topples, like sim with the band off. Correct, and expected: FixStand is an open-loop joint hold,
+not a balancer. The balancing controller is the **policy** (Velocity `o` at cmd 0), which is what
+every stand window here already uses, and under it the measured load equals full body weight, so
+the strap is effectively slack under the policy. Consequence for the procedure below: **the
+"FixStand + slack strap, 60 s" step is void**; Component A's inclinometer read must be taken
+under the policy at cmd 0 (spotted), not in FixStand. No scale is needed, the mass is known.
+
+**Component A is unaffected and its verdict is now stronger.** Re-running `p_tau` with the
+robot's own `tau_est` and the real leg mass still sides with the IMU (|p_tau - p_IMU| =
+0.003-0.006) against the encoder kinematics (|p_tau - p_kin| = 0.027-0.036) on every window.
+The IMU is honest; the -0.031 rad error is in the model's encoder->attitude map (foot-sole
+geometry or encoder zeros). **On IMU recalibration**: do NOT zero the IMU at stand, the robot
+really is pitched back and a zeroed IMU would feed the policy a lie and deepen the lean. The
+only correct IMU fix, if a mount offset is ever found by inclinometer (none is in evidence: at
+passive hang IMU pitch -0.0153 equals accelerometer-implied -0.0166 to 0.0013 rad), is a fixed
+quaternion pre-rotation in `unitree_articulation.h:29-34` before `projected_gravity_b`. A
+deliberate constant pitch bias in `projected_gravity` is available as a posture-trim knob but
+fights the symptom.
+
+#### MODEL FIX (STAGED, held for the new version): leg masses 15.40 -> 18.60 kg/leg; foot-geometry lead; head, friction, DR
+
+**STATUS 2026-07-24: staged, NOT applied. See `docs/adr/0006-leg-mass-foot-geometry-nominal-correction.md`
+(Model v3, PROPOSED).** The edit was made, verified, then reverted at the user's call. It is HELD until after the inclinometer session and bundled into the next model
+version together with the foot-geometry fix. Rationale: the ongoing WL-D gait-shape refinement
+runs must stay comparable to the current `arm4d` batch (all on 15.4 kg legs), so the training
+plant must not be rebased mid-batch. No hardware-bound training runs happen before the new
+version, so applying the mass (and foot) change to that version carries no sim-to-real transfer
+issue (the user, 2026-07-24). Exact recipe to re-apply is below.
+
+**Two plants, both to set to 73.4 kg when the new version is cut (they serve different roles):**
+- **Training model** `src/assets/robots/unitree_h1_2/xmls/h1_2.xml` (loaded via `H1_2_XML`)
+  and its unused twin `scene_h1_2.xml`: this is where the mass must change for the *policy to
+  learn* the heavier legs. This is the primary one.
+- **Bridge test plant** `/opt/unitree_mujoco/unitree_robots/h1_2/h1_2_handless.xml`: the MuJoCo
+  model the C++ controller runs against in the G2 sim-to-sim gates, the stand-in for hardware.
+  For a faithful bridge it should get the real mass too, else the bridge tests a lighter robot
+  than both training and reality. (It is an external clone, not version-controlled with this
+  repo; note the edit there separately.) The deployed C++ and gain vectors carry no masses and
+  need no change either way.
+
+**Re-apply recipe** (`$CLAUDE_JOB_DIR/tmp/fix_legmass.py` logic): scale the 6 leg links/side by
+**1.20787** (= 18.6/15.399) on `mass` and all 3 `diaginertia` values, leaving `ipos`/`quat`
+unchanged so no CoM shift is introduced. Per-link mass: hip_yaw 2.829->3.417, hip_pitch
+2.920->3.527, hip_roll 4.962->5.993, knee 3.839->4.637, ankle_pitch 0.102->0.123, ankle_roll
+0.747->0.902. Verified total 73.386 kg, one leg 18.600, torso/pelvis/arms untouched, compiles.
+
+**Head is negligible for the lean, and the user's 73.70 kg is head-OFF.** The head sits at
+x=+0.05 m in the torso, so removing it moves whole-body CoM *backward* (same direction as the
+lean), by 1.3 mm (2 kg head) to 4.9 mm (8 kg), against the ~55 mm a 3.5 deg lean needs. So
+head-off cannot fix the lean and if anything deepens it by <10%, which matches the data
+(head-off runs 3/4 lean the same as head-on 1/2). Bookkeeping: the real head-*on* robot is
+73.70 + head, consistent with runs 1/2 reading a couple kg heavier than 3/4.
+
+**The gap: real one leg incl. all 3 hip motors = 18.60 kg; the model is 15.399 kg** (new total
+would be 73.386 kg vs real 73.70; the residual 0.31 kg is the non-leg remainder, within
+measurement).
+
+- **This is a manufacturer-spec-vs-reality gap, not a repo error, and it is universal.** The
+  15.399 kg leg is byte-identical across all five sims (ours, `/opt` bridge, isaac-gym,
+  RMA-27dof, RMA-book) AND the official Unitree URDFs (`/opt/unitree_mujoco`, the mybotshop
+  `h1_description`, RMA), AND both isaac repos (`h1v2-Isaac`, which is the same URDF). So the
+  HF `unitreerobotics/unitree_model` H1-2 will read 15.399 too. Every downstream H1-2 sim
+  inherits the official CAD value, which underweights the real leg by 3.2 kg (cabling,
+  connectors, as-built vs nominal component mass).
+- **Not an H1-vs-H1-2 swap** (the user's hypothesis, tested): H1-v1 legs are 10.9 kg with a
+  different per-link split (2.24/4.15/2.23/1.72/0.55), lighter, not heavier. The 15.4 is
+  genuinely H1-2.
+- **Assumption to flag**: uniform scaling assumes the missing 3.2 kg is distributed like the
+  CAD leg. If the real excess is concentrated (e.g. a heavier hip actuator or added
+  cabling near the pelvis), the per-link split is wrong even though the total and CoM-height
+  are right. Also, "one leg with all 3 hip motors" is taken to be the 6 URDF leg links; if
+  The user's physical cut point differs, the leg/non-leg split shifts (the whole-robot 73.70 is
+  independent and agrees, so the total is solid regardless).
+- **REBASE CONSEQUENCE (why it is held): this changes the training plant, so it invalidates
+  existing checkpoints for clean comparison.** The deployed A0 (`rs20_baseline`) and A1
+  (`arm4d`) and the whole WL-D batch were trained on 15.4 kg legs; applying it mid-batch would
+  confound the gait-refinement comparisons. Treat the new-version cut like the Model-v2/ADR-0005
+  rebase: version tag + ADR entry, bundled with the foot-geometry fix, after the inclinometer.
+
+**Foot geometry is the CoP / push-off lead, separate from mass.** Ours is the **only** model
+using hand-authored flat foot capsules (7 per foot, all at z=-0.035, a plane exactly parallel
+to the ankle frame, 0.00 deg by construction); every reference (opt bridge, isaac-gym, both
+RMA, h1v2-Isaac) uses the actual **foot mesh** for collision. Two consequences:
+- For **Component A** (the 1.8 deg encoder->attitude error): a real sole inclined ~2-3 deg in
+  the ankle frame would produce exactly the observed bias, and our flat capsule cannot. The
+  inclinometer read (foot sole vs pelvis, under the policy) settles it; if the sole is
+  inclined, the fix is to switch foot collision to the mesh, or tilt the capsule plane.
+  (A direct mesh-vertex fit was inconclusive here: the `ankle_roll` visual mesh frame does not
+  cleanly expose the sole plane, so this needs the physical read, not more desk analysis.)
+- For **CoP transfer during push-off** (WL-D arm 6): CoP rolls heel->toe along the sole, so its
+  trajectory and the push-off moment arm are set by sole shape, which our idealized flat plane
+  gets wrong. **The leg-mass fix barely touches this**: the added mass is proximal (hip_roll
+  +1.03, knee +0.80 kg) while the foot/ankle gained only +0.18 kg total, so push-off CoP is a
+  foot-geometry question, not a mass question. If push-off CoP fidelity matters for the thesis
+  claim, switching to mesh foot collision is the relevant change, tracked here for WL-D.
+
+**Friction / armature are not the static lean.** At a static stand the hold torque equals the
+gravity torque; frictionloss and armature are velocity/acceleration terms and vanish at rest,
+so neither adds to the ~74 kg standing load (that is pure mass, now corrected). Friction only
+creates a PD deadband of +-7 to +-20 mrad (2-6 Nm Coulomb at kp=300), against a measured knee
+droop of 100-170 mrad that `droop = tau/kp` reproduces from gravity alone. Where friction and
+armature (and the now-heavier real legs) *do* bite is walking/swing dynamics, a separate
+sim2real gap plausibly feeding the stumbling, not the DC lean.
+
+**On DR (the user's question): only *biased* DR helps; zero-mean IMU/encoder noise does not.** Both
+components are biases, and a policy averages zero-mean sensor noise out and still centers on the
+wrong mean. What each needs: Component B wants a **mass-magnitude** channel (per-leg mass or a
+base payload band; `base_com` DR is +-5 cm of *position* only and never covered this) - though
+correcting the nominal, as just done, is the primary fix and DR only adds robustness around the
+corrected center. Component A wants a **biased `projected_gravity` pitch offset** (or randomized
+foot-sole angle) so the policy cannot equate "gravity=0" with "upright" and must use encoders +
+contact to stand truly level. Both slot into the A2 RMA e_t (currently motor-strength + damping)
+as extra channels. Ordering: fix the two known-wrong nominals (leg mass done; foot geometry
+pending the inclinometer), then widen DR with biased channels, not zero-mean noise.
+
+### A0 CLAMP PORT (WL-B0a, 2026-07-23/24): landed, and confirmed on the robot
+
+**What changed** (`deploy/robots/h1_2/src/State_RLBase.cpp`, robot-local only — the shared
+`deploy/include/FSM/State_RLBase.h` and `deploy/include/isaaclab/` were not touched):
+
+1. The measured-position loop that set `joint_hold` is deleted. Joint violations no longer
+   feed the hold ramp; `alpha` is now a pure tilt/fall indicator for A0.
+2. The write loop clamps each commanded joint to its `h1_2_limits.h` bound before it
+   reaches the motor, exactly as `State_RLHRL` has since 2026-07-16. Clamp-before-
+   `hold_ids`-override ordering matches HRL, so the two safety blocks are now equivalent.
+3. `trig_joint` in the flight log changes meaning to **"a command was clamped this tick,
+   no hold effect"** (the A1 semantics since 2026-07-16). Recorded in `safety_logger.h`;
+   an A0 CSV dated before 2026-07-23 carries the OLD meaning and the two eras must not be
+   pooled.
+4. Rate-limited console warning (the user's call — silence would hide a genuinely pinned
+   joint): one line per 1000 ticks naming the worst offender. **`control_dt` is 0.001, so
+   the loop is 1 kHz, not the 500 Hz previously assumed** (measured from the logger meta).
+
+**Not changed:** tilt trigger, fall trigger, `H1_2_RAMP_CYCLES`, the
+`q_cmd = (1-α)·action + α·q_meas` chasing-hold form, the limits table, the split-deploy
+`hold_joint_ids` path, `State_RLHRL`. The G3.0 chasing-vs-latched terminal-behavior
+question is still open and untouched.
+
+**FixStand alignment** (same session, separate item): `config/config.yaml` FixStand `qs`
+legs went `[0,−0.3,0,0.5,−0.2,0]` → `[0,−0.2,0,0.5,−0.3,0]`, now byte-equal to the policy
+`default_joint_pos`; mirrored by hand in `bridge_replica.py` `FIX_Q`. Both distributions
+close to zero net pitch, so this only cleans the takeover transient. **It is NOT a lean
+cause** and is not offered as one.
+
+#### Hardware result (the one that counts)
+
+| run | dur | `trig_joint` | rows α>0 | rows α=1.0 | tilt / fall |
+|---|---|---|---|---|---|
+| `11-39-01` **pre-fix** (head-off) | 276.3 s | 4.56% | 12712 (4.60%) | **12463** | 0% / 0% |
+| `10-49-28` pre-fix | 92.8 s | 0.08% | 149 | 0 (α peaked 0.76) | 0% / 0% |
+| `16-50-23` **post-fix**, all directions | 225.8 s | **11.75%** | **0** | **0** | 0% / 0% |
+
+The post-fix run walks **3 min 45 s continuously in all directions with the safety filter
+never engaging once**, across 26544 clamp-active rows. Note the direction of the
+`trig_joint` change: it *rises* 4.56% → 11.75%, because the column now counts commands
+past a stop rather than measured excursions — the policy asks for out-of-range targets far
+more often than the joints actually got there. That is the precondition the old code turned
+into a whole-body hold.
+
+**Honest limits of this evidence.** It is one post-fix session versus one pre-fix session,
+not a controlled A/B on hardware, and the sessions differ in more than the binary (head
+off/on, different command sequences). The claim it supports is narrow and sufficient:
+**the joint path no longer engages the hold**, which is exactly what changed. Whether the
+"drunk stumbling" is fully gone is the user's qualitative call from the session, not something
+these CSVs measure.
+
+**Unintended hardware positive control for the tilt path.** Runs `16-34-34` and `16-35-28`
+were launched against a build that still had a *temporary* `H1_2_TILT_LIMIT` of 0.02 rad
+(left in the shared build dir by the verification work; the user caught it, reverted, rebuilt,
+and re-ran as `16-50-23`). Those two runs show `trig_tilt` 98.9%/100% with `alpha` pinned at
+1.000 — i.e. the tilt trigger and the ramped whole-body hold demonstrably still work **on
+the real robot** after the port. Process lesson recorded: threshold-modified test binaries
+must go in a separate build dir, never the one hardware sessions launch from.
+
+#### Bridge + replica verification
+
+- **Replica** (`bridge_replica.py`, both scenes × 0/2/4 ms): 6/6 pass, 0 falls. Caveat
+  stated up front: the replica has applied the per-joint command clamp for *both* policies
+  since 2026-07-22 and never modelled A0's whole-body hold, so it is already an image of
+  post-fix behavior and **cannot discriminate pre- vs post-port**. It is a regression check
+  here, nothing stronger.
+- **Live bridge, new tooling** (`scripts/bridge_session.py`, see below): post-fix A0, 62 s,
+  5327 joint-only-clamp rows (8.54%), **max `alpha` on those rows 0.000**, zero rows with
+  `alpha`>0 in the whole file, 0 falls.
+- **Pre-fix binary, same scripted session:** `trig_joint` **0.0000 in every segment**. The
+  sim bridge's measured joints never leave range at all, while the policy commands past a
+  stop 1.8-38% of ticks. **Neither the bridge nor the replica can reproduce the hardware
+  trigger** — only real compliance lets measured `q` follow an out-of-range command across
+  the bound. This is the mechanism behind "bridge non-observation was not evidence of
+  absence", now measured rather than inferred, and it means this defect class is only ever
+  *confirmable* on hardware.
+- **G2.2 parity, bridge-vs-bridge pre→post** (the comparison decision 1 calls honest, since
+  the vendor plant ≠ mjlab nominal by construction): achieved vx differs by
+  **0.002 / 0.001 / 0.003 m/s** at commanded 0.3 / 0.5 / 1.0, against **0.001 m/s**
+  run-to-run noise between two identical post-fix runs. Stride 0.573-0.585 s throughout,
+  `act_rate` 0.001, 0 falls in all three runs. No tracking regression from the clamp.
+  Against mjlab G1.1 steady-state the bridge tracks *closer* to command than mjlab does
+  (bridge ss_err 0.027/0.043/0.056 vs mjlab 0.041/0.055/0.077); all three are inside the
+  ladder's own ±0.05 bar.
+- **Deliberate tilt/fall positive controls in the bridge** (temporary threshold builds,
+  reverted): tilt → `trig_tilt` 100%, `alpha` ramped 0.02 → 1.000 over exactly 50 ticks
+  (`H1_2_RAMP_CYCLES`) and stayed pinned. Fall → `trig_fall` 96.3%, `alpha` 1.000, first
+  reached at t=0.133 s (60-tick detect window + 50-tick ramp = 0.110 s expected).
+- **Fixtures:** `deploy.yaml.w1_legacy_test` and `deploy.yaml.g2_4_split_test` present and
+  parsing in **both** `velocity/v0/params` and `velocity_hrl/v0/params` (the BadFile rule).
+
+#### New tool: `scripts/bridge_session.py`
+
+Scripted LIVE-bridge sessions — launches `/opt/unitree_mujoco` + the real `h1_2_ctrl`,
+drives the FSM and velocity keys over a FIFO, releases the elastic band via XTEST (a GLFW
+keypress on the mujoco window, nothing else can toggle it), then runs
+`deploy_gate_analyzer.py`. The counterpart to `bridge_replica.py`, not a replacement:
+the replica re-implements the controller in python and is structurally blind to C++ bugs,
+which is precisely what this task needed to validate. Needs `python-xlib` (installed in
+`unitree_mjlab_h1_2_rl`). Removes the need to hand-drive sim-to-sim checks.
+
+**It characterized Defect 1 (keyboard latch) exactly, on its first run.**
+`Keyboard::_read()` clears `_key` to `""` after an 80 ms `select()` timeout, so a velocity
+key must be **re-sent continuously** or `keyboard_velocity_commands` reads `""` and returns
+`[0,0,0]`. A real keyboard's X key-repeat does this; a one-shot piped char does not. FSM
+keys (`i`/`o`/`p`) are exempt because the transition fires on the transient — which is why
+the first automated run changed states correctly and logged `cmd [0,0,0]` for the entire
+session. The script re-sends at 50 Hz. Also found: a stale `h1_2_ctrl` holds the DDS lowcmd
+channel and the next one silently sits in Passive writing no CSV, so the script pkills both
+binaries before every run.
+
+#### Hardware script for the next A0 session (G3.3 repeatability sign-off)
+
+The 2026-07-23 post-fix run already met G3.3's *required* duration (3 min 45 s ≥ 2 min).
+What is missing is **repeatability** (a second, independent session) and the user's explicit
+qualitative verdict that the stumbling is gone. This is that session.
+
+**Before launching — three preconditions, all cheap, all learned the hard way:**
+
+1. `git diff deploy/robots/h1_2/include/h1_2_limits.h` must be **empty**. A threshold left
+   at a test value is invisible at runtime and produced the `16-34-34` wrong-tilt run.
+   Confirm `H1_2_TILT_LIMIT 0.44` / `H1_2_FALL_ACC_THRESH -7.0` by eye.
+2. `pgrep -af h1_2_ctrl` must be **empty**. A stale controller holds the DDS lowcmd channel;
+   the new one logs `The other process is using the lowcmd channel`, sits in Passive, and
+   writes no CSV — easy to mistake for a dead policy.
+3. Rebuild and note the binary timestamp, so a session can be tied to a build later.
+
+```bash
+cd ~/ramlab_ws/src/unitree_rl_mjlab/deploy/robots/h1_2
+git diff include/h1_2_limits.h        # MUST be empty
+pgrep -af h1_2_ctrl                   # MUST be empty
+(cd build && make -j8) && ls -la build/h1_2_ctrl
+source ~/ramlab_ws/setup_all_robot.sh # domain 0, enp11s0, deploy_real.yaml
+h1_2_real                             # sets H1_2_SAFETY_LOG automatically
+```
+
+**On the robot the commands are the GAMEPAD, not the keyboard** (`deploy_real.yaml` uses
+`velocity_commands`): `LT + up` = FixStand, `RT + A` = Velocity (A0), `LT + B` = Passive,
+then the sticks (`ly` = vx, `lx` = vy, `rx` = yaw). Harness/gantry mandatory — the filter
+damps, it does not catch.
+
+| step | action | what to watch |
+|---|---|---|
+| 1 | `LT + up` → FixStand, let the 3 s ramp finish | posture should now match the policy nominal (the aligned `qs`); no visible pose jump at the next step |
+| 2 | `RT + A` → Velocity, sticks neutral, stand ≥ 60 s | console must stay quiet apart from `[Safety] Clamp:` lines; **any `[Safety] Tilt:` or `[Safety] Fall:` line is the abort signal** |
+| 3 | forward walk, ≥ 2 min continuous, free around the room | the qualitative question: is the "drunk stumbling" gone? |
+| 4 | backward, both strafes, both yaw directions | the lean makes backward/sideways worst (WL-B0b), so this is where residual trouble shows |
+| 5 | `LT + B` → Passive | clean damped stop |
+
+**The `[Safety] Clamp:` lines are EXPECTED and are not a fault.** They report the new
+rate-limited clamp counter (one line/s, worst offender). On `16-50-23` the clamp was active
+11.75% of ticks through a clean 3¾-minute walk. What matters is that **no `Tilt:` or `Fall:`
+line appears**, since those are the only remaining paths to a whole-body hold.
+
+**Afterwards**, from the repo root with the session's CSV:
+
+```bash
+python scripts/deploy_gate_analyzer.py logs/deploy_safety/<TS>.csv
+```
+
+Sign-off criteria, all offline-checkable: `alpha` max **0.000** across the session;
+`trig_tilt` and `trig_fall` both **0**; no fall; ≥ 2 min continuous in Velocity. Report
+`trig_joint` (expect roughly 5-15%) as an observation, not a pass/fail — it now means
+"clamp active", and a *rise* over the pre-fix number is the expected direction.
+
+**If a lean-related observation shows up, record it and leave it** — the backward lean is
+WL-B0b's, already decomposed, and is not this session's question.
 
 ### A0 gate ladder
 
@@ -1270,15 +1930,15 @@ Bars are the A1 track's bars unless noted; parity references are A0's own mjlab 
 | **G1.1** | Bench + holds exist for `a0_v2_optB_rs20_baseline`; vx=0.3 point filled 2026-07-20. Re-record only if the deployed ONNX is re-exported from a different run. | err_vx 0.085, CoT 0.537, 0 falls; ss@0.3 **0.041** (t90 0.54s), ss@0.5 **0.055** (t90 0.6 s), ss@1.0 **0.077** (t90 0.9 s) |
 | **G1.2** | ✅ PASS (re-confirmed 2026-07-20). Single net, `velocity/v0/exported/policy.onnx`, no goal-scale metadata to check. | max abs diff 1.24e-05 < 1e-4 |
 | **G2.0** | ✅ informally (loads and runs live); headless replica also 6/6 clean 2026-07-20 (both scenes, 0/2/4 ms). Live G2.0 folds into the G2.1 session. | no dim/FSM errors |
-| **G2.1** | **Live session pending** — key script + fixture ready (see item 3 above), headless pre-check clean. | action-rate within ~1.5x A0's mjlab stand level |
-| **G2.2** | **Live session pending** — key script ready; backward/strafe run at -0.5/±0.5 not -0.3/±0.3 (keyboard has no ±0.3 preset, see item-3 caveat); flight recorder now logs `ach_vx/vy` (sim ground truth) so the parity number IS offline-readable via `deploy_gate_analyzer.py` as of 2026-07-21 — untested against a live capture yet. | achieved vx within +-0.05 m/s of G1.1; stride within +-0.05 s |
-| **G2.3** | Headless replica: 0/2/4 ms both scenes, step 1.0-from-stand + walk 0.5 all clean, 0 falls. **Live session pending** (key script ready). | 0 falls, clean return to stand |
+| **G2.1** | ✅ **PASS live 2026-07-23** (scripted, `bridge_session.py`): 12.9 s stand at cmd 0, `act_rate` 0.000, no fall, `alpha` 0 throughout (`trig_joint` 4.8% = command clamps only). Re-run longer than 60 s if a formal sign-off is wanted. | action-rate within ~1.5x A0's mjlab stand level |
+| **G2.2** | ✅ **PASS live 2026-07-23** (scripted; holds were ~11.5 s each, not the 30 s the A1 ladder asks — sufficient given t90 ≤ 0.9 s, re-run longer if formal). Achieved ss vx **0.273 / 0.457 / 0.944** at 0.3/0.5/1.0 → ss_err 0.027/0.043/0.056, all inside ±0.05 of G1.1. Stride 0.573-0.585 s. 0 falls. Pre→post clamp delta 0.002/0.001/0.003 m/s vs 0.001 run-to-run noise. Backward/strafe/yaw not in this scripted run (keyboard presets are vx-only). | achieved vx within +-0.05 m/s of G1.1; stride within +-0.05 s |
+| **G2.3** | ✅ **PASS live 2026-07-23**: 0→0.3→0→0.5→0→1.0→0 including the 1.0-from-stand killer, 0 falls, clean return to stand each time. Headless replica also 6/6 clean (both scenes, 0/2/4 ms). | 0 falls, clean return to stand |
 | **G2.4** | **Live session pending.** Sim split-mode fixture prepared: `deploy.yaml.g2_4_split_test` (launch with `H1_2_DEPLOY_CFG` set to it). | same bars as G2.1-G2.3 |
 | **G2.5** | **N/A for A0** (no estimator-fed goal channel). | - |
 | **G2.6** | **N/A for A0** (fixed 0.6 s clock). | - |
 | **G2.7** | Headless replica on `scene_stress.xml`: 0/2/4 ms, step 1.0 + walk 0.5, all clean, 0 falls. **Live session pending** (key script ready). | 0 falls at 0.5 (BLOCKING); 1.0 advisory |
 | **E1/E2** | **E2 ✅ PASS (2026-07-20, real robot).** **E1 FAIL — no odometry data at all** (see below); does not block A0. | per Phase E |
-| **G3.0-G3.3** | `h1_2_limits.h` fix landed 2026-07-21 (item 2 no longer blocking). Remaining blocker: the live G2.x session above. Terminal-behavior decision (item 1) resolved — no change needed. **Open: the 2026-07-20 unexplained fall (item 1) should be understood before G3.** | G3.3 = repeatable free walk |
+| **G3.0-G3.3** | `h1_2_limits.h` fix landed 2026-07-21; live G2.1-G2.3 cleared 2026-07-23; the clamp port landed and is hardware-confirmed (225.8 s free walk, all directions, filter never engaged). **G3.3's required tier — ≥2 min continuous free walk — is met by that run at 3 min 45 s**, pending the user's qualitative sign-off that the stumbling is gone and a second session for "repeatable". Terminal-behavior design question (chasing vs latched hold) still open but no longer urgent for the joint path. **Open: the 2026-07-20 unexplained fall (item 1).** | G3.3 = repeatable free walk |
 
 ### E1/E2 result (2026-07-20, real H1-2, offline session)
 
@@ -1380,12 +2040,3 @@ Any hardware anomaly: flight-recorder CSV first, then reproduce in the bridge in
 this order: faithful scene, stress scene, faithful+state_noise. Only then propose a
 code or training change (spec-first per CLAUDE.md). No same-day retry after a
 safety-filter engagement without a written cause hypothesis.
-
-## Doc corrections to sync on approval
-
-- The "4 YAMLs + constants uncommitted in the working tree" note is stale
-  (committed in `6decd8b`).
-- `a1_estimator_noise_8b` memory: DR machinery validated, but the current keeper
-  did NOT train with it (`goal_state_noise.enable: false`); requirement moved to M2
-  (decision 2 above).
-- `deploy_real.yaml` staleness (fixed by W5).

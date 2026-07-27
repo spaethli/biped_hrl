@@ -51,6 +51,18 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     num_slots=1,
     track_air_time=True,
   )
+  # WL-D arm 6 formulation C (2026-07-24): contact-sequence-based push-off reward.
+  foot_subgeom_contact_cfg = ContactSensorCfg(
+    name="foot_subgeom_contact",
+    primary=ContactMatch(
+      mode="geom",
+      pattern=r"^(left|right)_foot[1-7]_collision$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found",),
+    reduce="maxforce",
+  )
   self_collision_cfg = ContactSensorCfg(
     name="self_collision",
     primary=ContactMatch(mode="subtree", pattern="pelvis", entity="robot"),
@@ -62,6 +74,7 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
   cfg.scene.sensors = (cfg.scene.sensors or ()) + (
     feet_ground_cfg,
+    foot_subgeom_contact_cfg,
     self_collision_cfg,
   )
 

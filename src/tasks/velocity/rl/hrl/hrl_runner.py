@@ -37,6 +37,7 @@ from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 from .state_noise import GoalStateNoise
 from .td3 import HighLevelTd3
 from ...mdp import rewards as mdp_rewards
+from mjlab.envs.mdp.rewards import joint_acc_l2
 
 
 class HierarchicalRunner(VelocityOnPolicyRunner):
@@ -74,9 +75,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_footslip_coef: float = train_cfg.get("ll_footslip_coef", 0.0)
     self.ll_footclear_coef: float = train_cfg.get("ll_footclear_coef", 0.0)
     self.ll_energy_coef: float = train_cfg.get("ll_energy_coef", 0.0)
-    # WL-D arm 6 (2026-07-17): heel-to-toe roll-over (A) / push-off power burst (B).
-    # Probe-derived defaults (D2 checkpoint constants probe, 2026-07-17); sigma/k/w are
-    # free knobs (sigma anchored to env_cfgs.py's std_walking ankle_pitch tolerance).
+    self.ll_joint_acc_coef: float = train_cfg.get("ll_joint_acc_coef", 0.0)
+    # WL-D arm 6 (2026-07-17): heel-to-toe roll-over (A) / push-off power burst (B) /
+    # contact-sequence (C). Probe-derived defaults (D2 checkpoint constants probe, 2026-07-17);
+    # sigma/k/w are free knobs (sigma anchored to env_cfgs.py's std_walking ankle_pitch tolerance).
     self.ll_pitchref_coef: float = train_cfg.get("ll_pitchref_coef", 0.0)
     self.ll_pitchref_theta_hs: float = train_cfg.get("ll_pitchref_theta_hs", -0.253)
     self.ll_pitchref_theta_to: float = train_cfg.get("ll_pitchref_theta_to", -0.275)
@@ -85,6 +87,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_pushoff_coef: float = train_cfg.get("ll_pushoff_coef", 0.0)
     self.ll_pushoff_w: float = train_cfg.get("ll_pushoff_w", 0.175)
     self.ll_pushoff_p_scale: float = train_cfg.get("ll_pushoff_p_scale", 40.0)
+    self.ll_rollover_coef: float = train_cfg.get("ll_rollover_coef", 0.0)
+    self.ll_rollover_w: float = train_cfg.get("ll_rollover_w", 0.175)
     # WL-D arm 10 (2026-07-20): left/right gait symmetry. Formulation B (step-time
     # symmetry index) is the primary training arm; formulation A (phase-shifted joint
     # mirror) is implemented alongside but left untrained pending B's read (the arm 6
@@ -137,6 +141,27 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self._pitchref_gait_params = {
       k: v for k, v in self._gait_params.items() if k != "sensor_name"
     }
+    # WL-D arm 6 formulation C (2026-07-24): resolve heel/toe geom indices for the
+    # heel_toe_rollover_contact reward (foot1/2 = heel, foot5/6 = toe). The sensor
+    # tracks all 14 sub-geoms; we need their indices in the sensor's found array.
+    robot = env.unwrapped.scene["robot"]
+    # Find all geoms matching the foot sub-geom pattern. The sensor's primary_names
+    # will have resolved these in order (left_foot1..7, right_foot1..7).
+    geom_names = []
+    for side in ("left", "right"):
+      for i in range(1, 8):
+        geom_names.append(f"{side}_foot{i}_collision")
+    # Build the index mapping (assumption: sensor data matches pattern order)
+    geom_name_to_idx = {name: i for i, name in enumerate(geom_names)}
+    # PER-LEG (outer index 0/1 = left/right, matching offset=[0.0, 0.5]) - NOT a flat
+    # combined list: heel_toe_rollover_contact evaluates+sums both legs separately, so
+    # each leg's own heel/toe geoms must stay in their own sublist (fixed 2026-07-24 -
+    # the original flat-list version silently only rewarded the left leg's gate against
+    # an OR of both feet's geoms, ignoring the right foot and cross-contaminating them).
+    self._heel_geom_ids = [[geom_name_to_idx[f"{s}_foot{i}_collision"] for i in (1, 2)]
+                           for s in ("left", "right")]
+    self._toe_geom_ids = [[geom_name_to_idx[f"{s}_foot{i}_collision"] for i in (5, 6)]
+                          for s in ("left", "right")]
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
@@ -478,7 +503,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       intrinsic_sum = 0.0
       goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
       stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
-      pitchref_sum = pushoff_sum = 0.0
+      joint_acc_sum = 0.0
+      pitchref_sum = pushoff_sum = rollover_sum = 0.0
       symmetry_sum = mirror_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       with torch.inference_mode():
@@ -594,6 +620,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
               uenv, command_name="twist", command_threshold=0.1)
             r_lo = r_lo - en_pen
             energy_sum += -en_pen.mean().item()
+          # WL-D (2026-07-24): mirror A0's joint_acc_l2 (whole-body joint-accel L2) - the
+          # missing half of A0's smoothness stack (action_rate + joint_acc).
+          if self.ll_joint_acc_coef != 0.0:
+            ja_pen = self.ll_joint_acc_coef * joint_acc_l2(uenv)
+            r_lo = r_lo - ja_pen
+            joint_acc_sum += -ja_pen.mean().item()
           # A1a cadence entrainment (ADR-0004): reward the LL for matching the contact
           # schedule of the HL-commanded stride period. Positive feet_gait term.
           if self.hl_cadence and self.ll_cadence_coef != 0.0:
@@ -621,6 +653,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
               use_commanded_phase=True, **self._gait_params)
             r_lo = r_lo + self.ll_pushoff_coef * po
             pushoff_sum += (self.ll_pushoff_coef * po).mean().item()
+          # WL-D arm 6 formulation C (2026-07-24): contact-sequence heel-to-toe roll-over,
+          # gated command + SCHEDULED stance only (gate pin ii: phi is only well-defined
+          # on the schedule).
+          if self.hl_cadence and self.ll_rollover_coef != 0.0:
+            ro = mdp_rewards.heel_toe_rollover_contact(
+              uenv, sensor_name="foot_subgeom_contact",
+              heel_geom_ids=self._heel_geom_ids, toe_geom_ids=self._toe_geom_ids,
+              w=self.ll_rollover_w, use_commanded_phase=True, **self._pitchref_gait_params)
+            r_lo = r_lo + self.ll_rollover_coef * ro
+            rollover_sum += (self.ll_rollover_coef * ro).mean().item()
           # WL-D arm 10 formulation B (2026-07-20): step-time left/right symmetry index,
           # the primary training arm. Reset the per-env touchdown-time buffer for envs
           # that reset THIS step before reading this step's touchdowns (no RewardManager
@@ -737,8 +779,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/footslip_pen": footslip_sum / n_steps,
         "ll/footclear_pen": footclear_sum / n_steps,
         "ll/energy_pen": energy_sum / n_steps,
+        "ll/joint_acc_pen": joint_acc_sum / n_steps,
         "ll/pitchref_rew": pitchref_sum / n_steps,
         "ll/pushoff_rew": pushoff_sum / n_steps,
+        "ll/rollover_rew": rollover_sum / n_steps,
         "ll/symmetry_rew": symmetry_sum / n_steps,
         "ll/mirror_rew": mirror_sum / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)

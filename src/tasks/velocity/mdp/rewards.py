@@ -366,6 +366,66 @@ def ankle_pushoff_power(
     return reward * _command_gate(env, command_name, command_threshold)
 
 
+def heel_toe_rollover_contact(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        heel_geom_ids: list[list[int]],
+        toe_geom_ids: list[list[int]],
+        command_name: str,
+        command_threshold: float,
+        w: float,
+        period: float,
+        offset: list[float],
+        threshold: float,
+        use_commanded_phase: bool = False,
+        swing_time: float = 0.0,
+        duty_max: float = 0.70,
+) -> torch.Tensor:
+    """WL-D arm 6, formulation C: heel-to-toe contact-sequence push-off (2026-07-24).
+
+    Rewards the actual foot contact SEQUENCE (not joint angle): specifically the
+    "heel lifts before toe" state (toe in contact AND heel not in contact) during
+    terminal stance. Formulations A/B only shaped ``ankle_pitch`` joint angle; empirical
+    replay showed whole feet lifted simultaneously despite correct angle rotation.
+    This formulation reads the contact sensor directly.
+
+    Heel group = foot1 + foot2 (offset_rank 0.13, 1.27 — leave earliest);
+    toe group = foot5 + foot6 (offset_rank 4.48, 5.53 — leave latest); foot3/4/7 are
+    the ambiguous middle and omitted. ``heel_geom_ids``/``toe_geom_ids`` are PER-LEG
+    (outer list index 0/1 = left/right, matching ``offset``'s [0.0, 0.5] convention) -
+    computed once at runner init time. Evaluated and summed over BOTH legs (like
+    ``ankle_pushoff_power``), not just one - an earlier version of this function
+    collapsed both feet's geoms into one scalar and only read the left leg's gate,
+    silently ignoring the right foot and cross-contaminating the two feet's contact
+    signals; fixed 2026-07-24.
+
+    Gate: terminal-stance window + SCHEDULE only (gate pin ii, A1a_plan.md Arm 6).
+    Requires ``hl_cadence`` and a contact sensor with per-subgeom ``.found`` data.
+    """
+    sensor: ContactSensor = env.scene[sensor_name]
+    assert sensor.data.found is not None
+    found = sensor.data.found  # [B, N_geoms]
+    n_legs = len(heel_geom_ids)
+    heel_contact = torch.zeros(found.shape[0], n_legs, dtype=torch.bool, device=found.device)
+    toe_contact = torch.zeros(found.shape[0], n_legs, dtype=torch.bool, device=found.device)
+    for leg in range(n_legs):
+      for idx in heel_geom_ids[leg]:
+        heel_contact[:, leg] |= found[:, idx] > 0
+      for idx in toe_geom_ids[leg]:
+        toe_contact[:, leg] |= found[:, idx] > 0
+    # Per-leg indicator: toe in contact AND heel NOT in contact (heel lifted, toe still down)
+    rollover = toe_contact & ~heel_contact  # [B, n_legs]
+    # Gate: terminal-stance window (phi in [1-w, 1)) on the SCHEDULE (not actual contact)
+    leg_phase, is_stance, duty = _gait_schedule(
+        env, period, offset, threshold, use_commanded_phase, swing_time, duty_max
+    )
+    phi = leg_phase / duty
+    gate = is_stance & (phi >= (1.0 - w))  # [B, n_legs]
+    # Reward: rollover indicator, gated, summed over both legs, command-gated
+    reward = (gate.float() * rollover.float()).sum(dim=1)
+    return reward * _command_gate(env, command_name, command_threshold)
+
+
 class foot_step_symmetry:
   """WL-D arm 10, formulation B (primary training arm - A1a_plan.md "Arm 10"):
   step-time left/right symmetry index. Per-env last-touchdown-time buffer (mirrors

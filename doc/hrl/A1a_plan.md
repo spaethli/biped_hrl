@@ -5,7 +5,7 @@ locked feature spec live in `docs/adr/0004-a1a-energy-cadence-hl-enrichment.md`;
 (Goal, Gait reference, Cost of transport) in `CONTEXT.md`; backlog context in
 `doc/hrl/hierarchy_benefit_roadmap.md` (Track A). This file tracks execution + live status.
 
-## Current status (updated 2026-07-22 — read this first, then dive into the dated sections)
+## Current status (updated 2026-07-24 — read this first, then dive into the dated sections)
 
 - **The stage table below (S0–S6) is superseded by "Plan v2"** (Model v2 rebase,
   2026-07-07): only Plan v2's own table further down is thesis-scorable. S0–S6 stay as
@@ -21,14 +21,28 @@ locked feature spec live in `docs/adr/0004-a1a-energy-cadence-hl-enrichment.md`;
   tracking (table (e)). The user's call (2026-07-13, reaffirmed since): co-training stays
   the A1a line regardless — the hierarchy is the architecture's point, not just this one
   metric. See table (e) reads for the full un-confounding story.
-- **WL-D reward/gait lever batch (2026-07-17 → present) is the live edge of this doc.**
-  Winner: **`arm4d` (`ll_energy_coef=0.05`)** — CoT −48%, now also the **locked A1 deploy
-  candidate** (validated on the live hardware bridge 2026-07-22, see
-  `A1a_deploy_plan.md`). Arms 6 (heel-toe push-off) and 10 (L/R symmetry) shipped, neither
-  clears the winner bar cleanly. 3 combination arms + an arm4d seed-2 are specced and
-  pending (`worklines.md`).
+- **WL-D reward/gait lever batch winner `arm4d` (`ll_energy_coef=0.05`) is now
+  seed-verified.** The 2026-07-23/24 combo batch replicated it on a second seed (all
+  metrics inside noise) and tested 6 combinations against it — **none beat it**; the one
+  real lever found (`ll_action_rate_coef` 0.05, "combo1") narrows the action-rate gap to
+  A0 by ~9% but doesn't close it. See "WL-D combo batch" below.
+- **Why A1 is twitchier than A0, root-caused 2026-07-24**: NOT the HL's re-commanded
+  stride period (falsified, <=4% of the gap) and NOT a missing-reward-term problem
+  (falsified by combo6, which mirrored six A0 terms and still didn't reach A0's
+  smoothness). It decomposes into a small (~4%) structural cost from the goal channel's
+  6.25 Hz step, plus a large (~38%) uniform floor concentrated in the **arms**
+  (2.6-3x more of the action-rate budget than A0) — pointing at A0's `pose`/
+  `variable_posture` term (its single largest reward) as the missing mirror, not more
+  whole-body action-rate penalty. See "Action-rate root cause" and "Action-rate
+  decomposition" below. Separately, arm3's `stand_still` lever is **vindicated**: it was
+  never properly judged (the aggregate bench resamples commands too fast to hold zero) —
+  measured at a pinned zero command, it cuts a real HL-side phantom-velocity artifact
+  4-5x; recommended as an untried combo (`arm4d + stand_still`).
 - **Deploy status lives in `A1a_deploy_plan.md`, not here** — this doc is training/sim
-  only. As of 2026-07-23 that doc also covers the first real-hardware A0 test.
+  only. As of 2026-07-24 that doc covers the first real A0 hardware test, the
+  safety-filter clamp port (landed, hardware-confirmed), and the backward-lean
+  investigation (decomposed into two causes, one resolved, one pending an inclinometer
+  session).
 
 ## Thesis hook
 The HL earns its keep by choosing a **speed-dependent gait cadence** to minimize **cost of
@@ -912,7 +926,7 @@ margin as provisional, and note that combinations are NOT additive - arm 6 is th
 counter-example (its target metric improved 3.7x while tracking regressed, because every
 added LL term dilutes the finite goal-tracking gradient).
 
-### Arm 6 — heel-to-toe roll-over / ankle push-off (researched -> approved 2026-07-17; formulation A trains)
+### Arm 6 — heel-to-toe roll-over / ankle push-off (both formulations trained + swept, 2026-07-17 → 22; neither clears the winner bar cleanly)
 
 Two prior-work lines ground this: **Siekmann et al., "Sim-to-Real Learning of All
 Common Bipedal Gaits via Periodic Reward Composition"** (arXiv:2011.01387) - the origin
@@ -1155,7 +1169,7 @@ conservative `P_scale`, trading off against the same tracking/energy costs formu
 hit) would likely be needed to make the effect visible - not run here, planning-chat call
 on whether to pursue it.**
 
-**Coefficient + `P_scale` sweep (2026-07-20/22, Liam's replay confirmed no visible pitching
+**Coefficient + `P_scale` sweep (2026-07-20/22, the user's replay confirmed no visible pitching
 at `coef=0.5`).** Two metrics tracked per run: the reward-gated terminal-window delta
 (narrow, ~17.5% of stance) and the **full-stance ROM** (`theta_to - theta_hs`, heel-strike
 to toe-off - the number that actually maps to what a viewer would see, since motion isn't
@@ -1217,7 +1231,7 @@ and CoT both looked good in isolation (better than the coef=0.5 run, even beatin
 CoT) - a reminder that "the bench numbers look fine" says nothing about which direction a
 gait-shaping term is actually pushing; only the ROM/direction check catches it.
 
-**Recalibrated 2026-07-22 (Liam's call: re-measure, don't just swap the sign):**
+**Recalibrated 2026-07-22 (the user's call: re-measure, don't just swap the sign):**
 `ll_pitchref_theta_hs`/`theta_to` in `rl_cfg.py` re-measured from the direction-corrected,
 genuinely-plantarflexing `pushoff0p5_pscale0p5` checkpoint (arm 6 formulation B, the
 sweep's biggest correctly-signed ROM) instead of the pre-arm-6 D2 baseline: `theta_hs
@@ -1251,7 +1265,7 @@ even consistent across coefficients (inversion at 0.1, eversion at 0.2) - furthe
 this is an unconstrained side-channel the LL exploits opportunistically, not a
 deterministic mechanical consequence of the push-off/roll-over shaping itself.
 
-**Ankle-roll anchor test (2026-07-23, Liam's call): kills the confound cleanly.** Coef=0.3
+**Ankle-roll anchor test (2026-07-23, the user's call): kills the confound cleanly.** Coef=0.3
 was stopped early (uninformative partial run, no checkpoint) in favor of testing
 `ll_posture_anchor_ankle_roll=True` at coef=0.1 - the clearest before/after case (biggest
 pitch ROM, most consistent/strongest roll confound of the two data points above):
@@ -1272,11 +1286,11 @@ yet run.
 **Where this leaves arm 6, 2026-07-23:** formulation A at `coef=0.1` + the ankle-roll
 anchor is now the strongest candidate produced by this whole arm: correctly-signed,
 real-amplitude (~6 degrees) push-off motion, roll confound essentially eliminated,
-tracking/CoT both close to or better than D2. Whether ~6 degrees clears Liam's own
+tracking/CoT both close to or better than D2. Whether ~6 degrees clears the user's own
 visibility bar (replay not yet re-checked on this exact checkpoint) is the next open
 question, not yet answered.
 
-### Arm 10 — left/right gait symmetry (specced 2026-07-20, awaiting probe + approval)
+### Arm 10 — left/right gait symmetry (probed, both formulations trained + benched, 2026-07-20/21; formulation B is the clearer candidate, neither wins outright)
 
 **Defect (the user, replay observation 2026-07-20):** the right foot touches down **twice
 before the left foot lifts** - a stutter/double-tap - and A1 shows a persistent left/right
@@ -1393,7 +1407,7 @@ at 0.010-0.016; arm4c is mildly worse (0.071); the new fix0p8 is the outlier at 
 ~15-24x every other checkpoint. `sigma_si=0.06` anchors between these (healthy gaits sit
 near r~0.9-1.0, the observed defect near r~0). (b) **per-foot touchdown counts are unequal,
 but concentrated almost entirely in one checkpoint** - new fix0p8's right foot touches down
-56% more than left (1070 right-foot repeats vs 204 left), directly reproducing Liam's
+56% more than left (1070 right-foot repeats vs 204 left), directly reproducing the user's
 replay observation; the other 4 checkpoints (including the current control AND the batch
 winner) are close to 1:1. **Read: the defect as measured here is severe-but-checkpoint-
 specific, not uniformly present across the A1a line** - worth revising the "persistent
@@ -1405,7 +1419,7 @@ top. **Revise read (x) to "both candidates partially hold"**, not one-or-the-oth
 (g)'s stride column only needs an asterisk on the fix0p8-new lineage, the other rows'
 alternation estimates match their reported metric within ~3%.
 
-Given the healthy checkpoints already show low SI, the planning chat and Liam explicitly
+Given the healthy checkpoints already show low SI, the planning chat and the user explicitly
 discussed whether a dedicated symmetry term was even necessary before implementing (see
 worklines.md WL-D row) - decision was to proceed as specced (cheap, command-gated, cheap
 insurance against config-specific regressions like fix0p8-new's).
@@ -1424,7 +1438,7 @@ independently and together at nonzero coefficients, and the `hl_cadence` guard.
 `play.py` gained a matching `--diagnose-symmetry` probe flag for apples-to-apples
 re-measurement on trained checkpoints.
 
-**Training (2026-07-20/21, LOCAL lab PC not cluster - Liam's call):**
+**Training (2026-07-20/21, LOCAL lab PC not cluster - the user's call):**
 `a1a_cot0p2_cad0p5_sym0p25_s42` (formulation B, `ll_symmetry_coef=0.25`) and
 `a1a_cot0p2_cad0p5_mirror0p25_s42` (formulation A, `ll_mirror_coef=0.25` - same
 conservative starting value as B, matched to arm 6's "don't start at 0.5" lesson since
@@ -1474,11 +1488,11 @@ available to this hand-off) - substituted with the quantitative same-foot-repeat
 from the symmetry probe (10 left / 36 right, down from D2's 24/37 in absolute terms, and
 the SI convergence shows the two step-time distributions are now much closer together).
 A visual replay (`python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file
-.../a1a_cot0p2_cad0p5_sym0p25_s42/model_10000.pt --num-envs 1`) is still worth Liam's own
+.../a1a_cot0p2_cad0p5_sym0p25_s42/model_10000.pt --num-envs 1`) is still worth the user's own
 eyes for the qualitative read, same as the original defect discovery.
 
 **Formulation A (`a1a_cot0p2_cad0p5_mirror0p25_s42`, `ll_mirror_coef=0.25`) - trained in
-parallel at Liam's explicit call, deviating from the spec's default B-first-A-pending
+parallel at the user's explicit call, deviating from the spec's default B-first-A-pending
 sequencing.** Trained cleanly (0 falls through training, `mean_episode_length` reached
 the full 1000/1000).
 
@@ -1502,7 +1516,7 @@ with B's 0.016->0.0048 (3.3x improvement).
 metric** - 0.0152 vs D2's 0.016 is within the batch's own established ~15% noise floor
 (read (v) on `hl_cot_coef`), i.e. statistically indistinguishable from no effect. This
 makes sense mechanistically: A optimizes a joint-ANGLE mirror (`q_L(t)` vs `q_R(t-tau)`),
-a different notion of symmetry than B's touchdown-TIMING index, and Liam's originally
+a different notion of symmetry than B's touchdown-TIMING index, and the user's originally
 observed defect (a foot-contact double-tap) is a timing phenomenon that A's objective
 doesn't directly touch. **A does not address the observed defect as measured, even though
 it enforces a real (different) symmetry statement.** (ii) A gets a genuine yaw-tracking
@@ -1522,3 +1536,409 @@ work. (v) Neither formulation clears the winner bar cleanly enough for an uncont
 promotion into the batch's default config - **planning-chat call**: adopt B as-is (weighing
 the vy/hold@1.0 cost against the SI win), sweep B's coefficient lower first, or leave
 Arm 10 unresolved pending a coefficient pass.
+
+### WL-D combo batch (launched 2026-07-23, benched 2026-07-24) — arm4d SURVIVES a second seed; no combo beats it
+
+Seven runs, all `model_10000`, 4096 envs / 10001 it, `train_h1_2_a1a_LL_rewards.sh`
+(extended 2026-07-23 with an `LL_ACTION_RATE` knob for the smoothness lever). **Comparator
+is arm4d itself** (`2026-07-17_21-46-14_..._energy0p05_s42`), NOT D2 — the batch tests
+whether anything *composes with* the WL-D winner. All 8 `agent.yaml`s were config-verified
+before benching (each arm carries exactly its own lever, everything else at the arm4d base).
+Motivating context: the A1 deploy blocker is **smoothness** (`action_rate`; A0 live 0.57-0.75
+/ sim 0.644 vs A1 0.92-1.28), and arm4d is the only A1 that passes the live bridge
+(2026-07-22, `A1a_deploy_plan.md`).
+
+*(m) Aggregate bench, 64x600x2. `act` and `arm_vel` are the deploy metrics. 0 falls everywhere.*
+
+| run | vx | vy | yaw | **act** | **arm_vel** | CoT | power | stride | match | orient | height |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **arm4d s42 (COMPARATOR)** | 0.063 | 0.069 | 0.107 | 0.923 | **0.300** | **0.462** | 153 | 0.359 | 0.952 | 0.028 | 0.005 |
+| **arm4d s123 (SEED REPEAT)** | **0.060** | 0.067 | 0.111 | 0.934 | 0.307 | 0.489 | 164 | 0.358 | 0.954 | 0.032 | 0.006 |
+| combo1 energy+ar0.05 | 0.066 | 0.086 | 0.112 | **0.837** | 0.320 | 0.519 | 176 | 0.357 | 0.946 | 0.029 | 0.006 |
+| combo2 energy+angmom | 0.065 | **0.053** | 0.114 | 1.044 | 0.348 | 0.512 | 172 | 0.361 | **0.955** | **0.020** | 0.010 |
+| combo3 energy 0.10 | 0.069 | 0.059 | **0.110** | 0.961 | 0.332 | **0.429** | **142** | 0.364 | 0.947 | 0.022 | 0.007 |
+| combo4 energy+ankle+clear | 0.080 | 0.099 | 0.124 | 1.107 | 0.362 | 0.710 | 239 | 0.599 | 0.942 | 0.040 | 0.009 |
+| combo5 footclear+ar0.05 | 0.094 | 0.084 | 0.144 | 0.920 | 0.359 | 0.845 | 294 | 0.550 | 0.932 | 0.058 | 0.009 |
+| combo6 full A0-mirror | 0.106 | 0.082 | 0.126 | 0.951 | 0.348 | 0.769 | 241 | **0.643** | 0.932 | 0.044 | 0.008 |
+| *A0-optB-rs20 ref (table i)* | *0.088* | *0.111* | *0.089* | *0.644* | *0.143* | *0.541* | *166* | *0.590* | *0.946* | *0.029* | *0.025* |
+
+*(n) Held-command (`--eval-cmd-vx`), steady-state err (last 2/3) + t90. 0 falls everywhere.*
+
+| run | ss vx@0.5 | ss vy@0.5 | t90@0.5 | ss vx@1.0 | ss vy@1.0 | t90@1.0 |
+|---|---|---|---|---|---|---|
+| arm4d s42 | 0.034 | 0.052 | **0.39** | 0.049 | 0.062 | **0.59** |
+| arm4d s123 | 0.040 | 0.052 | 0.41 | 0.040 | 0.063 | 0.75 |
+| combo1 energy+ar0.05 | 0.030 | 0.070 | 0.51 | 0.041 | 0.074 | 0.88 |
+| combo2 energy+angmom | **0.020** | **0.032** | 0.44 | 0.046 | **0.042** | 0.85 |
+| combo3 energy 0.10 | 0.023 | 0.041 | 0.51 | **0.040** | 0.066 | 0.76 |
+| combo4 energy+ankle+clear | 0.043 | 0.086 | 0.55 | 0.046 | 0.105 | 0.86 |
+| combo5 footclear+ar0.05 | 0.039 | 0.069 | 0.57 | 0.055 | 0.080 | 0.83 |
+| combo6 full A0-mirror | 0.083 | 0.053 | 0.76 | 0.106 | 0.053 | 0.99 |
+| *A0-optB-rs20 ref (table f)* | *0.057* | — | *0.56* | *0.076* | — | *0.88* |
+
+*(o) Goal probe (`--diagnose-goals 600 --eval-seeds 2 --num-envs 64`), 9600/9600 windows
+kept except combo5 (9598):*
+
+| run | HL err vx | LL err vx | HL err yaw | LL err yaw | gabs vx | gabs vy |
+|---|---|---|---|---|---|---|
+| arm4d s42 | 0.060 | 0.075 | 0.096 | 0.069 | 0.127 | 0.241 |
+| arm4d s123 | 0.058 | **0.072** | 0.104 | 0.074 | **0.125** | 0.216 |
+| combo1 energy+ar0.05 | 0.063 | 0.080 | 0.102 | 0.074 | 0.160 | 0.318 |
+| combo2 energy+angmom | 0.064 | 0.079 | 0.106 | 0.075 | 0.147 | **0.148** |
+| combo3 energy 0.10 | **0.049** | 0.081 | 0.099 | 0.071 | 0.134 | 0.176 |
+| combo4 energy+ankle+clear | 0.094 | 0.113 | 0.105 | 0.091 | 0.178 | 0.374 |
+| combo5 footclear+ar0.05 | 0.098 | 0.123 | 0.115 | 0.096 | 0.182 | 0.257 |
+| **combo6 full A0-mirror** | **0.181** | **0.225** | 0.108 | 0.084 | **0.304** | **0.411** |
+
+*Training health (last-20-iter mean; the S4/S5 penalty-domination guard):* every run
+converged — `ep_len` 991.7-997.9, `fell_over` 0.019-0.063, `cadence_rew` 0.440-0.450.
+**combo3's guard passes cleanly**: `cadence_rew` 0.4486 vs arm4d's 0.4496 and `gait_match`
+0.947 — doubling the energy coef did NOT collapse entrainment, unlike the historical S5
+CoT-coef sweep. combo6's `goal_reward` sags to 3.365 vs arm4d's 3.710 — the dilution is
+visible in training, not just at eval.
+
+**Reads (honest, 2026-07-24):**
+
+(i) **THE headline: arm4d replicates on a second seed.** s123 lands CoT 0.489 vs s42's
+0.462 (+5.8%), `act` 0.934 vs 0.923 (+1.2%), `arm_vel` 0.307 vs 0.300, vx 0.060 vs 0.063,
+probe 0.058/0.072 vs 0.060/0.075 — every metric inside the batch's own noise floor. The
+WL-D verdict, the locked deploy candidate and the thesis energy claim no longer rest on one
+seed. **This also gives WL-D its first real 2-seed noise estimate on the base config**:
+CoT +/-5.8%, `act` +/-1.2%, vx +/-0.003 — much tighter on smoothness than on energy, which
+is what makes read (ii) resolvable and read (iii) not.
+
+(ii) **combo1 (`ll_action_rate_coef` 0.02 -> 0.05) is the only arm that moves the deploy
+blocker, and the move is real but insufficient.** `act` 0.923 -> **0.837** (-9.3%), the
+lowest action rate of any A1 policy in the project, and ~8x the 1.2% seed spread, so it is
+comfortably resolvable. **But it does not close the gap**: A0 sits at 0.644 in sim
+(0.57-0.75 live), so combo1 is still ~30% above A0 with no overlap — the blocker is
+narrowed, not solved. Costs, all resolvable: CoT +12% (0.462->0.519), power +15%, ss
+vy@0.5 0.052->0.070, probe `gabs_vy` 0.241->0.318. **Counter-intuitive and worth naming:
+raising the action-rate penalty made `ub_arm_vel` WORSE** (0.300->0.320) — the penalty is
+on whole-body action deltas, and the arms are not where it binds.
+
+(iii) **combo3 (energy 0.05 -> 0.10) is NOT a resolvable improvement.** CoT 0.462 -> 0.429
+(-7.1%) and power -7% look like the best energy numbers in the project, but the arm4d seed
+pair spans 5.8% on exactly this metric — so -7.1% is barely one seed-spread away from zero
+and cannot be called a coefficient effect on n=1, the same trap arm2's non-monotonic
+0.15/0.25 result set. It also costs `act` (0.961 vs 0.923). **Read: 0.05 was an untuned
+first guess and it remains un-improved-upon; do not re-tune this knob without >=2 seeds.**
+
+(iv) **The two best energy levers do NOT compose (combo2).** arm4a (angmom, CoT 0.683) +
+arm4d (energy, 0.465) gives **0.512**, i.e. *worse* than arm4d alone, and `act` regresses
+to 1.044 (+13%). What combo2 does buy is the batch's best lateral/orientation behaviour —
+vy 0.053, orient 0.020, ss vy@1.0 0.042, probe `gabs_vy` 0.148 (a 39% tighter lateral goal
+than arm4d) — so angmom is a *stability* lever, not an additive energy one. Wrong direction
+for a smoothness-blocked deploy.
+
+(v) **Clearance remains expensive and still is not the blocker (combo4, combo5).** Both
+restore stride toward A0 (0.599 / 0.550 vs arm4d's 0.359, A0's 0.590), replicating arm4c's
+one genuine effect. Both pay for it everywhere else: combo4 CoT +54%, `act` 1.107 (worst in
+batch), vx +27%, probe HL err 0.094; combo5 CoT +83%, vx 0.094 (+49%), worst orient in the
+batch (0.058). combo5 also shows **smoothness does not survive dropping the energy term** —
+its `act` 0.920 merely matches arm4d's baseline despite carrying the same ar 0.05 that got
+combo1 to 0.837. Consistent with the settled 2026-07-22 finding that clearance is not the
+deploy blocker; nothing here argues for reopening it.
+
+(vi) **combo6 falsifies "just mirror A0's rewards to get A0's smoothness" — the most useful
+negative result in the batch.** With A0's own weights on six LL terms simultaneously
+(ar 0.05, angmom 0.025, footslip 0.25, footclear 1.0, stand_still 1.0, ankle anchor), the
+policy **still does not reach A0's smoothness** (`act` 0.951 vs A0's 0.644 — no better than
+arm4d's 0.923) while the hierarchy takes the worst damage in the batch: probe HL err vx
+0.060 -> **0.181** and LL err vx 0.075 -> **0.225** (both ~3x), `gabs_vx` 0.127 -> 0.304,
+aggregate vx 0.063 -> 0.106 (+68%), and holds degrade to ss@0.5 0.083 / ss@1.0 0.106 — the
+**only** arm in this batch that holds *worse than A0* (0.057 / 0.076). It does get the
+batch's longest stride (0.643). **Read: piling on LL terms does not buy
+smoothness.** Six added LL terms bought zero `act` improvement and cost 3x goal-tracking
+error, quantifying the finite-gradient dilution mechanism exactly as predicted. **Honest
+scope limit (added 2026-07-24): combo6 is the most complete A0 mirror the current knobs
+ALLOW, not a complete A0 mirror.** Three A0 reward terms have no `ll_*_coef` field at all -
+`joint_acc_l2`, `body_ang_vel`, `soft_landing` - and A0's `pose`/`variable_posture` (its
+single largest term, +0.835) is only approximated by A1's deviation-based posture anchor.
+`joint_acc_l2` matters: it is **A0's second-largest penalty (-0.138 vs `action_rate_l2`'s
+-0.384)**, ~26% of A0's total smoothness pressure, and it penalizes joint acceleration - the
+twitch quantity - more directly than action rate does. So combo6 falsifies "mirror the six
+mirrorable terms", NOT "mirror A0's smoothness stack". See the root-cause analysis below.
+
+(vii) **Bottom line: no combo beats arm4d, and arm4d stays the deploy candidate.** It is
+still the best or tied-best on `act` among energy-carrying arms, the best `arm_vel` in the
+entire batch (0.300; every combo is worse, and A0 is 0.143), the best CoT that is
+seed-verified, and the fastest holder (t90 0.39/0.59). The one genuinely promising thread is
+**combo1's smoothness lever**, which is real, resolvable, and directionally right for the
+deploy blocker but lands ~30% short of A0 — the obvious next probe is an
+`ll_action_rate_coef` sweep past 0.05 (0.08 / 0.12) on the arm4d base, run at >=2 seeds,
+watching CoT and `gabs_vy` as the paying metrics. **Combinations were confirmed
+non-additive in every single case tested** (combo1/2/3/4/5/6: not one arm improved its
+target metric without regressing another).
+
+### Action-rate root cause: why is A1 twitchier than A0? (analysis 2026-07-24)
+
+Question raised by the user after the combo batch: is the high `action_rate` caused by the
+**stride period not being fixed** (the HL re-commands a period every window)? Evidence
+gathered on the arm4d checkpoint, no retrain.
+
+**(A) The stride period is NOT the cause — three independent falsifiers.**
+
+| test | `act` | vs arm4d | note |
+|---|---|---|---|
+| arm4d, HL-owned period (baseline) | 0.923 | — | period_mean 0.379 |
+| arm4d, `--eval-cadence-period 0.38` (its own mean) | **0.886** | −4.0% | stride 0.385, match 0.952 |
+| arm4d, `--eval-cadence-period 0.60` (**A0's exact clock**) | **0.896** | −2.9% | stride 0.570, match 0.817 |
+| *A0-optB-rs20, fixed 0.6 clock* | *0.644* | *−30%* | *same plant, same action scale* |
+
+(i) Pinning arm4d's period at eval removes period variation entirely and recovers only
+**−4%** of a **−30%** gap, i.e. at most ~13% of the deficit. (ii) The decisive row is the
+0.60 pin: **with A1 running A0's own fixed 0.6 s clock on the identical plant, action scale
+and PD gains, it still sits at 0.896 vs A0's 0.644 (+39%)** — the clock is exonerated
+directly. (iii) The training-side version of the hypothesis is falsified too: the `fix0p8`
+controls, which train with a **constant** clock, measured `act` 1.27 (table g) and 1.17
+(table d) — no better than their learned-cadence siblings (1.13 / 1.18).
+
+**(B) A0 carries a smoothness term A1's LL has never had.** A0 per-term episode rewards
+(`a0_v2_optB_rs20_baseline`, last-20-iter mean), sorted:
+
+| A0 term | value | A1 LL mirror? |
+|---|---|---|
+| `pose` (variable_posture) | **+0.835** | only approximated (`ll_posture_coef`, deviation-L2 on a joint subset) |
+| `track_linear_velocity` | +0.801 | replaced by the goal kernel |
+| `track_angular_velocity` | +0.783 | replaced by the goal kernel |
+| `foot_gait` | +0.443 | ✅ `ll_cadence_coef` |
+| **`action_rate_l2`** | **−0.384** | ✅ `ll_action_rate_coef` (0.02 default, A0 weight 0.05) |
+| **`joint_acc_l2`** | **−0.138** | ❌ **NO MIRROR EXISTS** |
+| `foot_clearance` | −0.052 | ✅ `ll_footclear_coef` |
+| `soft_landing` | −0.024 | ❌ no mirror |
+| `foot_slip` | −0.012 | ✅ `ll_footslip_coef` |
+| `angular_momentum` | −0.011 | ✅ `ll_angmom_coef` |
+| `body_ang_vel` | −0.009 | ❌ no mirror |
+
+**A0's smoothness pressure is two terms totalling −0.522: `action_rate_l2` (−0.384) and
+`joint_acc_l2` (−0.138). A1's LL mirrors only the first, and by default at 0.02 vs A0's
+0.05.** `joint_acc_l2` is A0's second-largest penalty and ~26% of its smoothness stack, and
+it penalizes joint *acceleration* — the twitch quantity itself, a second derivative — which
+`action_rate_l2` (first derivative of the action) does not directly reach. No
+`ll_joint_acc_coef` field exists, so **no WL-D arm has ever tested it**, combo6 included.
+
+**(C) The remaining structural suspect: the goal channel steps at 6.25 Hz.** Control dt =
+`decimation 4 x 0.005 s` = 0.02 s (50 Hz); `c = 8` -> the HL re-fires every **0.16 s**. The
+LL's goal observation `V* - s` therefore takes a **discontinuous jump 6.25 times a second**,
+whereas A0's `command` obs is piecewise-constant for 3-20 s at a time. This is structural to
+the hierarchy and cannot be removed by reward tuning. **NOT yet measured** — the decisive
+diagnostic is the within-window action-rate profile (bin `||a_t - a_{t-1}||` by step index
+mod `c`): if the twitch spikes at the fire step, this is the dominant term and the fix is
+different in kind (goal interpolation/slew across the window, or a larger `c`) from anything
+reward-shaped. Note `hl_td3.expl_noise_std = 0.2` means the LL *trained* against a goal
+stream noisier than the deterministic one it is evaluated on, which would reinforce a
+high-gain reactive character.
+
+**Ranked conclusion.** Period variation: falsified, ~4%. Missing `joint_acc_l2` mirror:
+untested, sized at 26% of A0's smoothness pressure, one cheap term away. Goal stepping at
+6.25 Hz: unmeasured, structural, needs the window-profile diagnostic. Coefficient strength:
+real but sub-linear (combo1's 2.5x on `ll_action_rate_coef` bought −9.3%).
+
+**Proposed next steps (spec-first; NOT implemented, awaiting the user's call):**
+1. **Measure before building** — add a `--diagnose-action-rate` mode to `play.py` (sibling
+   to the existing `--diagnose-goals` / `--diagnose-symmetry`, reusing the same loader) that
+   bins action delta by position in the HL window and by joint group (legs / arms / waist).
+   Read-only, eval-only, decides between (B) and (C) in one 47 s run per checkpoint.
+2. **`ll_joint_acc_coef`** mirroring `mdp.joint_acc_l2` at A0's `2.5e-7` — the single A0
+   smoothness term A1 has never had. One term, one arm, directly on the blocker.
+3. **`ll_action_rate_coef` sweep 0.08 / 0.12** on the arm4d base at >=2 seeds (from the
+   combo-batch read), watching CoT and `gabs_vy` as the paying metrics.
+
+### Stepping-in-place at zero command: measured 2026-07-24 (arm3's stand_still is VINDICATED)
+
+User observation: the robot still steps in place a lot. Proposed lever: `ll_stand_still_coef`
+(A0's `stand_still`, gated `|cmd| <= 0.1`, so it is inert while walking). **That knob already
+exists and was already trained as WL-D arm 3** — table (g) read (ix) correctly refused to
+judge it, because the aggregate bench resamples commands every 3-8 s and never holds zero.
+Measured properly now, at a pinned zero command. **No new code was needed**: the existing
+`--diagnose-symmetry` and `--diagnose-goals` modes both run *after* play.py's command pin
+(`play.py:330` vs `:556`/`:711`), so `--eval-cmd-vx 0.0` turns either into a stand test.
+
+*(p) Stand test, `--diagnose-symmetry 600 --eval-seeds 2 --num-envs 64 --eval-cmd-vx 0.0`.
+Touchdown counts are summed over 64 envs; 128 = 2 feet x 64 envs x the initial ground
+contact = the "never lifted a foot" floor.*
+
+| run | touchdowns L / R | total | vs floor | double-support |
+|---|---|---|---|---|
+| arm4d (no stand_still) | 76 / 66 | 142 | **+14** | 0.998 |
+| arm3 (`ll_stand_still_coef=1.0`) | 65 / 64 | 129 | +1 | 0.998 |
+| combo6 (stand_still + 5 more) | 64 / 64 | 128 | **0** | 0.998 |
+| A0-optB-rs20 (reference) | 64 / 64 | 128 | **0** | 0.997 |
+
+*(q) Goal probe at the same pinned zero command (`--diagnose-goals 600 --eval-cmd-vx 0.0`)
+— what the HL asks for when it should be asking for nothing:*
+
+| run | \|g\| vx | \|g\| vy | \|g\| yaw | **HL err vx** | HL err vy | LL err vx |
+|---|---|---|---|---|---|---|
+| arm4d (no stand_still) | **0.0890** | 0.0258 | 0.0400 | **0.0677** | 0.0112 | 0.0656 |
+| arm3 (`stand_still=1.0`) | **0.0221** | 0.0765 | 0.0897 | **0.0123** | 0.0389 | 0.0164 |
+
+**Reads:**
+
+(i) **In sim, at zero command, none of these policies steps meaningfully.** Double-support
+is 0.997-0.998 for all four including A0, and arm4d's excess over the never-lifted floor is
+14 touchdown events across 64 envs over 12 s (~0.2 extra steps per env). **The defect as
+observed on the bridge/hardware does NOT reproduce in mjlab** — consistent with
+`A1a_deploy_plan.md`, where the bridge's unsettled stepping at cmd 0 is logged as
+UNEXPLAINED and still open.
+
+(ii) **But the A1-specific driver is real and arm3 fixes it: at zero command arm4d's HL
+commands a phantom forward velocity.** `|g|vx` 0.089 and **HL err vx 0.068 m/s** — the HL is
+asking the LL to move while the operator commands nothing. arm3 cuts this to `|g|vx` 0.022
+(**4x**) and HL err vx 0.012 (**5.5x**). A0 cannot have this failure mode at all: no goal
+channel, no `V*-s` to be nonzero. This is the cleanest A1-vs-A0 structural asymmetry found
+at zero command so far, and it is invisible to every metric in tables (g)-(o).
+
+(iii) **Why sim under-shows it and hardware over-shows it (hypothesis, not measured):** in
+sim a small phantom velocity target is satisfiable by leaning, so no foot lifts. On hardware
+WL-B0b measured a 27-38% loss of backward CoP margin (encoder->attitude error + knee droop),
+so the same phantom target is far likelier to cross the margin and cost a step. The phantom
+goal is therefore a *necessary* driver that sim can measure and a *sufficient* one only in
+combination with the hardware lean.
+
+(iv) **Mechanism caveat:** `stand_still` penalizes joint deviation from default (gated on
+zero command), NOT footfalls directly, and it is an **LL** term — yet it moved an **HL**
+quantity 4-5x. That is co-training: a LL that holds still at zero command changes what the
+HL's tracking reward makes achievable. Worth stating explicitly because it means the lever
+does not act the way its name suggests.
+
+**Recommendation: train `arm4d + stand_still` (energy 0.05 + `ll_stand_still_coef` 1.0).**
+It is the one combination the batch did NOT test — combo6 carried `stand_still` but buried it
+under five other terms that tripled the goal error. Cost to watch: arm3's aggregate CoT was
+mildly worse (0.963 vs D2's 0.897) and its `|g|vy`/`|g|yaw` at zero command are *higher* than
+arm4d's (0.077/0.090 vs 0.026/0.040), i.e. it may trade a forward phantom for a lateral one.
+
+### Action-rate decomposition MEASURED (2026-07-24) — goal-stepping is real but minor; the deficit is a uniform arms-heavy floor
+
+New read-only `play.py` mode `--diagnose-action-rate` (sibling to `--diagnose-goals`/
+`--diagnose-symmetry`): bins the whole-body action delta `||a_t - a_{t-1}||` by position in
+the HL window (`step % c`, bin 0 = the HL fire step where the goal obs jumps) and by joint
+group. Validated two ways before reading: `ar_mean` reproduces the canonical bench
+`action_rate` to 0.12% (0.9263 vs 0.9253), and **A0 is the flat control it must be**
+(fire_excess 0.981, profile 0.626-0.652 across all 8 bins) — so any A1 window structure is
+real, not a binning artifact. 600 steps x 2 seeds x 64 envs.
+
+*(r) Window profile (mean `||d||` per bin; bin 0 = HL fire step) + the flatten-fire
+counterfactual (replace bin 0 with the rest-of-window mean, i.e. the ceiling of what a
+perfectly smooth goal channel could buy):*
+
+| run | fire (bin0) | rest-of-window mean | fire_excess | ar_mean | flatten-fire ar_mean | Δ |
+|---|---|---|---|---|---|---|
+| A0-optB-rs20 | 0.632 | 0.644 | **0.981** | 0.643 | 0.644 | +0.2% |
+| arm4d | **1.197** | 0.888 | **1.348** | 0.927 | 0.888 | **−4.2%** |
+| combo1 (ar0.05) | 1.022 | 0.801 | 1.275 | 0.829 | 0.801 | −3.3% |
+
+*(s) Joint-group share of the action-rate budget (summed squared group norms):*
+
+| run | legs share | **arms share** | waist share | legs mean | arms mean | waist mean |
+|---|---|---|---|---|---|---|
+| A0-optB-rs20 | 0.878 | **0.115** | 0.008 | 0.595 | 0.215 | 0.056 |
+| arm4d | 0.693 | **0.304** | 0.003 | 0.761 | 0.504 | 0.048 |
+| combo1 (ar0.05) | 0.758 | **0.238** | 0.005 | 0.712 | 0.399 | 0.057 |
+
+**Reads (2026-07-24):**
+
+(i) **Goal-stepping (hypothesis C) is confirmed REAL but is NOT the dominant term.** Both A1
+runs spike at the fire step where A0 is flat (arm4d fire_excess 1.35, combo1 1.28 vs A0's
+0.98) — the 6.25 Hz goal jump is visible and structural, exactly as predicted. **But because
+it is one step in eight, flattening it entirely recovers only 4.2% / 3.3% of `ar_mean`** —
+the same order as the period-pin test (−4%), and it lands arm4d at 0.888, still +38% over
+A0's 0.644. The pre-registered decision rule (fire_excess >= 1.5 -> C dominates) is NOT met:
+1.35 < 1.5, and the counterfactual confirms it. **A goal-interpolation/slew fix, or a larger
+`c`, is worth ~4% and does not close the gap.** File it as a real but secondary structural
+cost, not the lever.
+
+(ii) **The deficit is a UNIFORM elevated floor, and it is arms-heavy.** arm4d's
+rest-of-window floor (0.888) is +38% over A0 across every non-fire bin, i.e. the twitch is
+spread through the whole window, not localized — the signature of a missing smoothness
+*reward*, hypothesis (B). And the group split names where: **A1 pushes 2.6-3x more of its
+action-rate budget into the arms than A0** (arm4d arms share 0.304, combo1 0.238 vs A0
+0.115; arm4d arms *mean* 0.504 vs A0 0.215, +134%). Legs are only modestly higher (0.761 vs
+0.595). So the whole-body `action_rate` gap is disproportionately an **arm** problem.
+
+(iii) **This re-aims the fix menu.** `joint_acc_l2` (proposed as the missing A0 smoothness
+term) is whole-body and would help the floor, but the arms-share finding points more
+specifically at the **`pose`/`variable_posture` mismatch** flagged in the root-cause
+analysis: A0's single largest reward (+0.835) tracks a speed-scheduled posture with tight
+per-joint stds (tightest on the arms), whereas A1's `ll_posture_coef` is a plain
+deviation-L2 on a joint subset. The arms carry A0's biggest smoothness pressure and A1's
+weakest mirror. combo1 (`ll_action_rate_coef` 0.05) already pulled arms share 0.304 -> 0.238
+and floor 0.888 -> 0.801, confirming the floor is reward-movable — it just needs an
+arm-weighted term, not more whole-body action-rate.
+
+**Net for the deploy blocker:** the action-rate gap decomposes as ~4% removable goal-stepping
+(structural, secondary) + a ~38% uniform floor that is arms-dominated and reward-shaped. The
+highest-value next levers target the arm floor: (a) an **arm-weighted `joint_acc_l2` mirror**
+or a tighter arm posture std, and (b) the already-queued `ll_action_rate_coef` 0.08/0.12
+sweep, now known to act mainly by lowering the arm floor. Goal interpolation is a separate,
+smaller, structural follow-up worth its own arm only if the ~4% matters near the deploy line.
+
+### WL-D combo follow-up (combos 7-9, benched 2026-07-24) — stand_still is a clean stand fix; footclear REINTRODUCES stepping-in-place
+
+Three more combinations on the arm4d base, `model_10000`, 4096 envs / seed 42, benched
+64x600x2 + a zero-command stand test (the tables p/q axis). Comparator = arm4d. All trained
+healthy (ep_len 995-998, cadence_rew 0.442-0.448 = entrainment intact; combo9's goal_reward
+3.658 vs arm4d 3.710, i.e. four terms did NOT collapse the gradient the way combo6's six
+did). 0 falls everywhere.
+
+*(t) Aggregate + holds. `act`/`arm_vel` are the deploy metrics:*
+
+| run | vx | vy | yaw | **act** | **arm_vel** | CoT | power | stride | ss@0.5 | ss@1.0 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **arm4d (REF)** | 0.063 | 0.069 | 0.107 | 0.923 | 0.300 | 0.462 | 153 | 0.359 | 0.034 | 0.049 |
+| combo7 ss+energy | **0.058** | **0.058** | 0.119 | 0.922 | 0.325 | 0.469 | 159 | 0.362 | **0.021** | **0.038** |
+| combo8 fc+en+ar | 0.076 | 0.081 | 0.125 | 0.920 | 0.337 | 0.727 | 248 | 0.363 | 0.036 | 0.050 |
+| combo9 ss+fc+en+ar | 0.068 | 0.077 | 0.124 | **0.882** | **0.288** | 0.634 | 222 | 0.362 | 0.035 | 0.035 |
+
+*(u) Zero-command STAND test (`--diagnose-symmetry ... --eval-cmd-vx 0.0`) + the phantom-goal
+probe at cmd 0. Touchdown floor = 128 (2 feet x 64 envs, never lifted):*
+
+| run | touchdowns @cmd0 | vs floor | double-support | \|g\|vx @cmd0 | HL err vx @cmd0 |
+|---|---|---|---|---|---|
+| arm4d (ref, table q) | 142 | +14 | 0.998 | 0.089 | 0.068 |
+| arm3 (ss-only, table p/q) | 129 | +1 | 0.998 | 0.022 | 0.012 |
+| **combo7 ss+energy** | **128** | **0** | 0.998 | **0.052** | **0.037** |
+| combo8 fc+en+ar | **234** | **+106** | 0.992 | 0.039 | 0.021 |
+| combo9 ss+fc+en+ar | **340** | **+212** | 0.985 | 0.047 | 0.033 |
+
+**Reads (2026-07-24):**
+
+(i) **combo7 (arm4d + stand_still) is a clean win for the stepping-in-place problem at ~no
+deploy cost.** It drives zero-command touchdowns to the absolute floor (128, better than
+arm4d's 142 and even arm3's 129) and roughly halves the phantom forward goal (`|g|vx`
+0.089->0.052, HL err vx 0.068->0.037), while the deploy metrics stay essentially arm4d: `act`
+0.922 = arm4d's 0.923, CoT 0.469 ~ 0.462, and aggregate tracking actually *improves* (vx
+0.063->0.058, vy 0.069->0.058). It is also the best holder in the set (ss@0.5 0.021, ss@1.0
+0.038). The only cost is a small `arm_vel` rise (0.300->0.325). **This is the cleanest stand
+behaviour measured in the project** and a strict improvement over arm4d on the zero-command
+axis. Deploy-candidate implication: combo7 dominates arm4d for a robot that must hold still.
+
+(ii) **footclear REINTRODUCES stepping-in-place at zero command — the likely source of the
+observed defect if a footclear policy is in the loop.** combo8 (with footclear) steps 234
+touchdowns and combo9 340, vs the 128 floor, and double-support drops (0.992 / 0.985 vs
+0.998). Crucially this is NOT the phantom-goal mechanism (`|g|vx` is low, 0.039 / 0.047): it
+is a **gait-character carry-over** — the clearance-rewarded policy learned a higher-stepping
+gait whose habit bleeds into the near-zero-command regime even though `feet_clearance` is
+itself command-gated (inert below 0.1). **stand_still does NOT rescue it**: combo9 carries
+BOTH stand_still and footclear and still steps 340 (worse than combo8's 234) — footclear's
+stepping character dominates the stand_still pull. Note the current deploy candidate arm4d has
+NO footclear (142, near floor), so this does not implicate arm4d; but it is a hard argument
+against ever adding footclear to a deploy candidate.
+
+(iii) **Non-additivity, again, on stride.** footclear ALONE lengthened stride to 0.55-0.65
+(combo4/5, arm4c); footclear + energy holds it at 0.363 (combo8) - the energy term suppresses
+exactly the stride-lengthening footclear exists to buy. So the one benefit of footclear
+(longer stride toward A0's 0.590) does not survive composition with the energy term, while its
+cost (CoT +57%, and now the stepping) does. footclear is now doubly ruled out for the deploy
+line: expensive AND it causes the stepping-in-place defect.
+
+(iv) **combo9's smoothness is real but bought by the ar0.05, not the stack.** Its `act` 0.882
+(2nd-best after combo1's 0.837) and best-in-set `arm_vel` 0.288 track the `ll_action_rate_coef`
+0.05 lever (combo1's result), not the added terms - consistent with the combo1 read. But the
+footclear stepping makes combo9 a poor stand/deploy candidate despite the calm walk.
+
+**Bottom line:** combo7 (arm4d + stand_still) is the actionable result — it fixes the
+zero-command stepping/phantom at no deploy cost and is a candidate to seed-repeat and bridge
+alongside arm4d. footclear is confirmed harmful to standing and is dropped. The joint_acc arms
+(queued, not yet launched) remain the lever aimed at the arms-heavy action-rate floor.

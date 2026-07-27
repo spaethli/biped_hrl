@@ -50,6 +50,14 @@ class PlayConfig:
   play.py's own stride_period_s metric (which divides by raw touchdown count) is
   corrupted by double-taps vs an alternation-based estimate. Sibling to ``eval_steps``;
   reuses ``eval_seeds``."""
+  diagnose_action_rate: int = 0
+  """Action-rate decomposition: if > 0, run this many deterministic steps and split the
+  whole-body action rate ||a_t - a_{t-1}|| by (1) position within the HL window (bin
+  ``step % c``; bin 0 = the HL fire step, where the goal obs jumps) and (2) joint group
+  (legs / arms / waist). Separates goal-stepping twitch (a spike at the fire step) from a
+  uniform smoothness deficit. Works on A0 (non-hierarchical) too, where c defaults to 8 and
+  the flat profile is the control proving any A1 structure is real, not a binning artifact.
+  Sibling to ``eval_steps``; reuses ``eval_seeds``."""
   eval_cadence_period: float | None = None
   """A1a: pin the HL-commanded stride period (s) during eval, for the CoT(period) sweep
   (requires an hl_cadence runner). None -> the runner's mid-range default."""
@@ -701,6 +709,107 @@ def run_play(task_id: str, cfg: PlayConfig):
                 "eval_steps": cfg.diagnose_symmetry, "num_envs": n_envs,
                 "eval_seeds": cfg.eval_seeds}
     print(f"[SYMDIAG] {json.dumps(diag_out)}")
+    env.close()
+    return
+
+  # Action-rate decomposition: is A1's twitch concentrated at the HL fire step (goal obs
+  # jumps every c steps) or spread uniformly (a smoothness-reward deficit)? Bin the
+  # whole-body action delta by step % c and by joint group. A0 (no HL) is the flat control.
+  if cfg.diagnose_action_rate > 0:
+    import json
+    uenv = env.unwrapped
+    n_envs = uenv.num_envs
+    c = getattr(runner, "c", 8)  # A0 has no window; c=8 makes it the flat-profile control.
+
+    def _find_group(pats):
+      # find_joints([...]) raises if ANY pattern in the list matches zero joints (e.g.
+      # this robot has a torso joint but no "waist" joint); resolve patterns one at a
+      # time so a non-matching pattern is just skipped instead of failing the group.
+      ids = set()
+      for p in pats:
+        try:
+          pids, _ = uenv.scene["robot"].find_joints([p])
+        except ValueError:
+          continue
+        ids.update(pids)
+      return sorted(ids) if ids else None
+
+    # Joint groups (regex vs the robot's joint names), resolved once.
+    grp_ids = {}
+    for name, pats in (("legs", [".*hip.*", ".*knee.*", ".*ankle.*"]),
+                       ("arms", [".*shoulder.*", ".*elbow.*", ".*wrist.*"]),
+                       ("waist", [".*waist.*", ".*torso.*"])):
+      ids = _find_group(pats)
+      grp_ids[name] = torch.as_tensor(ids, device=env.device) if ids is not None else None
+
+    seed_results: list[dict] = []
+    for seed_idx in range(cfg.eval_seeds):
+      torch.manual_seed(42 + seed_idx)
+      with torch.inference_mode():
+        obs, _ = env.reset()
+
+      phase_sum = [0.0] * c
+      phase_n = [0] * c
+      grp_sum = {k: 0.0 for k in grp_ids}
+      grp_n = 0
+      ar_sum = 0.0
+      prev_actions: torch.Tensor | None = None
+      with torch.inference_mode():
+        for step_i in range(cfg.diagnose_action_rate):
+          actions = policy(obs)
+          obs, _, dones, _ = env.step(actions.to(env.device))
+          if prev_actions is not None:
+            d = actions - prev_actions
+            nrm = d.norm(dim=-1).mean().item()  # ||a_t - a_{t-1}|| over joints, env-mean
+            b = step_i % c
+            phase_sum[b] += nrm; phase_n[b] += 1
+            ar_sum += nrm; grp_n += 1
+            for k, ids in grp_ids.items():
+              grp_sum[k] += (d[:, ids].norm(dim=-1).mean().item()
+                             if ids is not None else float("nan"))
+          prev_actions = actions.clone()
+
+      phase = [phase_sum[i] / phase_n[i] if phase_n[i] else float("nan") for i in range(c)]
+      rest = [phase[i] for i in range(1, c) if phase_n[i]]
+      rest_mean = sum(rest) / len(rest) if rest else float("nan")
+      grp_mean = {k: grp_sum[k] / max(grp_n, 1) for k in grp_ids}
+      # Shares from summed squared group norms, so the three shares sum to 1.0.
+      sq = {k: (grp_mean[k] ** 2 if grp_mean[k] == grp_mean[k] else 0.0) for k in grp_ids}
+      tot_sq = sum(sq.values()) or 1.0
+      res = {f"phase_{i}": phase[i] for i in range(c)}
+      res.update({
+        "fire_excess": phase[0] / rest_mean if rest_mean else float("nan"),
+        "ar_mean": ar_sum / max(grp_n, 1),
+        "g_legs": grp_mean["legs"], "g_arms": grp_mean["arms"], "g_waist": grp_mean["waist"],
+        "share_legs": sq["legs"] / tot_sq, "share_arms": sq["arms"] / tot_sq,
+        "share_waist": sq["waist"] / tot_sq,
+      })
+      seed_results.append(res)
+
+    keys = list(seed_results[0].keys())
+    means = {k: float(torch.tensor([r[k] for r in seed_results]).mean()) for k in keys}
+
+    print()
+    print("=" * 70)
+    print(f"  ACTION-RATE DECOMPOSITION | {cfg.diagnose_action_rate} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | c={c}")
+    print("=" * 70)
+    prof = "  ".join(f"[{i}]{means[f'phase_{i}']:.3f}" + ("*" if i == 0 else "")
+                     for i in range(c))
+    print(f"  window profile (* = HL fire step): {prof}")
+    print(f"  fire_excess (phase0 / mean rest) = {means['fire_excess']:.3f}")
+    print(f"  ar_mean (all steps)              = {means['ar_mean']:.4f}")
+    print(f"  legs  mean={means['g_legs']:.4f}  share={means['share_legs']:.3f}")
+    print(f"  arms  mean={means['g_arms']:.4f}  share={means['share_arms']:.3f}")
+    print(f"  waist mean={means['g_waist']:.4f}  share={means['share_waist']:.3f}")
+    print("=" * 70)
+    print()
+
+    diag_out = {"label": str(resume_path) if resume_path is not None else "unknown",
+                **{k: round(v, 6) for k, v in means.items()},
+                "eval_steps": cfg.diagnose_action_rate, "num_envs": n_envs,
+                "eval_seeds": cfg.eval_seeds, "c": c}
+    print(f"[ARDIAG] {json.dumps(diag_out)}")
     env.close()
     return
 

@@ -303,6 +303,14 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``mdp/rewards.py``, same term the A0+energy S4' control uses) into the LL intrinsic -
   the most direct mirror candidate, since it targets the CoT gap itself rather than a
   proxy for it. 0 disables."""
+  ll_joint_acc_coef: float = 0.0
+  """WL-D (2026-07-24): mirror A0's ``joint_acc_l2`` (whole-body joint-acceleration L2, A0
+  weight 2.5e-7) into the LL intrinsic - the one A0 smoothness term A1 never had (A0's
+  2nd-largest penalty after ``action_rate_l2``). Targets the action-rate deploy gap
+  (action-rate decomposition 2026-07-24: A1's twitch is a uniform arms-heavy floor +38% over
+  A0, not just goal-stepping). The LL never sees this env term otherwise
+  (``ll_task_reward_coef=0``). Start at A0's 2.5e-7; the LL intrinsic runs hotter than A0's
+  task reward so it may read weak. 0 disables (byte-identical baseline)."""
   ll_pitchref_coef: float = 0.0
   """WL-D arm 6, formulation A (2026-07-17, approved): heel-to-toe ankle roll-over
   phase-locking - matches ``ankle_pitch`` to a raised-cosine reference interpolated
@@ -384,6 +392,15 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   the median) of the ungated measurement so today's typical cycle wouldn't already sit
   near saturation and kill the improvement gradient - the same p90-over-median logic
   above, just applied to the wrong (ungated, direction-blind) power distribution."""
+  ll_rollover_coef: float = 0.0
+  """WL-D arm 6, formulation C: contact-sequence-based heel-to-toe push-off reward
+  (2026-07-24). Rewards the actual foot contact sequence (toe in contact AND heel
+  lifted) during terminal stance, directly measuring the "roll-over" defect rather than
+  joint angle. Formulations A/B only shaped ``ankle_pitch`` and empirically produced
+  simultaneous whole-foot liftoff despite correct angle rotation. Requires ``hl_cadence``."""
+  ll_rollover_w: float = 0.175
+  """Terminal-stance window width (``phi in [1-w, 1)``) for formulation C, matching
+  formulation B's window (0.175 = midpoint of the spec's 0.15-0.2 range)."""
   ll_symmetry_coef: float = 0.0
   """WL-D arm 10, formulation B (2026-07-20, primary training arm): step-time
   left/right symmetry index penalty, ``r = exp(-SI^2/sigma_si^2)``, ``SI =
