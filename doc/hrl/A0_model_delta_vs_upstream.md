@@ -1,14 +1,17 @@
-# A0 model delta vs upstream `unitree_rl_mjlab` (written 2026-07-23, after first working hardware deployment)
+# A0 model delta vs upstream `unitree_rl_mjlab`
 
 Purpose: catalog every difference between this repo's H1-2 robot model and
 `unitreerobotics/unitree_rl_mjlab` (the upstream template this repo was forked from,
-`git remote upstream`), as candidate explanations for why this fork's A0 policy
-deployed successfully on hardware. Method: `git diff upstream/main main` restricted to
-model-relevant files, read line-by-line against the actual file contents (not
-reconstructed from ADR/memory narrative — two things I expected to be fork changes
-turned out to be upstream defaults, caught only by diffing directly). Merge-base:
-`1425b15` (upstream tip); this fork's `main` is strictly ahead, so the diff is exactly
+`git remote upstream`), and explain why each one is there. Method: `git diff
+upstream/main main` restricted to model-relevant files, read line-by-line against the
+actual file contents rather than reconstructed from narrative. Merge-base: `1425b15`
+(upstream tip); this fork's `main` is strictly ahead, so the diff is exactly
 "everything changed since forking," no upstream-only commits to account for.
+
+> The investigative version of this document — the causal-weight reasoning behind
+> the ranking, and the corrections it made to its own earlier claims — is kept in
+> the author's research knowledge base, outside this repo. What follows is the
+> verified delta itself.
 
 Scope: the robot **model** (actuator/plant parameters) that ships in the trained
 policy. Reward shaping, the A1/HRL architecture, and the C++ deploy pipeline are
@@ -41,25 +44,19 @@ code is wholesale replaced, not incrementally patched).
   explicit and commented. WL-E's fric-0.1 control run showed 0.1 also trains fine at
   kl 0.01, but that is a **live, unadopted** option (`docs/adr/0005` Amendment 2) —
   today's shipped model still trains at 0 friction, identical to upstream.
-- **Armature (correction — see below, was wrongly listed as a difference in an
-  earlier version of this doc)**: **identical to upstream, per-motor, for all four
-  original joint groups** — 0.025 (hip/torso), 0.04 (knee), 0.005 (ankle/shoulder p/r),
-  0.002 (shoulder-yaw/elbow/wrist). Confirmed by reading upstream's raw file directly
-  (`git show upstream/main:...h1_2_constants.py`), not the line-diff, which
-  misleadingly showed some armature lines as "added" because the surrounding block was
-  restructured (torso/shoulders split into their own groups) — a diff-alignment
-  artifact, not a value change. When the fork split a bundled group into finer
-  sub-groups (e.g. torso out of the old hip+torso group), each new sub-group simply
-  inherited its parent's original armature number. **Source: `unitree_rl_mjlab`'s own
-  `h1_2_constants.py` asset file (upstream, i.e. the fork's own template), not
-  IsaacLab** — no H1-2 asset file exists in the separate `mjlab` framework package
-  itself (`find` turns up nothing), and no matching per-motor figures were found in
-  the workspace's IsaacLab-derived H1-2 repos on a first pass. Upstream's ADR-era
-  note (`docs/adr/0005` §"non-gaps") already flagged this: armature values disagree
-  *between* other references (0.01 flat in the Unitree-derived XML reference, 1e-3
-  flat in the IsaacGym cfg reference) and ours were explicitly "kept" as the
-  pre-existing per-motor figures rather than matched to either — "kept" relative to
-  upstream's own template, confirming the numbers were never fork-authored.
+- **Armature**: **identical to upstream, per-motor, for all four original joint
+  groups** — 0.025 (hip/torso), 0.04 (knee), 0.005 (ankle/shoulder p/r), 0.002
+  (shoulder-yaw/elbow/wrist). Verify by reading upstream's raw file
+  (`git show upstream/main:...h1_2_constants.py`) rather than the line-diff: the diff
+  shows some armature lines as "added" purely because the surrounding block was
+  restructured (torso/shoulders split into their own groups). When the fork split a
+  bundled group into finer sub-groups, each new sub-group inherited its parent's
+  original armature number. **Source: `unitree_rl_mjlab`'s own `h1_2_constants.py`
+  asset file, not IsaacLab** — no H1-2 asset file exists in the separate `mjlab`
+  framework package itself. Note that armature values disagree *between* other
+  references (0.01 flat in the Unitree-derived XML reference, 1e-3 flat in the
+  IsaacGym cfg reference); ours are upstream's per-motor figures, kept unchanged
+  (`docs/adr/0005` §"non-gaps").
 - **DR event structure**: `push_robot` (interval + velocity range), `foot_friction`
   (0.3-1.6 range), `base_com` offset, `encoder_bias` — all already present upstream in
   the shared `velocity_env_cfg.py`, values unchanged. This fork did not touch domain
@@ -146,9 +143,10 @@ separate `/opt/unitree_mujoco` clone — still pointed to below) but they config
 runtime controller rather than the trained model. Diffed directly, same method as above.
 
 ### 5. `deploy_real.yaml` is a fork-added file split off `deploy.yaml` — for DDS domain
-hygiene, not because upstream's single file was sim-only or physically incapable of
-driving real hardware (correction, per the user: upstream's design already intends
-`deploy.yaml` for **both** real and sim)
+hygiene
+
+Upstream's design already intends `deploy.yaml` for **both** real and sim, so this
+split is not a gap-fill.
 
 Upstream's `main.cpp` hardcodes DDS `domain=0` always and distinguishes sim vs real
 **only** by which `--network` interface string is passed at launch (`lo` for local
