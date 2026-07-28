@@ -6,7 +6,7 @@
 > base to keep this repo publishable. What remains here is the current design and
 > status: the options in use and how the working solution is implemented.
 
-## Current status dashboard (updated 2026-07-23 — read this first)
+## Current status dashboard (updated 2026-07-28 — read this first)
 
 **A0 track (WL-B0):** first real-hardware session ran 2026-07-23 on the locked candidate
 `a0_v2_optB_rs20_baseline`, split arms. Full bridge G2 battery (G2.1-G2.4, G2.7) passed
@@ -21,30 +21,45 @@ separate, now-disentangled causes**:
    "empirically closed" verdict is withdrawn. **PORTED AND VALIDATED ON HARDWARE
    2026-07-23** (WL-B0a): 225.8 s of real free walking with the filter never engaging
    once (`alpha` max 0.000 over 26544 clamp rows), against 12463 full-hold rows in the
-   pre-fix run. → "A0 CLAMP PORT" section below.
+   pre-fix run. → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`).
 2. **A persistent ~3-5° backward pitch lean, present even at stand (sim ~0), is a
    SEPARATE finding** (independent of the filter — one run shows the full lean with zero
-   filter engagement). **DECOMPOSED 2026-07-23 (WL-B0b): it is a near-even sum of TWO
-   causes, not one.** (A) a constant **−0.031 rad (1.8°) encoder→attitude map error**
-   (the model's FK from encoders to body attitude, not the IMU: an independent statics
-   estimate `p_tau` sides with the IMU to 0.008 rad and against the encoder kinematics by
-   0.020-0.040) — **still open**, awaiting an inclinometer session (procedure + decision
-   rules below); (B) **excess knee droop from unmodelled leg mass — RESOLVED 2026-07-24**:
-   the real robot weighs 73.70 kg with an 18.60 kg leg vs the model's 66.98 kg / 15.40 kg
-   leg (the earlier "~22% load excess, origin uncertain" framing is withdrawn — it was a
-   stacked measurement error, corrected once the real mass and the robot's own `tau_est`
-   were used). Fix staged for the next model version (leg mass + foot-sole geometry,
-   `docs/adr/0006-leg-mass-foot-geometry-nominal-correction.md`), held until after the
-   inclinometer session so it can bundle with the Component-A fix rather than rebasing
-   twice. FALSIFIED along the way: IMU mounting offset, attitude-estimator convention, lab
-   floor slope, pelvis-vs-torso frame, symmetric CoM shift, harness down-force, and head
-   mass. → "THE BACKWARD LEAN, DECOMPOSED" section below for the full method (three
-   independent pitch estimates) and the 2026-07-24 correction.
+   filter engagement). **FULLY DIAGNOSED 2026-07-23/28 (WL-B0b); no cause remains
+   unidentified.** It is a sum of two plant-model errors, each now measured:
+   - **(A) encoder→attitude map error, ~2.3° constant + ~13% scale.** The
+     **inclinometer session (2026-07-28) vindicated the IMU by direct measurement**:
+     pelvis read **−6.80°** against the IMU's **−6.30°** (agreeing to 0.50°) while the
+     encoder feet-flat FK said only −3.16°. Torso and pelvis read identically, killing
+     the pelvis-vs-torso frame question physically. Assumption-free core result: with
+     the true attitude and the measured encoders the model puts the foot **2.74° toe-up
+     while it is provably flat on a flat floor**. This splits again into **~0.9° of
+     foot-sole wedge** (both soles measured thicker at the front, so both feet sit
+     **toe-up** by 0.74°/1.11°, tilting the body backward; the flat capsule sole in
+     `h1_2.xml` cannot represent it) and **~1.3° of leg-encoder zero error** (a hardware
+     re-zero fixes that part, no retrain, no XML change). **Do NOT "recalibrate" the
+     IMU** — it is the honest sensor.
+   - **(B) excess knee droop from unmodelled leg mass — RESOLVED 2026-07-24**: the real
+     robot weighs 73.70 kg with an 18.60 kg leg vs the model's 66.98 kg / 15.40 kg leg
+     (the earlier "~22% load excess, origin uncertain" framing is withdrawn — it was a
+     stacked measurement error, corrected once the real mass and the robot's own
+     `tau_est` were used).
+
+   Fix staged for the next model version (leg mass + foot-sole geometry,
+   `docs/adr/0006-leg-mass-foot-geometry-nominal-correction.md`), held so it does not
+   rebase the training plant mid-WL-D-batch. **Next action is free and needs no retrain:
+   run Unitree's zero-point calibration on the 6 leg joints, repeat the 60 s policy
+   stand, and re-measure — expect the residual to fall from −0.048 rad to about −0.016
+   rad (the sole-wedge floor), not to zero.** FALSIFIED along the way: IMU mounting
+   offset, attitude-estimator convention, lab floor slope, pelvis-vs-torso frame,
+   symmetric CoM shift, harness down-force, and head mass. **Still open**: the L/R leg
+   asymmetry (the sole wedge does not explain it — differential only 0.375°, wrong
+   sign). → the deploy journal in the research KB for the full method (three independent
+   pitch estimates), the hypothesis table, and the 2026-07-24/28 corrections.
 
 E-stop chain was also corrected this session: `p`→Passive is the verified primary stop;
 Ctrl+C is **not** a verified E-stop (no signal handler exists) — see "E-STOP chain"
-below. → "ROOT CAUSE OF THE STUMBLING", "FIRST REAL-HARDWARE RUN", and "Head-off run"
-sections below for full detail; hand-off prompts WL-B0a/WL-B0b in `worklines.md`.
+below. → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`) for the dated session-by-session detail; hand-off prompts WL-B0a/WL-B0b in
+`worklines.md`.
 
 **A1 track (WL-B1):** deploy candidate LOCKED = `arm4d` (`ll_energy_coef=0.05`) —
 the only A1 candidate that passes the live bridge (2026-07-22, all directions incl.
@@ -53,27 +68,31 @@ clearance** (action_rate splits cleanly: A0 0.57-0.75 vs A1 0.92-1.28, no overla
 `arm5` (ankle-roll) fails catastrophically with a now-understood mechanism (bilateral
 ankle-roll+hip-roll saturation decaying a lateral command to zero). Headless replica
 sweep confirms arm4d 6/6 clean, matching live. **Open**: full live G2 battery on arm4d
-has not been run yet (only the smoothness spot-check above). → "Post-fix bridge session
-(2026-07-22)" and "Headless candidate sweep" sections below.
+has not been run yet (only the smoothness spot-check above). → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`).
 
-**Both tracks share:** the `gait_phase_cmd` fix (2026-07-21, "Defect 0" below) — the
+**Both tracks share:** the `gait_phase_cmd` fix (2026-07-21, "Defect 0") — the
 prior finding that the deploy gait clock was permanently dead under keyboard control,
 which voids every pre-2026-07-21 live bridge result for both A0 and A1. Confirmed
 working on real hardware (joystick path) in the 2026-07-23 A0 session too.
 
 **Not yet done / still open, either track:** WL-B1's full live gate battery on arm4d;
-Component A of the backward lean (the 1.8° encoder→attitude map error — awaiting a
-15-min inclinometer session, decision rules already written); the Model v3 leg-mass +
-foot-geometry fix (staged, held until after that session, `docs/adr/0006`); the
-repeat/second session for G3.3 "repeatable" plus the user's qualitative sign-off that the
-stumbling is gone; the keyboard-latch fix (Defect 1, downgraded, characterized exactly
-by `bridge_session.py` but not fixed). Resolved since the last pass: the out-of-process
+the **leg-joint zero-point re-calibration** and its re-measured stand (free, no retrain,
+the next action on the lean — expect residual −0.048 → ~−0.016 rad); the Model v3
+leg-mass + foot-sole-geometry fix (staged, `docs/adr/0006`, held so it does not rebase
+the plant mid-WL-D-batch); the **L/R leg asymmetry** (right leg carries more load; the
+sole wedge was checked and does NOT explain it); the repeat/second session for G3.3
+"repeatable" plus the user's qualitative sign-off that the stumbling is gone; the
+keyboard-latch fix (Defect 1, downgraded, characterized exactly by `bridge_session.py`
+but not fixed). Resolved since the last pass: **Component A of the backward lean is no
+longer open — the 2026-07-28 inclinometer session vindicated the IMU and split the error
+into ~0.9° foot-sole wedge + ~1.3° encoder zeros** (see item 2 above); the out-of-process
 E-stop question (LAN-cable pull verified, see "E-STOP: verified behaviour" below) and
 Defect 2 (the ONNX re-export — confirmed correct as of the 2026-07-22 G2 battery).
 
-The sections below are the full, dated, chronological record (decisions, phase
-definitions, bridge post-mortems, defect-by-defect diagnosis, every hardware session)
-that this dashboard summarizes — go there for evidence, numbers, and mechanism detail.
+The evidence, numbers and mechanism detail behind this dashboard (dated sessions, bridge
+post-mortems, defect-by-defect diagnosis, the backward-lean hypothesis table) live in
+the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`), per the migration note at the top. What follows here is the gate ladder and the
+current design.
 
 Operational gated checklist for `A1a_plan.md` Plan v2 stage D. Grilled 2026-07-14.
 Execution is gate-by-gate; no gate starts before its blockers pass. The battery

@@ -1,11 +1,12 @@
 # Leg-mass and foot-geometry nominal correction (Model v3)
 
 **Status:** PROPOSED / staged, held for the next model version (the user's call 2026-07-24).
-Not applied. The leg-mass edit was made, verified, and reverted; it is bundled with the
-foot-geometry change and applied together at the next model-version cut, after the
-2026-07-23-initiated real-hardware backward-lean investigation is closed by an inclinometer
-session. Supersedes nothing in ADR-0005; it is the next checkpoint-invalidating nominal
-correction on top of Model v2.
+Not applied. The leg-mass edit was made, verified, and reverted. **Amended 2026-07-28 after the
+inclinometer session** (see "Amendment" below): scope stays **leg mass + foot sole geometry**,
+and Component A (the attitude error) is now split into ~0.9 deg of foot-sole wedge (fixed here,
+in the XML) plus ~1.3 deg of leg-encoder zero error (fixed in hardware, outside this ADR).
+Supersedes nothing in ADR-0005; it is the next checkpoint-invalidating nominal correction on top
+of Model v2.
 
 ## Context
 
@@ -67,12 +68,32 @@ architectures A0-A4, comprising two changes cut together:
    heavier hip actuator or pelvis-side cabling) the per-link split is wrong even though the
    total and CoM height are right. Revisit if a per-link teardown weight becomes available.
 
-2. **Foot collision geometry -> real sole** (conditional on the inclinometer read). If the
-   hardware inclinometer (foot sole vs pelvis, taken under the policy at cmd 0) shows the sole
-   inclined relative to the ankle frame, replace the flat capsule sole with either the foot
-   mesh (matching every reference) or a capsule plane tilted by the measured angle. If the sole
-   reads level, the 1.8 deg lives in encoder zeros or downstream compliance and this ADR
-   records that instead; the leg-mass change proceeds regardless.
+2. **Foot collision geometry -> real sole. CONFIRMED as a real contributor by the 2026-07-28
+   inclinometer session; stays in the v3 cut.** Measured sole thickness shows **both** soles
+   thicker at the front (right +3.34 mm, left +5.04 mm over ~260 mm), i.e. **both feet toe-up by
+   0.74 and 1.11 deg, mean 0.92 deg**. A toe-up ankle frame tilts the body backward, so this
+   accounts for **~0.92 deg = ~41% of the 2.26 deg constant attitude offset** (~29% of the
+   3.14 deg residual at the deep-lean stand), in the correct direction. The model's flat capsule
+   plane (constant z=-0.035, parallel to the ankle frame) cannot represent it; every reference
+   model uses the foot mesh. Fix: tilt the capsule sole plane by the measured angle, or switch
+   foot collision to the mesh (also the better option for **push-off CoP fidelity**, WL-D arm 6).
+   Note this reverses an intermediate call in this ADR made on a transcription error (the right
+   foot's front/back readings were initially swapped, which made the two wedges appear to cancel);
+   the corrected measurement makes them reinforce. The wedge does **not** explain the L/R
+   asymmetry (differential is only 0.375 deg, wrong sign), which stays open.
+
+3. **NOT a model change: re-zero the leg joint encoders (hardware calibration).** The
+   inclinometer confirmed the IMU is honest (6.80 deg measured vs 6.30 deg reported, agreeing to
+   0.50 deg) while the encoder feet-flat FK is off by 3.14 deg, and that with the true attitude
+   and the measured encoders the model puts the foot 2.74 deg toe-up while it is provably flat.
+   After subtracting the 0.92 deg sole wedge (item 2), **~1.3 deg of constant offset (~2.2 deg at
+   the deep-lean stand) remains**, and a leg-encoder zero error of that size reproduces it exactly
+   (the servo drives the *reported* angle to target, leaving the *true* joints offset). Unitree's
+   zero-point calibration would remove that part **with no retrain and no XML change**, so it is
+   the first thing to try, ahead of and independent of this ADR's model changes. Component A is
+   therefore a **two-part** problem: ~0.9 deg foot geometry (XML, item 2) + ~1.3 deg encoder
+   zeros (hardware). Expect the re-zero to take the residual from -0.048 rad to about -0.016 rad
+   (the wedge floor), not to zero.
 
 **Two plants, both set at the cut** (they serve different roles):
 
@@ -143,3 +164,43 @@ no sim-to-real transfer risk.
 - Thesis-reportable finding independent of the fix: every published H1-2 sim result (ours and
   the references) is on a leg 21% lighter than the real robot, a manufacturer CAD gap, which is
   worth stating as a sim2real caveat.
+
+## Amendment (2026-07-28): inclinometer session narrows the scope to leg mass alone
+
+The closing hardware measurement (flat floor; concurrent log
+`all_joints_2026-07-28_10-13-12.csv`, dead-still loaded stand at t 340-620 s) resolved the
+conditional in decision item 2 and changed what this ADR should carry. Full record:
+`doc/hrl/A1a_deploy_plan.md` "INCLINOMETER SESSION 2026-07-28".
+
+1. **The IMU is honest** (pelvis 6.80 deg measured vs 6.30 deg reported, agreeing to 0.50 deg;
+   torso and pelvis read identically, confirming the pelvis-vs-torso non-issue). The encoder
+   feet-flat FK is the side that is wrong, by 3.14 deg. The "recalibrate the IMU" option is
+   definitively closed.
+2. **2.74 deg of error is in the encoder->geometry chain**, established without any
+   surface-parallelism assumption: with the true attitude and the measured encoders, the model
+   puts the foot 2.74 deg toe-up while it is provably flat on a flat floor.
+3. **The sole wedge is a real contributor, ~41% of the constant offset** (CORRECTED: both soles
+   are thicker at the FRONT, so both feet are toe-up by 0.74 deg right / 1.11 deg left, mean
+   0.92 deg, reinforcing rather than cancelling; the first reading of this had the right foot's
+   front/back swapped). Foot geometry therefore **stays in the v3 cut**, and also serves push-off
+   CoP fidelity (WL-D arm 6). It does not explain the L/R asymmetry (differential only 0.375 deg,
+   wrong sign), which stays open.
+4. **Component A splits in two: ~0.9 deg foot geometry (item 3) + ~1.3 deg leg-encoder zero
+   error.** The encoder part is well under 1 deg per joint across hip/knee/ankle (the thigh
+   reading tentatively puts more of it at the hip, though link-face measurements carry +-2 deg
+   since the shank's own front and back faces differ by 2.1 deg). **Unitree's zero-point
+   calibration removes that part with no retrain and no XML change**, which is cheaper than
+   anything in this ADR and should be tried first; it should leave the ~0.9 deg wedge floor,
+   which the XML fix then clears.
+5. Refined error model, over both sessions and a 0.35 rad posture range (n=1456):
+   `p_IMU = 1.132 * p_kin - 0.0394` (r=0.973), i.e. a ~2.3 deg constant offset plus a ~13%
+   scale error, so it is not pure load-proportional compliance.
+
+**Revised decision:** Model v3 = **leg mass + foot sole geometry**, as originally scoped. What
+changed is the split of Component A: the wedge is ~0.9 deg of it (XML, in the cut) and leg-encoder
+zeros are the other ~1.3 deg (hardware, outside this ADR). Sequencing gains a cheap step ahead of
+the cut: run the leg-joint re-zero, repeat the 60 s policy stand, re-measure. Expect the residual
+to fall from -0.048 rad to about **-0.016 rad**, the wedge floor; hitting that floor confirms the
+split and the XML fix clears the rest. If it does not move at all, the encoder-zero hypothesis is
+wrong and the whole residual is geometry. The leg-mass evidence is independent of all of this and
+is unaffected.
