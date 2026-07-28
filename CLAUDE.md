@@ -50,9 +50,12 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   hierarchy). Reads the live code first so the math matches the current implementation.
 - **`/wandb-rl-interpreter`** — interpret/diagnose RL training results from W&B (reward
   curves, episode length, losses, locomotion metrics, training health).
-- **`/sync-docs`** — route session results/decisions/conventions into their canonical
-  docs (the `doc/` HRL plan + `.claude/docs/`, CLAUDE.md) + auto-memory, with a
-  personal-identifier redaction gate (public repo).
+- **`/sync-docs`** — route session results/decisions/conventions to their canonical
+  homes. **Two destinations since 2026-07-28:** current design/status → this repo
+  (`doc/`, `.claude/docs/`, `docs/adr/`, CLAUDE.md), kept lean because it gets
+  published; exploratory narrative (what was tried, what failed, why, dated session
+  logs, ideas backlogs) → the research KB `~/biped_hrl_wiki`, never condensed.
+  Plus auto-memory, and a personal-identifier redaction gate on the repo side.
 - **`/delegate`** — turn a task into a hand-off prompt for a fresh chat/subagent
   (model recommendation included). Worklines registry + who-owns-what:
   `doc/hrl/worklines.md`. Planning chats delegate implementation; don't grind it inline.
@@ -130,15 +133,19 @@ analysis and the proposed change first.
 
 ## Where the deep context lives
 
-- **Personal research + narrative wiki → `~/biped_hrl_wiki`** (separate Obsidian
-  vault, own `CLAUDE.md`). Literature review (HRL/RMA/gait papers) AND, since
-  2026-07-28, the canonical home for exploratory narrative/findings ledgers —
-  what was tried, what failed, why (`wiki/architectures/A<N>.md`). This repo's
-  `doc/hrl/` is being lightened in parallel to current-status-only, since this
-  repo gets published and the wiki doesn't. **Migration in progress
-  (2026-07-28)** — some `doc/hrl/` files may still carry pre-migration
-  narrative length until their pass completes; don't assume a long file here
-  means content hasn't moved yet vs. is meant to stay.
+- **Personal research + narrative KB → `~/biped_hrl_wiki`** (separate Obsidian
+  vault, OKF v0.2 bundle, own `CLAUDE.md` — read it before writing there).
+  Literature review (HRL/RMA/gait papers) AND, since 2026-07-28, the canonical
+  home for all exploratory narrative: the A1 findings ledger, the
+  goal-achievability probe, the A1a experiment and deploy journals, the
+  hierarchy-benefit ideas backlog, closed-workline verdicts, and the A0
+  model-delta investigation. **Migration COMPLETE (2026-07-28).** `doc/hrl/`
+  now holds current design and status only — the options in use and how the
+  working solution is implemented — because this repo gets published and the KB
+  doesn't. **Don't re-accumulate narrative here**; route it to the KB via
+  `/sync-docs`. Files removed in the migration (`A1_findings.md`,
+  `A1_goal_achievability_probe.md`, `hierarchy_benefit_roadmap.md`) live there
+  now; don't re-create them.
 - **HRL master index + A0–A4 status dashboard → `doc/hrl/HRL_plan.md`** (start here).
 - **Shared HRL machinery** (co-train loop, goal space, warm-start, reward decomp,
   benchmark/probe tools, checkpoint/ONNX, gotchas) → `.claude/docs/hrl-infra.md`

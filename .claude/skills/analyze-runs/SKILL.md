@@ -72,8 +72,10 @@ reach error) per axis, `gabs_*`/`sat>0.95` (goal saturation), `vx follow ratio`
 Before building tables, look for comparable runs already on the record:
 - earlier in **this chat** (runs already benchmarked/probed this session),
 - in **memory** (e.g. `a1_reward_routing`, `a1_goal_probe`, and the MEMORY.md index),
-- in the **canonical results tables** (the hierarchy-benefit roadmap (research KB) Track F,
-  `doc/hrl/A1_HIRO.md` "Current results", the A1 findings ledger (research KB)).
+- in the **canonical results tables**: `doc/hrl/A1_HIRO.md` "Current results" in this
+  repo, and in the research KB (`~/biped_hrl_wiki`) the A1 findings ledger
+  (`wiki/architectures/a1-findings-ledger.md`), the A1a experiment journal, and the
+  hierarchy-benefit roadmap's Track F results.
 
 A run is "comparable" if it shares the axis under study (same task family / lean variant /
 goal mode / init / reward set). When you find them, **extend that table with the new
@@ -92,7 +94,7 @@ prior comparable rows):
 
 Then interpret honestly (cite the actual field/number — don't state assumptions as fact):
 - Compare against the A0 baseline (~err_vx 0.09 / vy 0.11 / yaw 0.10, act_rate ~0.6 shaped)
-  and the standing A1 best in `doc/hrl/A1_HIRO.md` / Track F results.
+  and the standing A1 best in `doc/hrl/A1_HIRO.md` / the KB's Track F results.
 - Decompose A1: is the wall the HL (high `hl_err`) or the LL (high `ll_err`)?
   Saturation? Init contamination (jerky `act_rate` inherited from a wild warm-start)?
 - Flag run-to-run variance explicitly when a "same-config" run lands far from its sibling.
@@ -100,10 +102,13 @@ Then interpret honestly (cite the actual field/number — don't state assumption
 
 ## 7. Sync (close the loop)
 
-Invoke the **`sync-docs`** skill to route the results to their canonical homes
-(Track F → the hierarchy-benefit roadmap (research KB); A1 design/findings →
-`doc/hrl/A1_HIRO.md` / the A1 findings ledger (research KB); numbers live in exactly one table, others link;
-personal-identifier redaction gate). Confirm with the user before large doc rewrites.
+Invoke the **`sync-docs`** skill to route the results to their canonical homes. Since
+2026-07-28 that is a two-destination split: **current status and the standing results
+table** stay in this repo (`doc/hrl/A1_HIRO.md`, the `HRL_plan.md` dashboard), while the
+**chronological record** — what was tried, what failed, why, with run names, log dirs and
+W&B ids — goes to the research KB (`~/biped_hrl_wiki`), which must never be condensed.
+Numbers live in exactly one table; everything else links. Personal-identifier redaction
+gate applies to the repo only. Confirm with the user before large doc rewrites.
 
 ## Notes / gotchas
 - `gamma_hi`, goal dim, etc. are derived — don't hardcode. See `CLAUDE.md` "Load-bearing gotchas".
