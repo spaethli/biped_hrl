@@ -51,9 +51,11 @@ this project's own work, built on top of that scaffold.
   action smoothness) instead of relying on training-time reward curves, plus an HRL
   goal-achievability probe (`--diagnose-goals`) that decomposes tracking error into
   high-level goal-setting error vs low-level goal-reaching error.
-- A running experiment ledger under [`doc/hrl/`](doc/hrl) and
-  [`docs/adr/`](docs/adr) — design docs, findings, and architecture decisions, kept
-  current as the thesis work progresses.
+- Design docs and architecture decisions under [`doc/hrl/`](doc/hrl) and
+  [`docs/adr/`](docs/adr), kept to current status and how the working solution is
+  implemented (the full experimental narrative — what was tried, what failed, why —
+  lives in a private research knowledge base outside this repo, since it isn't meant
+  for publication).
 
 Everything else — the multi-robot task registry (Go2, G1, A2, R1, H1_2, H2, As2), the
 generic mjlab training/play/motion-imitation workflow, and deploy for the other robots —
@@ -178,8 +180,10 @@ are documented in `.claude/docs/deployment.md`.
 - The H1-2 actuator retuning (PD gains, derived action scale, passive damping) — not
   domain randomization or reward shaping — is what separated a policy that only worked
   in simulation from one that walked on real hardware.
-- Full experiment history, ablations, and dead ends: the A1 findings ledger (research knowledge base, not published),
-  [`doc/hrl/worklines.md`](doc/hrl/worklines.md).
+- Full experiment history, ablations, and dead ends live in a private research
+  knowledge base outside this repo; [`doc/hrl/`](doc/hrl) and
+  [`doc/hrl/worklines.md`](doc/hrl/worklines.md) here track only current status and
+  who owns what.
 
 ## License
 
