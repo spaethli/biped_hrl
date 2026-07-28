@@ -8,7 +8,7 @@ sim-to-real transfer.
 - **A0** — Flat PPO: single MLP, obs → joint targets. DONE (`Unitree-H1_2-Flat`).
 - **A1** — HIRO hierarchy: PPO low level + off-policy TD3 high level, HL fires every
   `c=8` steps, HIRO delta goals, optional off-policy goal relabeling.
-  (`Unitree-H1_2-Flat-A1`; design `doc/hrl/A1_HIRO.md`, findings `doc/hrl/A1_findings.md`,
+  (`Unitree-H1_2-Flat-A1`; design `doc/hrl/A1_HIRO.md`, findings the A1 findings ledger (research KB),
   shared machinery `.claude/docs/hrl-infra.md`.)
 - **A2** — HIRO + A-RMA: HL unchanged; LL gets (1) privileged base policy with
   extrinsics latent z, (2) supervised adaptation encoder (1D-CNN over history),

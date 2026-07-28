@@ -247,7 +247,7 @@ arm / end-effector tracking — Track E is a *reuse*, not a from-scratch build.
   seeds 42 & 123. **Verdict: all four reliable** (2/2 clean each) at clean-baseline quality (0 falls,
   no saturation). Absolute err_vx ~0.080 / yaw ~0.185; directional err_vx ~0.120 / yaw ~0.163 / smoother
   (act 2.8 vs 3.9) — the **same HL-side vx↔yaw trade-off as clean Track F**: absolute nails vx, directional
-  nails yaw; LL reach near-perfect in both (HL is the wall). Full tables + verdict → `A1_findings.md`
+  nails yaw; LL reach near-perfect in both (HL is the wall). Full tables + verdict → the A1 findings ledger (research KB)
   (Estimator-noise DR #8b). One early `abs_bias` collapse was a transient corruption, not the seed.
 
 ---
@@ -377,7 +377,7 @@ HL goal error (fwd_hl_vx ~0.106→0.051) and end err_vx (0.120→0.063), act 2.8
 beats absolute on every axis** (vx 0.063 vs 0.080, yaw 0.161 vs 0.185, act 2.3 vs 3.9) → the trade-off is
 gone; **directional+velobs is the best A1 config.** yaw HL wall unchanged (only lin-vel fed) — feed yaw-rate
 next. All 4 velobs cells clean across 2 seeds (the one bias_s123 collapse reran clean → transient).
-Decomposition + tables → `A1_findings.md` (#8b velobs verdict).
+Decomposition + tables → the A1 findings ledger (research KB) (#8b velobs verdict).
 
 ## Track G — Warm-start alternatives: model-based gait warm-start (#10)
 

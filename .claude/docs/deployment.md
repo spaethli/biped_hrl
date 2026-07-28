@@ -150,7 +150,7 @@ and mark time windows.
 Before the fix these were the same knob, so narrowing the ranges for safety (e.g.
 `lin_vel_x: [-0.25, 0.5]` on a policy trained at `(-0.5, 1.0)`) silently halved the A1 goal
 scale (0.75 → 0.375) and gutted the HL's goal authority — the deploy twin of the sim bug
-(`--eval-cmd-vx` collapsed the same scale to its 1e-3 floor; `doc/hrl/A1_findings.md` WL-C).
+(`--eval-cmd-vx` collapsed the same scale to its 1e-3 floor; the A1 findings ledger (research KB) WL-C).
 A0 was always immune (no goal space).
 
 **Fixed:** `HierarchicalRunner` exports `goal_scale` in both ONNX files' metadata, and
@@ -181,7 +181,7 @@ Gaussian noise into `s` in sim, to emulate that estimator noise (default 0). Fin
 learned `absolute` TD3): under realistic velocity/height noise the clean-trained LL still stands
 but is **much twitchier, worst when standing still** (cmd=0 → goal = −noise → phantom corrections;
 HL input isn't noised, so this is the LL reacting to noisy goal feedback) → see
-`doc/hrl/A1_findings.md`. The **training-side** counterpart of this deploy knob is now built —
+the A1 findings ledger (research KB). The **training-side** counterpart of this deploy knob is now built —
 `GoalStateNoise` injects bias/drift/lag into the LL goal channel during training (#8b, see
 `.claude/docs/hrl-infra.md`), so the policy learns robustness rather than only being tested for it.
 To remove the dependency entirely instead: switch the LL to observe the **absolute `V*`** instead

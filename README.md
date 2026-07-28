@@ -178,7 +178,7 @@ are documented in `.claude/docs/deployment.md`.
 - The H1-2 actuator retuning (PD gains, derived action scale, passive damping) — not
   domain randomization or reward shaping — is what separated a policy that only worked
   in simulation from one that walked on real hardware.
-- Full experiment history, ablations, and dead ends: [`doc/hrl/A1_findings.md`](doc/hrl/A1_findings.md),
+- Full experiment history, ablations, and dead ends: the A1 findings ledger (research knowledge base, not published),
   [`doc/hrl/worklines.md`](doc/hrl/worklines.md).
 
 ## License

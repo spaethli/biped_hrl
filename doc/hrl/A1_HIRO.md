@@ -4,7 +4,7 @@
 > HL reward reaches deterministic benchmark **err_vx 0.098 / err_vy 0.091 / err_yaw 0.167,
 > 0 falls — A0-level** on vx/vy (A0 0.09/0.11/0.10), 4.3× better than the prior best A1.
 > Remaining = polish (yaw, smoothness) + writeup ablations. See "Current results" + the
-> chronological journey in `doc/hrl/A1_findings.md`.
+> chronological journey in the A1 findings ledger (research KB).
 
 Shared machinery (co-train loop, goal space, warm-start, reward decomp, TD3 internals,
 benchmark/probe tools, checkpoint/ONNX, gotchas) is in **`.claude/docs/hrl-infra.md`** —
@@ -36,7 +36,7 @@ polish A1 for in-sim tracking; fix smoothness only (transfer liability that woul
 then test where a hierarchy *could* win (OOD/robustness below) and move to A2.
 
 ## The two levers that solved the wall
-Each fixes one probe-isolated failure (see `doc/hrl/A1_findings.md` for the diagnosis chain):
+Each fixes one probe-isolated failure (see the A1 findings ledger (research KB) for the diagnosis chain):
 
 1. **`hl_target_mode=absolute`** (`HrlRunnerCfg`, default `delta`; CLI
    `--agent.hl-target-mode absolute`). The HL emits a state-independent
@@ -75,16 +75,6 @@ is structural. `--agent.hl-algorithm {oracle,ppo,td3}`.
   `HLReplayBuffer`). Internals/tuning in `hrl-infra.md`. `relabeling {none,hiro}` sub-toggle
   (HIRO off-policy correction, inline). `relabel=none` is the clean control that attributes
   any further gain to relabeling alone.
-
-### A1 run matrix (writeup)
-| Run | HL learner | Relabel | Answers |
-|---|---|---|---|
-| A0 (`Unitree-H1_2-Flat`) | — | — | baseline |
-| A1 `hl=ppo` | PPO | n/a | does structural hierarchy help? (clean: both PPO) — naive HL fails |
-| A1 `hl=td3 relabel=none` | TD3 | ✗ | isolates off-policy HL (clean relabel control) |
-| A1 `hl=td3 relabel=hiro` | TD3 | ✓ | full HIRO; vs row above isolates the relabeling correction |
-`hl=ppo`→`hl=td3 relabel=hiro` changes two things (PPO→TD3 **and** relabeling); the
-`relabel=none` row is the control.
 
 ## Goal space (A1)
 Default **7-dim `(velocity, orientation, height)`** — confirmed decision (orient+height are
@@ -156,7 +146,7 @@ is already near it** — that metric is informative only when failing.
   `State_RLHRL`, oracle + learned), runs in MuJoCo; TD3 abs/delta respond → mechanism in
   `.claude/docs/deployment.md`. **Open sim2real next step:** the LL is twitchy under injected
   estimator noise on the goal-state (`hrl.state_noise`), worst standing still → train LL+HL with
-  **state-noise DR** on the goal-state obs (and/or `imu_lin_vel` obs). See `A1_findings.md`.
+  **state-noise DR** on the goal-state obs (and/or `imu_lin_vel` obs). See the A1 findings ledger (research KB).
 
 ## A1 file map (`src/tasks/velocity/`)
 ```
@@ -176,13 +166,3 @@ rl/hrl/
 ```
 No `GoalConditionedWrapper`, no `relabeling.py` — the goal is a plain obs term and relabeling
 is inline in `td3.py`.
-
-## A1-HAC — possible parallel variant (NOT committed)
-A second HRL algorithm for the A1 slot (HIRO vs HAC, same env/reward/DR). **Does not swap
-into the current hybrid:** HAC needs hindsight at *both* levels (its LL is HER-based,
-off-policy, sparse reward) → would migrate the LL off PPO → breaks the "LL = A0 PPO" control
-A1 relies on. If pursued, treat as **A1-HAC, a parallel variant** (off-policy both levels,
-TD3/DDPG; port from `Hierarchical-Actor-Critic-HAC-PyTorch`), buying an A1-HIRO vs A1-HAC
-comparison ("off-policy correction" vs "hindsight + subgoal testing"). Cost: a second
-off-policy LL path, more tuning, no shared PPO LL. **Recommendation:** keep HIRO committed;
-revisit A1-HAC only if time remains after A1-HIRO and A2.

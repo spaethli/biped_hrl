@@ -86,7 +86,7 @@ A1's LL is warm-started from a converged **A0 actor** — under the default l2 i
 it can't discover walking from scratch. `--agent.warm-start-path <A0 model.pt>`.
 With `ll_goal_kernel=exp` + true-terminal `fell_over`, from-scratch training works
 (better-than-A0 tracking, 2026-07-06) — the warm-start is then an optimization, not a
-requirement; see `doc/hrl/A1_findings.md` (from-scratch kernel row) for the chain.
+requirement; see the A1 findings ledger (research KB) (from-scratch kernel row) for the chain.
 - **Gap-aware partial state-dict copy** (`HierarchicalRunner._partial_load`): the `command`
   obs term sits **mid-vector (actor cols 6:9), not last**, so the copy drops A0's command
   cols and shifts the rest (`[0:6]←A0[0:6]`, `[6:89]←A0[9:92]`, goal cols fresh). Critic
@@ -149,7 +149,7 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   scale used to be derived from them → scale hit its 1e-3 floor → `V* ≈ s`, inerting the goal
   channel. **Fixed by baking `goal_scale` into the checkpoint** (`GoalSpace.freeze_scale`;
   play.py prints `[SHIM] ...` for pre-2026-07-16 checkpoints). Any `--eval-cmd-vx` `|g|` /
-  `ll_err` / `[HOLDDIAG]` read from BEFORE that fix is meaningless; see `A1_findings.md`
+  `ll_err` / `[HOLDDIAG]` read from BEFORE that fix is meaningless; see the A1 findings ledger (research KB)
   WL-C). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
   frozen `hrl_phase` clock** (the loop didn't advance it; de-entrained LL ⇒ flattering) —
   fixed to mirror `get_inference_policy`.

@@ -35,7 +35,7 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   chain: LL competent; the original `|g|→1` saturation was a **pre-tracking-reward**
   failure, **cured by `hl_reward_mode=tracking`** (the primary lever; `absolute` only
   refines, NOT required). **Correction 2026-06-24: do NOT cite saturation against `delta`** —
-  true-lean delta+tracking runs are unsaturated. Authoritative: `doc/hrl/A1_findings.md`
+  true-lean delta+tracking runs are unsaturated. Authoritative: the A1 findings ledger (research KB)
   (Track F + "fix chain").
 
 ## Task IDs
@@ -112,12 +112,12 @@ analysis and the proposed change first.
   scale hit its `1e-3` floor → `V* ≈ s` → the goal channel went inert and every A1 hold
   eval reported a phantom "HL hold degeneracy" (A0 was immune: no goal space). Deploy C++
   still derives from `deploy.yaml` ranges → **its `ang_vel_z` MUST equal the trained
-  `(-1.0, 1.0)`** until it reads the ONNX `goal_scale` metadata. See `A1_findings.md` WL-C.
+  `(-1.0, 1.0)`** until it reads the ONNX `goal_scale` metadata. See the A1 findings ledger (research KB) WL-C.
 - **`hl_velocity_goals_only=True` is the A1a default (2026-07-09):** the TD3 HL emits
   only the velocity goal columns (+period); orientation/height targets are pinned to
   nominal (oracle path). Fixes the posture sag (tracking-rewarded HL had no reason to
   command upright). HL action = `task_dim(+1)`, not `goal_dim(+1)`; pre-change checkpoints
-  restore as `False` (play.py absence-shim). See `A1_findings.md`.
+  restore as `False` (play.py absence-shim). See the A1 findings ledger (research KB).
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
@@ -144,8 +144,8 @@ analysis and the proposed change first.
   benchmark/probe tools, checkpoint/ONNX, gotchas) → `.claude/docs/hrl-infra.md`
   (A2/A3 reuse this — read before starting a new architecture).
 - **A1 design (as-built) + current status + open ablations → `doc/hrl/A1_HIRO.md`**;
-  A1 findings ledger (what was tried/ruled out, M1→M5 + probes) → `doc/hrl/A1_findings.md`;
-  goal-achievability probe → `doc/hrl/A1_goal_achievability_probe.md`.
+  A1 findings ledger (what was tried/ruled out, M1→M5 + probes) → the A1 findings ledger (research KB);
+  goal-achievability probe → the goal-achievability probe writeup (research KB).
 - Codebase layout, obs dims, A1 class map → `.claude/docs/codebase-map.md`
 - Architecture matrix A0–A4, RQ2 comparison-cleanliness rule, reproducibility →
   `.claude/docs/experiment-design.md`

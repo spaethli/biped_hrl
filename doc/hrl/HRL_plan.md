@@ -24,10 +24,13 @@ comparison-cleanliness rule, and reproducibility rules live in
   A2/A3 reuse this; read it before starting a new architecture.
 - **A2 design spec** (HIRO + A-RMA: e_t, 3 phases, S0–S5, force-perturbation extension) → `doc/hrl/A2_ARMA.md`.
 - **A1 design (as-built) + current status + open ablations** → `doc/hrl/A1_HIRO.md`.
-- **A1 findings ledger** (what was tried / ruled out / lessons, M1→M5 + probes) →
-  `doc/hrl/A1_findings.md`.
-- **A1 goal-achievability probe** (the structural-limiter diagnosis) →
-  `doc/hrl/A1_goal_achievability_probe.md`.
+- **Exploratory history is NOT in this repo (since 2026-07-28).** The A1 findings
+  ledger, the goal-achievability probe writeup, and the A1a experiment/deploy
+  journals — every lever tried, what failed, root causes, dated session logs and
+  full result tables — live in the author's separate research knowledge base, so
+  this repo stays publishable. `doc/hrl/` keeps only current design and status:
+  the options in use and how the working solution is implemented. Don't
+  re-accumulate narrative here; route it to the knowledge base instead.
 - **Hierarchy-benefit roadmap** (ideas backlog answering the supervisors' "what does the
   hierarchy buy?" critique — richer HL job, smooth/safe reward terms, real-robot feasibility,
   LL reward restructure; parallel tracks) → `doc/hrl/hierarchy_benefit_roadmap.md`.
