@@ -73,9 +73,9 @@ Before building tables, look for comparable runs already on the record:
 - earlier in **this chat** (runs already benchmarked/probed this session),
 - in **memory** (e.g. `a1_reward_routing`, `a1_goal_probe`, and the MEMORY.md index),
 - in the **canonical results tables**: `doc/hrl/A1_HIRO.md` "Current results" in this
-  repo, and in the research KB (`~/biped_hrl_wiki`) the A1 findings ledger
-  (`wiki/architectures/a1-findings-ledger.md`), the A1a experiment journal, and the
-  hierarchy-benefit roadmap's Track F results.
+  repo, and in the research KB the compiled pages (`wiki/architectures/a1.md`, `a1a.md`) and,
+  for the raw numbers behind them, `raw/engineering-journal/` (the A1 findings ledger,
+  the A1a experiment journal, the hierarchy-benefit roadmap's Track F results).
 
 A run is "comparable" if it shares the axis under study (same task family / lean variant /
 goal mode / init / reward set). When you find them, **extend that table with the new
@@ -103,12 +103,15 @@ Then interpret honestly (cite the actual field/number — don't state assumption
 ## 7. Sync (close the loop)
 
 Invoke the **`sync-docs`** skill to route the results to their canonical homes. Since
-2026-07-28 that is a two-destination split: **current status and the standing results
-table** stay in this repo (`doc/hrl/A1_HIRO.md`, the `HRL_plan.md` dashboard), while the
-**chronological record** — what was tried, what failed, why, with run names, log dirs and
-W&B ids — goes to the research KB (`~/biped_hrl_wiki`), which must never be condensed.
-Numbers live in exactly one table; everything else links. Personal-identifier redaction
-gate applies to the repo only. Confirm with the user before large doc rewrites.
+2026-07-28 that is a three-destination split: **current status and the standing results
+table** stay in this repo (`doc/hrl/A1_HIRO.md`, the `HRL_plan.md` dashboard); the
+**chronological record** — what was tried, what failed, why, with run names, log dirs
+and W&B ids — is appended verbatim to the engineering journal at
+`~/biped_hrl_wiki/raw/engineering-journal/`, which is append-only and never condensed;
+and collaboration feedback goes to auto-memory. `sync-docs` writes a source, not wiki
+pages — a separate Ingest compiles the journal into queryable pages. Numbers live in
+exactly one table; everything else links. Redaction gate applies to this repo only.
+Confirm with the user before large doc rewrites.
 
 ## Notes / gotchas
 - `gamma_hi`, goal dim, etc. are derived — don't hardcode. See `CLAUDE.md` "Load-bearing gotchas".

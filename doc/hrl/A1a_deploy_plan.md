@@ -21,7 +21,7 @@ separate, now-disentangled causes**:
    "empirically closed" verdict is withdrawn. **PORTED AND VALIDATED ON HARDWARE
    2026-07-23** (WL-B0a): 225.8 s of real free walking with the filter never engaging
    once (`alpha` max 0.000 over 26544 clamp rows), against 12463 full-hold rows in the
-   pre-fix run. → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`).
+   pre-fix run. → the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`).
 2. **A persistent ~3-5° backward pitch lean, present even at stand (sim ~0), is a
    SEPARATE finding** (independent of the filter — one run shows the full lean with zero
    filter engagement). **FULLY DIAGNOSED 2026-07-23/28 (WL-B0b); no cause remains
@@ -58,7 +58,7 @@ separate, now-disentangled causes**:
 
 E-stop chain was also corrected this session: `p`→Passive is the verified primary stop;
 Ctrl+C is **not** a verified E-stop (no signal handler exists) — see "E-STOP chain"
-below. → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`) for the dated session-by-session detail; hand-off prompts WL-B0a/WL-B0b in
+below. → the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`) for the dated session-by-session detail; hand-off prompts WL-B0a/WL-B0b in
 `worklines.md`.
 
 **A1 track (WL-B1):** deploy candidate LOCKED = `arm4d` (`ll_energy_coef=0.05`) —
@@ -68,7 +68,7 @@ clearance** (action_rate splits cleanly: A0 0.57-0.75 vs A1 0.92-1.28, no overla
 `arm5` (ankle-roll) fails catastrophically with a now-understood mechanism (bilateral
 ankle-roll+hip-roll saturation decaying a lateral command to zero). Headless replica
 sweep confirms arm4d 6/6 clean, matching live. **Open**: full live G2 battery on arm4d
-has not been run yet (only the smoothness spot-check above). → the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`).
+has not been run yet (only the smoothness spot-check above). → the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`).
 
 **Both tracks share:** the `gait_phase_cmd` fix (2026-07-21, "Defect 0") — the
 prior finding that the deploy gait clock was permanently dead under keyboard control,
@@ -91,7 +91,7 @@ Defect 2 (the ONNX re-export — confirmed correct as of the 2026-07-22 G2 batte
 
 The evidence, numbers and mechanism detail behind this dashboard (dated sessions, bridge
 post-mortems, defect-by-defect diagnosis, the backward-lean hypothesis table) live in
-the deploy journal in the research KB (`wiki/architectures/a1a-deploy-journal.md`), per the migration note at the top. What follows here is the gate ladder and the
+the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`), per the migration note at the top. What follows here is the gate ladder and the
 current design.
 
 Operational gated checklist for `A1a_plan.md` Plan v2 stage D. Grilled 2026-07-14.

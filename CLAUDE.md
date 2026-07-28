@@ -51,11 +51,13 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 - **`/wandb-rl-interpreter`** — interpret/diagnose RL training results from W&B (reward
   curves, episode length, losses, locomotion metrics, training health).
 - **`/sync-docs`** — route session results/decisions/conventions to their canonical
-  homes. **Two destinations since 2026-07-28:** current design/status → this repo
+  homes. **Three destinations since 2026-07-28:** current design/status → this repo
   (`doc/`, `.claude/docs/`, `docs/adr/`, CLAUDE.md), kept lean because it gets
   published; exploratory narrative (what was tried, what failed, why, dated session
-  logs, ideas backlogs) → the research KB `~/biped_hrl_wiki`, never condensed.
-  Plus auto-memory, and a personal-identifier redaction gate on the repo side.
+  logs, ideas backlogs) → an **append-only journal** at
+  `~/biped_hrl_wiki/raw/engineering-journal/`, verbatim and never condensed; plus
+  auto-memory. It writes a *source*, not wiki pages — a separate Ingest in the vault
+  compiles the journal into queryable pages. Redaction gate applies to this repo only.
 - **`/delegate`** — turn a task into a hand-off prompt for a fresh chat/subagent
   (model recommendation included). Worklines registry + who-owns-what:
   `doc/hrl/worklines.md`. Planning chats delegate implementation; don't grind it inline.
@@ -135,11 +137,12 @@ analysis and the proposed change first.
 
 - **Personal research + narrative KB → `~/biped_hrl_wiki`** (separate Obsidian
   vault, OKF v0.2 bundle, own `CLAUDE.md` — read it before writing there).
-  Literature review (HRL/RMA/gait papers) AND, since 2026-07-28, the canonical
-  home for all exploratory narrative: the A1 findings ledger, the
-  goal-achievability probe, the A1a experiment and deploy journals, the
-  hierarchy-benefit ideas backlog, closed-workline verdicts, and the A0
-  model-delta investigation. **Migration COMPLETE (2026-07-28).** `doc/hrl/`
+  Literature review (HRL/RMA/gait papers) AND, since 2026-07-28, the home of all
+  exploratory narrative. That narrative lives as an **append-only source** in
+  `raw/engineering-journal/` (A1 findings ledger, A1a experiment and deploy
+  journals, hierarchy-benefit backlog, closed-workline verdicts, A0 model delta)
+  and is **compiled into queryable `wiki/` pages by Ingest** — read the compiled
+  pages, drill into the journal to verify a number. **Migration COMPLETE (2026-07-28).** `doc/hrl/`
   now holds current design and status only — the options in use and how the
   working solution is implemented — because this repo gets published and the KB
   doesn't. **Don't re-accumulate narrative here**; route it to the KB via
