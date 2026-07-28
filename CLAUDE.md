@@ -130,6 +130,15 @@ analysis and the proposed change first.
 
 ## Where the deep context lives
 
+- **Personal research + narrative wiki → `~/biped_hrl_wiki`** (separate Obsidian
+  vault, own `CLAUDE.md`). Literature review (HRL/RMA/gait papers) AND, since
+  2026-07-28, the canonical home for exploratory narrative/findings ledgers —
+  what was tried, what failed, why (`wiki/architectures/A<N>.md`). This repo's
+  `doc/hrl/` is being lightened in parallel to current-status-only, since this
+  repo gets published and the wiki doesn't. **Migration in progress
+  (2026-07-28)** — some `doc/hrl/` files may still carry pre-migration
+  narrative length until their pass completes; don't assume a long file here
+  means content hasn't moved yet vs. is meant to stay.
 - **HRL master index + A0–A4 status dashboard → `doc/hrl/HRL_plan.md`** (start here).
 - **Shared HRL machinery** (co-train loop, goal space, warm-start, reward decomp,
   benchmark/probe tools, checkpoint/ONNX, gotchas) → `.claude/docs/hrl-infra.md`
