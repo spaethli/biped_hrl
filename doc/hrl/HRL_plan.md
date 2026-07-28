@@ -25,15 +25,15 @@ comparison-cleanliness rule, and reproducibility rules live in
 - **A2 design spec** (HIRO + A-RMA: e_t, 3 phases, S0–S5, force-perturbation extension) → `doc/hrl/A2_ARMA.md`.
 - **A1 design (as-built) + current status + open ablations** → `doc/hrl/A1_HIRO.md`.
 - **Exploratory history is NOT in this repo (since 2026-07-28).** The A1 findings
-  ledger, the goal-achievability probe writeup, and the A1a experiment/deploy
-  journals — every lever tried, what failed, root causes, dated session logs and
-  full result tables — live in the author's separate research knowledge base, so
-  this repo stays publishable. `doc/hrl/` keeps only current design and status:
-  the options in use and how the working solution is implemented. Don't
-  re-accumulate narrative here; route it to the knowledge base instead.
-- **Hierarchy-benefit roadmap** (ideas backlog answering the supervisors' "what does the
-  hierarchy buy?" critique — richer HL job, smooth/safe reward terms, real-robot feasibility,
-  LL reward restructure; parallel tracks) → `doc/hrl/hierarchy_benefit_roadmap.md`.
+  ledger, the goal-achievability probe writeup, the A1a experiment/deploy
+  journals, the hierarchy-benefit roadmap (the ideas backlog answering the
+  supervisors' "what does the hierarchy buy?" critique), and the closed-workline
+  verdicts and delivered hand-off prompts — every lever tried, what failed, root
+  causes, dated session logs and full result tables — live in the author's
+  separate research knowledge base, so this repo stays publishable. `doc/hrl/`
+  keeps only current design and status: the options in use and how the working
+  solution is implemented. Don't re-accumulate narrative here; route it to the
+  knowledge base instead.
 - **A1a HL-enrichment plan** (the chosen Track-A answer: HL minimizes cost-of-transport via a
   commanded gait cadence the flat command can't express; staged S0–S6) →
   `doc/hrl/A1a_plan.md` (design rationale: `docs/adr/0004-a1a-energy-cadence-hl-enrichment.md`).

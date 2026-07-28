@@ -11,7 +11,7 @@ supervisors (2026-06-18) called A1 a *velocity relay*: the high level forwards t
 command on a coarser timescale and adds nothing, so even a clean A0-vs-A1 transfer study
 would likely return "no difference" because no hierarchical structure is being exploited.
 A relay HL makes the RQ unanswerable. The HL needs a job the flat command structurally
-cannot do (`doc/hrl/hierarchy_benefit_roadmap.md`, Track A, Axis 1).
+cannot do (the hierarchy-benefit roadmap (research KB), Track A, Axis 1).
 
 Transfer will be measured with a **sim-to-sim / OOD proxy** during development (train
 Narrow DR, evaluate Wide DR / pushes / terrain; A1-vs-A0 fall-rate and tracking under the

@@ -129,7 +129,7 @@ are on the table (not yet chosen), see `doc/hrl/A1a_deploy_plan.md` "E1/E2 resul
 custom leg-odometry estimator from joint encoders + IMU (both fine under `lowstate`
 independent of the vendor's motion service), (2) the absolute-`V*` LL retrain below
 (removes the dependency entirely), (3) swap velocity/height for acceleration in the goal
-space — the existing roadmap idea `doc/hrl/hierarchy_benefit_roadmap.md` `#6` / thesis M4,
+space — the existing roadmap idea the hierarchy-benefit roadmap (research KB) `#6` / thesis M4,
 not a new idea; this E1 result is the trigger that makes it live rather than deferred.
 E2 (IMU specific-force convention) passed cleanly on the same session.
 

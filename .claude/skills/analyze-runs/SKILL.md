@@ -72,7 +72,7 @@ reach error) per axis, `gabs_*`/`sat>0.95` (goal saturation), `vx follow ratio`
 Before building tables, look for comparable runs already on the record:
 - earlier in **this chat** (runs already benchmarked/probed this session),
 - in **memory** (e.g. `a1_reward_routing`, `a1_goal_probe`, and the MEMORY.md index),
-- in the **canonical results tables** (`doc/hrl/hierarchy_benefit_roadmap.md` Track F,
+- in the **canonical results tables** (the hierarchy-benefit roadmap (research KB) Track F,
   `doc/hrl/A1_HIRO.md` "Current results", the A1 findings ledger (research KB)).
 
 A run is "comparable" if it shares the axis under study (same task family / lean variant /
@@ -101,7 +101,7 @@ Then interpret honestly (cite the actual field/number — don't state assumption
 ## 7. Sync (close the loop)
 
 Invoke the **`sync-docs`** skill to route the results to their canonical homes
-(Track F → `doc/hrl/hierarchy_benefit_roadmap.md`; A1 design/findings →
+(Track F → the hierarchy-benefit roadmap (research KB); A1 design/findings →
 `doc/hrl/A1_HIRO.md` / the A1 findings ledger (research KB); numbers live in exactly one table, others link;
 personal-identifier redaction gate). Confirm with the user before large doc rewrites.
 

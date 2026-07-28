@@ -419,7 +419,7 @@ thesis's own M5 "IMU-velocity feasibility probe" (`sec:a1a-deploy`, still marked
    `sec:a1a-goal`), not a new idea; today's E1 result is the concrete trigger that makes
    it a live decision instead of a deferred one. Canonical spec + open questions (the
    held-window target-semantics problem, the target-map rework) →
-   `doc/hrl/hierarchy_benefit_roadmap.md` `#6`. Not re-described here.
+   the hierarchy-benefit roadmap (research KB) `#6`. Not re-described here.
 
 Not resolved now; the user's call when A1 hardware is actually next.
 

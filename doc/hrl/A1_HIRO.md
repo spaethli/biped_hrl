@@ -25,7 +25,7 @@ runtime base-velocity estimate A0 doesn't need — see deploy note), so "hierarc
 locomotion" is **not** supported. **Correction (2026-06-23):** the prior "jerkier A1" cost
 (act_rate 1.68 vs 0.66) was a **reward artifact** — A0 is penalized for jerk, A1's LL never is
 (LL = intrinsic reward only). Under a matched penalty-free reward A1-from-polished is ~10×
-*smoother* than A0 (Track F true-lean → `hierarchy_benefit_roadmap.md`), so smoothness is not a
+*smoother* than A0 (Track F true-lean → the hierarchy-benefit roadmap (research KB)), so smoothness is not a
 genuine A1 cost; the deploy-relevant concern is only the shaped-reward gait. The payoff
 is elsewhere: (1) **substrate for A2/A3** — A2's A-RMA adaptation attaches to the HL/LL split,
 where the sim2real story (M3, the primary metric) comes from; (2) **clean RQ2 control** — A1's
