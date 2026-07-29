@@ -198,6 +198,21 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   gait drift). Floor 0.5 = walk-run boundary; running needs more than the floor (see the cfg
   docstring). Sim-only: the phase obs / deploy path are untouched.
 
+- **Regression suite** (`tests/`, born 2026-07-29): `pytest` — 49 tests, ~3 s, CPU-only (no
+  MuJoCo/GPU/checkpoints; a duck-typed `FakeEnv` in `conftest.py`). Four seams, each chosen
+  because a defect there yields a confident WRONG RESULT rather than a crash:
+  `test_goal_space.py` (scale pin/derive, delta-vs-absolute decode, `to_g` round-trip,
+  `task_only` nominal pin, kernel sign invariants), `test_rewards.py` (push-off direction +
+  contact gate, commanded-vs-episode gait clock, d(T) duty schedule), `test_warm_start.py`
+  (the gap-aware column map below), `test_deploy_parity.py` (all 27 joint limits vs the
+  compiled model, obs-vector layout, PD gains / default pose / action scale / cadence range
+  vs the training config, baked `goal_scale` metadata). A2/A3 inherit all four.
+- **Prove new tests can fail:** `python scripts/check_test_sensitivity.py [name-substring]`
+  re-introduces each historical defect in the source and asserts the suite goes red (19/19).
+  A test written against already-correct code is green on arrival and proves nothing
+  otherwise. The harness edits files in place and refuses to restore if one changed
+  underneath it (concurrent session) rather than clobbering the other edit.
+
 ## Checkpoint / ONNX / deploy
 - `model_<it>.pt`: LL actor/critic/normalizer + `hl` (per-algorithm) + iter.
 - **ONNX:** two files `high_level.onnx` (state→goal) and `low_level.onnx` (state→27) via
@@ -211,6 +226,16 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   `deployment.md`.
 
 ## Gotchas (apply to all HRL arches)
+- **The exp kernel's "strictly positive" guarantee rests on `orientation` being in the goal
+  space** (found 2026-07-29 while writing `tests/`). `exp(-d²/σ²)` underflows to *exactly*
+  0.0 in float32 past `|Δv| > 4.7 m/s` / `|Δh| > 0.94 m`; the sum stays positive only
+  because projected gravity is a unit vector, capping `‖Δorient‖` at `2√3` so that term can
+  never underflow. A velocity-only goal space would let the per-step reward reach 0, break
+  the exp ↔ true-terminal pairing rule, and could resurrect the suicide attractor. Asserted
+  by `test_exp_positivity_depends_on_the_bounded_orientation_term`.
+- **Deploy command ranges are an operator safety clamp and deliberately do NOT match
+  training** (`ang_vel_z` ±0.5 vs ±1.0 trained). Never "fix" them to match; the goal scale
+  travels with the policy via ONNX metadata precisely so the clamp is free to differ.
 - A1 LL `entropy_coef=0.005` (0.01 lets action std blow up to ~2 and collapse);
   `desired_kl=0.005`; LR adaptive, sits near floor 1e-5.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as a

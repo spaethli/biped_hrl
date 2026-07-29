@@ -83,6 +83,12 @@ a few lines), work in explicit stages and get explicit user go-ahead between the
 4. **Testing** — a test plan defined up front (unit/smoke + success criteria), run
    after implementing; report results honestly.
 
+**Regression suite (2026-07-29):** `pytest` (CPU-only, no MuJoCo/GPU, ~3 s) guards the
+goal decode, reward-term direction/gating, the warm-start column map and deploy/training
+config parity. Run it before and after any change to those. New tests must be proven
+able to fail: `python scripts/check_test_sensitivity.py` re-introduces each historical
+defect and checks it is caught. Details → `.claude/docs/hrl-infra.md`.
+
 Don't start editing code mid-diagnosis because a fix "seems obvious" — present the
 analysis and the proposed change first.
 
@@ -116,8 +122,13 @@ analysis and the proposed change first.
   derivation read the live twist ranges, and `--eval-cmd-vx` collapses those to a point →
   scale hit its `1e-3` floor → `V* ≈ s` → the goal channel went inert and every A1 hold
   eval reported a phantom "HL hold degeneracy" (A0 was immune: no goal space). Deploy C++
-  still derives from `deploy.yaml` ranges → **its `ang_vel_z` MUST equal the trained
-  `(-1.0, 1.0)`** until it reads the ONNX `goal_scale` metadata. See the A1 findings ledger (research KB) WL-C.
+  reads the baked `goal_scale` from the HL ONNX metadata (`State_RLHRL.cpp`) and only
+  derives from `deploy.yaml` ranges when that metadata is absent (pre-2026-07-16 exports).
+  **The deploy command ranges are an operator safety clamp and deliberately DON'T match
+  training** (`ang_vel_z` ±0.5 deployed vs ±1.0 trained: train wide for faster turning,
+  deploy narrow for a tame joystick) — which is precisely why the scale must travel with
+  the policy. `tests/test_deploy_parity.py` asserts the metadata is present so the legacy
+  derive-from-ranges path stays unreachable. See the A1 findings ledger (research KB) WL-C.
 - **`hl_velocity_goals_only=True` is the A1a default (2026-07-09):** the TD3 HL emits
   only the velocity goal columns (+period); orientation/height targets are pinned to
   nominal (oracle path). Fixes the posture sag (tracking-rewarded HL had no reason to
