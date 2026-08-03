@@ -1,5 +1,6 @@
 """Script to play RL agent with RSL-RL."""
 
+import math
 import os
 import sys
 from dataclasses import asdict, dataclass
@@ -42,6 +43,27 @@ class PlayConfig:
   |V* - achieved| (does the LL deliver the target the HL set?). Also reports raw goal
   |g| / saturation and a forward-vs-backward vx split (the observed directional bias).
   Sibling to ``eval_steps``; reuses ``eval_seeds``. Requires a hierarchical runner."""
+  check_vel_increment: int = 0
+  """Deploy-feasibility bench: if > 0, run this many deterministic steps and measure how
+  well IMU-only integration reproduces the WITHIN-WINDOW base-velocity increment
+  ``v_b(i) - v_b(t0)``. Rationale: in ``delta`` mode the LL goal obs is
+  ``V* - s_i = scale*g - (s_i - s_t0)``, so absolute velocity CANCELS -- deploy never needs
+  a state estimator (E1's dead end), only the increment, which resets every ``c`` steps so
+  drift cannot accumulate. Reports RMS reconstruction error per axis for a term ladder
+  (raw / gravity-removed / +Coriolis) against both the pelvis-origin velocity the goal
+  space uses and the co-located IMU-site velocity, so the dominant error term is
+  identifiable, split by yaw-rate band. Gate on the gravity-removed pelvis column: <=0.05
+  ship as-is, 0.05-0.15 retrain with the residual as state_noise DR, >0.15 blind-LL sweep.
+  Sibling to ``eval_steps``; reuses ``eval_seeds``."""
+  check_leg_odometry: int = 0
+  """Deploy-feasibility bench for the HL's ABSOLUTE base velocity (the one thing
+  ``delta`` mode does NOT cancel — see ``--check-vel-increment``). Estimates
+  ``v_pelvis_b = -d(p_foot_b)/dt - w_b x p_foot_b`` from the stance foot, i.e. pure
+  encoder kinematics + gyro, no integration anywhere, so unlike leg-odometry *position*
+  it cannot drift. Stance is picked by the gravity-projected lower foot (``LowState`` has
+  no foot force sensor). Scored against true ``root_link_lin_vel_b``, split by gait phase
+  and speed, plus a 6.25 Hz-filtered column (the HL fires once per ``c`` steps, so it can
+  average). Sibling to ``eval_steps``; reuses ``eval_seeds``."""
   diagnose_symmetry: int = 0
   """WL-D arm 10 probe: if > 0, run this many deterministic steps and report per-foot
   touchdown counts, the t_LR/t_RL step-time distributions and symmetry index
@@ -58,6 +80,31 @@ class PlayConfig:
   uniform smoothness deficit. Works on A0 (non-hierarchical) too, where c defaults to 8 and
   the flat profile is the control proving any A1 structure is real, not a binning artifact.
   Sibling to ``eval_steps``; reuses ``eval_seeds``."""
+  probe_lean: int = 0
+  """Backward-lean sensitivity probe (ADR-0006 / WL-B0e): if > 0, run this many
+  deterministic standing steps per swept bias value and report the steady-state base
+  pitch, measuring d(lean)/d(encoder offset) in sim instead of inferring it. Injects a
+  DETERMINISTIC ``encoder_bias`` on a leg joint group (bypassing the startup event's
+  random sampling) and flips the ``joint_pos`` obs term to ``biased=True``. That flag is
+  the whole probe: with it off (the training default) mjlab shows the policy the TRUE
+  joint angle, so gravity and encoders never disagree and the bias is nulled by a constant
+  action shift. Pair with ``--eval-cmd-vx 0`` to hold the commanded stand."""
+  probe_lean_bias: str = "0,0.01,0.02,0.0317,-0.0317"
+  """Comma-separated ``encoder_bias`` values (rad) to sweep. mjlab applies
+  ``target = action - encoder_bias``, so a bias b reproduces the deploy-side ADR-0006
+  ``joint_offset`` of -b; both are printed so the result maps onto Spec B directly."""
+  probe_gravity_noise: str = ""
+  """ADR-0006 discriminator: if set (comma-separated Unoise half-ranges, e.g.
+  "0.05,0.1,0.2,0.4"), sweep corruption of the `projected_gravity` OBSERVATION instead of
+  the encoder bias, holding the encoder clean. Separates the two readings of Spec A's
+  hardware failure: if the biased-obs policy degrades faster than the keeper under the same
+  gravity corruption, it really did shift its trust onto the IMU (the IMU-fragility
+  reading); if both degrade alike, the failure was out-of-distribution encoder bias
+  instead. 0.05 = the training default, i.e. the control. Requires --probe-lean."""
+  probe_lean_joints: str = "ankle_pitch,knee,hip_pitch,all"
+  """Comma-separated leg groups to place the bias on. ``all`` splits the swept value
+  equally over the three sagittal joints so the CHAIN SUM equals it -- the quantity the
+  feet-flat FK actually pins."""
   eval_cadence_period: float | None = None
   """A1a: pin the HL-commanded stride period (s) during eval, for the CoT(period) sweep
   (requires an hl_cadence runner). None -> the runner's mid-range default."""
@@ -229,6 +276,30 @@ def run_play(task_id: str, cfg: PlayConfig):
     env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None:
     env_cfg.viewer.width = cfg.video_width
+
+  if cfg.probe_lean > 0:
+    # Wire the OBSERVATION half of the encoder bias (see --probe-lean). Training leaves it
+    # off, which makes the bias observable and therefore trivially correctable; the probe
+    # needs the hardware failure mode, where the reported angle IS the command and only the
+    # true joint is displaced. "critic" shares the same term objects as "actor".
+    for grp in ("actor", "critic"):
+      term = env_cfg.observations.get(grp)
+      term = term.terms.get("joint_pos") if term is not None else None
+      if term is not None:
+        term.params = dict(term.params or {})
+        term.params["biased"] = True
+
+  if cfg.probe_lean > 0 and cfg.probe_gravity_noise:
+    # Play mode sets enable_corruption=False (h1_2 env_cfgs.py), which makes the obs manager
+    # null every term's noise -- so the gravity sweep would have nothing to vary. Turn
+    # corruption back on but strip the noise from every OTHER actor term, so gravity is the
+    # only corrupted channel and the sweep stays single-variable.
+    grp = env_cfg.observations.get("actor")
+    if grp is not None:
+      grp.enable_corruption = True
+      for name, term in grp.terms.items():
+        if name != "projected_gravity":
+          term.noise = None
 
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   if cfg.video and DUMMY_MODE:
@@ -974,6 +1045,495 @@ def run_play(task_id: str, cfg: PlayConfig):
       diag_out["bwd_ll_vx"] = round(ll_err[bwd, 0].abs().mean().item(), 6)
       diag_out["bwd_gabs_vx"] = round(gabs_vel[bwd, 0].mean().item(), 6)
     print(f"[GOALDIAG] {json.dumps(diag_out)}")
+    env.close()
+    return
+
+  if cfg.check_leg_odometry > 0:
+    import json
+    uenv = env.unwrapped
+    robot = uenv.scene["robot"].data
+    entity = uenv.scene["robot"]
+    foot_ids, foot_names = entity.find_sites(["left_foot", "right_foot"], preserve_order=True)
+    assert foot_names == ["left_foot", "right_foot"], f"foot site order: {foot_names}"
+    dt = uenv.step_dt
+    c = getattr(runner, "c", 8)
+    n_envs = uenv.num_envs
+
+    def _foot_b() -> torch.Tensor:
+      """Foot positions in the PELVIS frame, [B, 2, 3] — a pure function of the encoders,
+      so this is exactly what hardware FK would produce from `q`."""
+      rel_w = robot.site_pos_w[:, foot_ids, :] - robot.root_link_pos_w[:, None, :]
+      # world -> body: quat_rotate_inverse, done via the projected-gravity-free route of
+      # rotating by the conjugate root quaternion.
+      q = robot.root_link_quat_w                       # [B, 4] (w, x, y, z)
+      qv, qw = q[:, 1:], q[:, 0:1]
+      t = 2.0 * torch.cross(qv.unsqueeze(1).expand_as(rel_w), rel_w, dim=-1)
+      return rel_w - qw.unsqueeze(1) * t + torch.cross(
+        qv.unsqueeze(1).expand_as(t), t, dim=-1)
+
+    est_a, true_a, keep_a, phase_a, spd_a = [], [], [], [], []
+    orc_a, single_a, nct_a = [], [], []  # contact-oracle rungs
+
+    # Physics-rate rung. d(p_foot)/dt is a finite difference, so at the 50 Hz control rate
+    # it aliases exactly like the IMU integration did in --check-vel-increment (which was
+    # 4x worse at 50 Hz than at 200 Hz). Hardware would run this in State_RLHRL::run() at
+    # 1 kHz, so measure it at the substep rate before judging the estimator.
+    fast_sum = torch.zeros(uenv.num_envs, 3, device=env.device)
+    fast_n = torch.zeros((), device=env.device)
+    fast_prev = {"p": None}
+    _orig_substep = uenv.metrics_manager.compute_substep
+
+    def _substep_hook():
+      p_s = _foot_b()
+      if fast_prev["p"] is not None:
+        w_s = robot.root_link_ang_vel_b[:, None, :].expand_as(p_s)
+        e_f = -(p_s - fast_prev["p"]) / uenv.physics_dt - torch.cross(w_s, p_s, dim=-1)
+        d_s = (p_s * robot.projected_gravity_b[:, None, :]).sum(-1)
+        i_s = d_s.argmax(dim=1).view(-1, 1, 1).expand(-1, 1, 3)
+        fast_sum.add_(e_f.gather(1, i_s).squeeze(1))
+        fast_n.add_(1.0)
+      fast_prev["p"] = p_s
+      _orig_substep()
+
+    uenv.metrics_manager.compute_substep = _substep_hook
+    fast_a = []
+    with torch.inference_mode():
+      for seed_idx in range(cfg.eval_seeds):
+        torch.manual_seed(42 + seed_idx)
+        obs, _ = env.reset()
+        prev_p = _foot_b()
+        for _ in range(cfg.check_leg_odometry):
+          obs, _, dones, _ = env.step(policy(obs).to(env.device))
+          p = _foot_b()                                  # [B, 2, 3]
+          w_b = robot.root_link_ang_vel_b[:, None, :].expand_as(p)
+          # v_p^b = -d(p_f^b)/dt - w^b x p_f^b   (stance foot fixed in the world), per foot
+          est_f = -(p - prev_p) / dt - torch.cross(w_b, p, dim=-1)       # [B, 2, 3]
+          # Stance = the foot further along gravity (hardware-computable: FK + IMU attitude).
+          # MEASURED BETTER than an actuator-torque load proxy (2026-08-03): a soft-load
+          # softmax regressed the gate 0.148 -> 0.241 and NO T in {1.9, 8, 20, inf, 0} beat
+          # this rule. Both rules agree with a per-sample oracle only ~13% of the time while
+          # the oracle itself scores 0.068 -- the headroom is real but neither depth nor
+          # summed joint torque finds it. Deploy journal, 2026-08-03.
+          depth = (p * robot.projected_gravity_b[:, None, :]).sum(-1)     # [B, 2]
+          idx = depth.argmax(dim=1).view(-1, 1, 1).expand(-1, 1, 3)
+          est = est_f.gather(1, idx).squeeze(1)
+          fast_a.append((fast_sum / fast_n.clamp(min=1.0)).cpu())
+          fast_sum.zero_(); fast_n.zero_()
+          # CONTACT-ORACLE reference rungs: what a PERFECT contact signal would buy (a real
+          # foot sensor, or a torque-transient touchdown detector). Unlike a lowest-error
+          # oracle this is physically achievable, so it bounds the whole detector idea:
+          # if these are not good, no contact detector can rescue leg odometry.
+          from src.tasks.velocity.mdp import foot_contact
+          ct = foot_contact(uenv, "feet_ground_contact") > 0.5            # [B, 2]
+          single = ct.sum(-1) == 1
+          idx_c = ct.float().argmax(dim=1).view(-1, 1, 1).expand(-1, 1, 3)
+          est_c1 = est_f.gather(1, idx_c).squeeze(1)                     # the contacting foot
+          w_c = ct.float() / ct.float().sum(-1, keepdim=True).clamp(min=1.0)
+          est_cb = (w_c.unsqueeze(-1) * est_f).sum(dim=1)                # blend in double support
+          orc_a.append(torch.stack([est_c1, est_cb], dim=1).cpu())
+          single_a.append(single.cpu())
+          nct_a.append((ct.sum(-1) == 0).cpu())
+          est_a.append(est.cpu())
+          true_a.append(robot.root_link_lin_vel_b.clone().cpu())
+          keep_a.append((~dones.bool()).cpu())           # reset jumps the FK difference
+          ph = getattr(uenv, "hrl_phase", None)
+          phase_a.append(ph.clone().cpu() if ph is not None else torch.zeros(n_envs))
+          spd_a.append(robot.root_link_lin_vel_b[:, :2].norm(dim=-1).cpu())
+          prev_p = p
+
+    # Window view BEFORE masking: the HL fires every c steps and can average the c
+    # readings it has seen. [T, B, 3] -> [W, c, B, 3].
+    est_t = torch.stack(est_a); true_t = torch.stack(true_a); keep_t = torch.stack(keep_a)
+    fast_t = torch.stack(fast_a)
+    n_w = est_t.shape[0] // c
+    if n_w > 0:
+      ew = est_t[: n_w * c].view(n_w, c, -1, 3)
+      tw = true_t[: n_w * c].view(n_w, c, -1, 3)
+      kw = keep_t[: n_w * c].view(n_w, c, -1).all(dim=1)          # [W, B] clean windows
+      fw = fast_t[: n_w * c].view(n_w, c, -1, 3)
+      fast_win = fw.mean(dim=1)[kw]       # physics-rate estimate, then c-averaged
+      est_win = ew.mean(dim=1)[kw]        # averaged estimate the HL would consume
+      true_win = tw.mean(dim=1)[kw]       # window-mean truth (filter quality)
+      true_fire = tw[:, -1][kw]           # truth at fire time (what the HL needs)
+    else:
+      est_win = true_win = true_fire = fast_win = torch.zeros(0, 3)
+
+    est = torch.cat(est_a); true = torch.cat(true_a)
+    keep = torch.cat(keep_a); phase = torch.cat(phase_a); spd = torch.cat(spd_a)
+    orc = torch.cat(orc_a); single = torch.cat(single_a); nct = torch.cat(nct_a)
+    fast = torch.cat(fast_a)[keep]
+    est, true, phase, spd = est[keep], true[keep], phase[keep], spd[keep]
+    orc, single, nct = orc[keep], single[keep], nct[keep]
+    err = est - true
+
+    def _rms(t):
+      return t.square().mean().sqrt().item()
+
+    print()
+    print("=" * 78)
+    print(f"  LEG-ODOMETRY VELOCITY BENCH | {cfg.check_leg_odometry} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | kept={int(keep.sum())}/{keep.numel()}")
+    print("  Estimator: stance-foot kinematics + gyro. No integration -> no drift.")
+    print("=" * 78)
+    print(f"  {'split':<22} {'vx':>9} {'vy':>9} {'vz':>9}")
+    print(f"  {'all steps':<22} " + " ".join(f"{_rms(err[:, j]):>9.4f}" for j in range(3)))
+    # Gait-phase split: leg odometry is worst at flight/impact, which is exactly when the
+    # HL may be firing -- a batch mean would hide it.
+    for lo, hi, name in ((0.0, 0.25, "phase 0.00-0.25"), (0.25, 0.5, "phase 0.25-0.50"),
+                         (0.5, 0.75, "phase 0.50-0.75"), (0.75, 1.0, "phase 0.75-1.00")):
+      m = (phase >= lo) & (phase < hi)
+      if m.any():
+        print(f"  {name:<22} " + " ".join(f"{_rms(err[m, j]):>9.4f}" for j in range(3)))
+    for lo, hi, name in ((0.0, 0.3, "speed <0.3 m/s"), (0.3, 0.8, "speed 0.3-0.8"),
+                         (0.8, 9.9, "speed >0.8")):
+      m = (spd >= lo) & (spd < hi)
+      if m.any():
+        print(f"  {name:<22} " + " ".join(f"{_rms(err[m, j]):>9.4f}" for j in range(3)))
+    print(f"  {'depth @physics rate':<22} "
+          + " ".join(f"{_rms(fast[:, j] - true[:, j]):>9.4f}" for j in range(3)))
+    print("  " + "-" * 74)
+    print(f"  {'ORACLE contact 1-foot':<22} "
+          + " ".join(f"{_rms(orc[:, 0, j] - true[:, j]):>9.4f}" for j in range(3)))
+    print(f"  {'ORACLE contact blend':<22} "
+          + " ".join(f"{_rms(orc[:, 1, j] - true[:, j]):>9.4f}" for j in range(3)))
+    m1 = single
+    print(f"  {'  ..single-support only':<22} "
+          + " ".join(f"{_rms(orc[m1, 0, j] - true[m1, j]):>9.4f}" for j in range(3))
+          + f"   ({100.0 * m1.float().mean():.0f}% of steps)")
+    print(f"  {'  ..double-support only':<22} "
+          + " ".join(f"{_rms(orc[~m1 & ~nct, 1, j] - true[~m1 & ~nct, j]):>9.4f}" for j in range(3))
+          + f"   ({100.0 * (~m1 & ~nct).float().mean():.0f}%)")
+    print(f"  {'  ..flight (no contact)':<22} "
+          + " ".join(f"{_rms(orc[nct, 1, j] - true[nct, j]):>9.4f}" for j in range(3))
+          + f"   ({100.0 * nct.float().mean():.0f}%)" if nct.any() else "")
+    print("  " + "-" * 74)
+    if est_win.numel():
+      ew_filt, ew_lag = est_win - true_win, est_win - true_fire
+      print(f"  {f'c={c} avg vs win-mean':<22} "
+            + " ".join(f"{_rms(ew_filt[:, j]):>9.4f}" for j in range(3))
+            + "   <- filter quality")
+      print(f"  {f'c={c} avg vs at-fire':<22} "
+            + " ".join(f"{_rms(ew_lag[:, j]):>9.4f}" for j in range(3))
+            + "   <- 50 Hz")
+      fw_lag = fast_win - true_fire
+      print(f"  {f'c={c} avg, PHYSICS rate':<22} "
+            + " ".join(f"{_rms(fw_lag[:, j]):>9.4f}" for j in range(3))
+            + "   <- what the HL consumes")
+    print("=" * 78)
+    gate = max(_rms(fw_lag[:, 0]), _rms(fw_lag[:, 1])) if est_win.numel() else float("nan")
+    print(f"  per-step RMS  max(vx,vy) = {max(_rms(err[:, 0]), _rms(err[:, 1])):.4f} m/s")
+    print(f"  gate (HL-consumed, c-averaged) = {gate:.4f} m/s")
+    out = {"gate_rms": round(gate, 6), "steps": cfg.check_leg_odometry,
+           "num_envs": n_envs, "eval_seeds": cfg.eval_seeds, "kept": int(keep.sum()),
+           "windows": int(est_win.shape[0])}
+    out["single_support_frac"] = round(single.float().mean().item(), 4)
+    out["flight_frac"] = round(nct.float().mean().item(), 4)
+    for j, ax in enumerate(("vx", "vy", "vz")):
+      out[f"fast_{ax}"] = round(_rms(fast[:, j] - true[:, j]), 6)
+      out[f"fastbias_{ax}"] = round((fast[:, j] - true[:, j]).mean().item(), 6)
+      if est_win.numel():
+        out[f"fasthl_{ax}"] = round(_rms(fw_lag[:, j]), 6)
+      out[f"orc_ct1_{ax}"] = round(_rms(orc[:, 0, j] - true[:, j]), 6)
+      out[f"orc_ctb_{ax}"] = round(_rms(orc[:, 1, j] - true[:, j]), 6)
+      out[f"rms_{ax}"] = round(_rms(err[:, j]), 6)
+      out[f"bias_{ax}"] = round(err[:, j].mean().item(), 6)
+      if est_win.numel():
+        out[f"filt_{ax}"] = round(_rms(ew_filt[:, j]), 6)
+        out[f"hlcons_{ax}"] = round(_rms(ew_lag[:, j]), 6)
+    print(f"[LEGODOM] {json.dumps(out)}")
+    env.close()
+    return
+
+  if cfg.check_vel_increment > 0:
+    import json
+    uenv = env.unwrapped
+    robot = uenv.scene["robot"].data
+    # Accelerometer + velocimeter share the `imu` site (h1_2.xml:236-238) and the site
+    # carries no rotation, so both read in the pelvis ORIENTATION frame -- but at a point
+    # 0.28 m above the pelvis ORIGIN whose velocity the goal space uses (goal_space.py:50).
+    # That lever arm (w x r) is why the site column is reported next to the pelvis one.
+    acc = uenv.scene["robot/imu_lin_acc"]
+    gyro = uenv.scene["robot/imu_ang_vel"]
+    vel_site = uenv.scene["robot/imu_lin_vel"]
+    # MuJoCo's accelerometer includes gravity like a real IMU (verified: raw z ~ +9.95
+    # against projected_gravity z ~ -0.996), so removal is a + proj_grav * |g|.
+    g_mag = float(torch.tensor(uenv.cfg.sim.mujoco.gravity).norm())
+    # The `imu` site sits on TORSO_LINK, behind the yaw-axis `torso_joint` whose anchor is
+    # the pelvis origin (h1_2.xml:138-145) -- NOT on the pelvis whose velocity the goal
+    # space uses. So pelvis <- torso is a pure Rz(psi) with coincident origins, and the
+    # site offset r is a constant in the TORSO frame. Both psi and the gyro are in
+    # LowState on hardware, so this correction is deployable:
+    #   v_pelvis_P = Rz(psi) * (v_site_T - w_T x r_T)
+    # Over a window only the INCREMENT of v_site_T is known (integrated accel), leaving an
+    # unmodellable [Rz(psi_i)-Rz(psi_0)] * v_site_T(t0) residual that needs absolute
+    # velocity. It is small only while the waist barely turns within the window; the RMS
+    # below INCLUDES it, so this rung is what hardware would actually achieve.
+    import mujoco
+    _sid = mujoco.mj_name2id(uenv.sim.mj_model, mujoco.mjtObj.mjOBJ_SITE, "robot/imu")
+    assert _sid >= 0, "imu site not found; the lever-arm rung needs its torso-frame offset"
+    r_T = torch.tensor(uenv.sim.mj_model.site_pos[_sid], device=env.device,
+                       dtype=torch.float32).expand(uenv.num_envs, 3)
+    _tj, _ = uenv.scene["robot"].find_joints([".*torso_joint.*"])
+    assert len(_tj) == 1, f"expected exactly one torso_joint, got {_tj}"
+    torso_idx = _tj[0]
+
+    def _rz(psi: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+      """Rotate v about z by psi (per-env). psi<0 gives the inverse."""
+      c_, s_ = torch.cos(psi).unsqueeze(-1), torch.sin(psi).unsqueeze(-1)
+      x, y, z = v[:, 0:1], v[:, 1:2], v[:, 2:3]
+      return torch.cat([c_ * x - s_ * y, s_ * x + c_ * y, z], dim=-1)
+    c = getattr(runner, "c", 8)
+    dt = uenv.step_dt
+    n_envs = uenv.num_envs
+    n_windows = cfg.check_vel_increment // c
+
+    # Physics-rate integration probe. The decimation loop calls metrics_manager.
+    # compute_substep() once per substep, right after scene.update refreshes sensordata
+    # (manager_based_rl_env.py:421-427) -- the only hook that sees the 200 Hz signal a real
+    # IMU publishes, vs the 50 Hz control rate the other rungs are stuck with. Tests whether
+    # the residual is aliased foot-impact transients rather than true estimator error.
+    dv_fast = torch.zeros(uenv.num_envs, 3, device=env.device)
+    _orig_substep = uenv.metrics_manager.compute_substep
+
+    def _substep_hook():
+      psi_s = robot.joint_pos[:, torso_idx]
+      dv_fast.add_((acc.data + _rz(-psi_s, robot.projected_gravity_b) * g_mag)
+                   * uenv.physics_dt)
+      _orig_substep()
+
+    uenv.metrics_manager.compute_substep = _substep_hook
+
+    # Per-(window, env) rows, accumulated across seeds.
+    err_a, keep_a, yaw_a = [], [], []
+    lever_a = []  # |site increment - pelvis increment|: the lever-arm share
+    with torch.inference_mode():
+      for seed_idx in range(cfg.eval_seeds):
+        torch.manual_seed(42 + seed_idx)
+        obs, _ = env.reset()
+        for _ in range(n_windows):
+          v0_root = robot.root_link_lin_vel_b.clone()
+          v0_site = vel_site.data.clone()
+          psi0 = robot.joint_pos[:, torso_idx].clone()
+          w0_T = gyro.data.clone()
+          dv_fast.zero_()  # in-place so the substep hook keeps writing the same buffer
+          dv_raw = torch.zeros_like(v0_root)
+          dv_grav = torch.zeros_like(v0_root)
+          dv_cor = torch.zeros_like(v0_root)
+          done_in_window = torch.zeros(n_envs, dtype=torch.bool, device=env.device)
+          yaw_abs = torch.zeros(n_envs, device=env.device)
+          for _ in range(c):
+            obs, _, dones, _ = env.step(policy(obs).to(env.device))
+            done_in_window |= dones.bool()
+            a = acc.data
+            psi = robot.joint_pos[:, torso_idx]
+            # Gravity must be removed in the TORSO frame the accelerometer reads in;
+            # projected_gravity_b is the PELVIS frame, so undo the waist yaw first.
+            a_g = a + _rz(-psi, robot.projected_gravity_b) * g_mag
+            w = robot.root_link_ang_vel_b
+            # d(v_b)/dt = a_b - w x v_b. The Coriolis rung uses the TRUE v_b, so it is the
+            # privileged floor (hardware has no absolute v), not a deployable variant.
+            dv_raw = dv_raw + a * dt
+            dv_grav = dv_grav + a_g * dt
+            dv_cor = dv_cor + (a_g - torch.cross(w, robot.root_link_lin_vel_b, dim=-1)) * dt
+            yaw_abs = yaw_abs + w[:, 2].abs() / c
+          true_root = robot.root_link_lin_vel_b - v0_root
+          true_site = vel_site.data - v0_site
+          # Deployable rung: pelvis increment from the integrated torso-site increment,
+          # the gyro and the waist encoder (all present in LowState). Nothing privileged.
+          psi_e, w_e = robot.joint_pos[:, torso_idx], gyro.data
+          lev = torch.cross(w_e, r_T, dim=-1)
+          lev0 = _rz(psi0, torch.cross(w0_T, r_T, dim=-1))
+          dv_waist = _rz(psi_e, dv_grav - lev) + lev0
+          dv_waist_fast = _rz(psi_e, dv_fast - lev) + lev0
+          err_a.append(torch.stack([
+            dv_raw - true_root, dv_grav - true_root, dv_cor - true_root,
+            dv_grav - true_site, dv_waist - true_root, dv_waist_fast - true_root,
+          ], dim=1).cpu())                      # [B, 6 rungs, 3 axes]
+          lever_a.append((true_site - true_root).cpu())
+          keep_a.append((~done_in_window).cpu())  # drop reset-contaminated windows
+          yaw_a.append(yaw_abs.cpu())
+
+    err = torch.cat(err_a)      # [W, 4, 3]
+    lever = torch.cat(lever_a)  # [W, 3]
+    keep = torch.cat(keep_a)
+    yaw = torch.cat(yaw_a)
+    err, lever, yaw = err[keep], lever[keep], yaw[keep]
+    rungs = ("raw (no grav)", "grav-removed", "+coriolis(true v)", "grav vs SITE v",
+             "waist-corr @50Hz", "waist-corr @200Hz")
+    axes = ("vx", "vy", "vz")
+
+    def _rms(t):  # t: [W] -> scalar RMS
+      return t.square().mean().sqrt().item()
+
+    print()
+    print("=" * 78)
+    print(f"  IMU VELOCITY-INCREMENT BENCH | {cfg.check_vel_increment} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | c={c} window={c * dt:.3f}s")
+    print(f"  windows kept={int(keep.sum())}/{keep.numel()} | RMS error (m/s) vs the true "
+          f"within-window increment")
+    print("=" * 78)
+    print(f"  {'reconstruction':<20} {'vx':>9} {'vy':>9} {'vz':>9}")
+    for i, name in enumerate(rungs):
+      print(f"  {name:<20} " + " ".join(f"{_rms(err[:, i, j]):>9.4f}" for j in range(3)))
+    print("  " + "-" * 74)
+    print(f"  {'lever arm (site-pelvis)':<20} "
+          + " ".join(f"{_rms(lever[:, j]):>9.4f}" for j in range(3)))
+    # Yaw-rate split: Coriolis and lever-arm both scale with |w|, so a gap here localizes them.
+    hi = yaw > yaw.median()
+    print(f"  {'waist-corr |w|<med':<20} "
+          + " ".join(f"{_rms(err[~hi, 4, j]):>9.4f}" for j in range(3)))
+    print(f"  {'waist-corr |w|>med':<20} "
+          + " ".join(f"{_rms(err[hi, 4, j]):>9.4f}" for j in range(3)))
+    print("=" * 78)
+
+    # Verdict on the horizontal axes the goal channel carries, from the DEPLOYABLE rung.
+    # That is the @200Hz one: the deploy integrator belongs in State_RLHRL::run(), the 1 kHz
+    # control loop, NOT in the 50 Hz policy_step() -- and 200 Hz is a conservative stand-in
+    # for 1 kHz. The 50 Hz rung is kept only to show how much of the residual is aliasing.
+    # The other rungs are diagnostics; two of them use privileged state no hardware has.
+    gate = max(_rms(err[:, 5, 0]), _rms(err[:, 5, 1]))
+    verdict = ("SHIP (no retrain)" if gate <= 0.05 else
+               "STATE_NOISE DR retrain" if gate <= 0.15 else "BLIND-LL SWEEP")
+    print(f"  gate = max(vx, vy) waist-corrected = {gate:.4f} m/s  ->  {verdict}")
+    print(f"  (bands: <=0.05 ship | 0.05-0.15 DR retrain | >0.15 blind sweep)")
+    out = {"gate_rms": round(gate, 6), "verdict": verdict, "window_s": round(c * dt, 4),
+           "windows": int(keep.sum()), "steps": cfg.check_vel_increment,
+           "num_envs": n_envs, "eval_seeds": cfg.eval_seeds}
+    for i, name in enumerate(("raw", "grav", "cor", "grav_site", "waist", "waist_fast")):
+      for j, ax in enumerate(axes):
+        out[f"{name}_{ax}"] = round(_rms(err[:, i, j]), 6)
+    for j, ax in enumerate(axes):
+      out[f"lever_{ax}"] = round(_rms(lever[:, j]), 6)
+    print(f"[VELINC] {json.dumps(out)}")
+    env.close()
+    return
+
+  if cfg.probe_lean > 0:
+    import json
+    uenv = env.unwrapped
+    entity = uenv.scene["robot"]
+    robot = entity.data
+    biases = [float(x) for x in cfg.probe_lean_bias.split(",")]
+    groups = [g.strip() for g in cfg.probe_lean_joints.split(",")]
+    pats = {"ankle_pitch": [".*ankle_pitch.*"], "knee": [".*knee.*"],
+            "hip_pitch": [".*hip_pitch.*"],
+            "all": [".*hip_pitch.*", ".*knee.*", ".*ankle_pitch.*"]}
+    # "all" spreads the swept value over the 3 sagittal joints so the chain sum matches it.
+    n_chain = {"all": 3}
+
+    print("=" * 78)
+    print(f"  BACKWARD-LEAN SENSITIVITY PROBE | {cfg.probe_lean} steps x {uenv.num_envs} "
+          f"envs x {cfg.eval_seeds} seed(s)")
+    print("  pitch < 0 = leaning BACKWARD (same sign as the flight recorder's p_IMU).")
+    print("  bias b <=> deploy joint_offset -b. Reference: real stand p_IMU = -0.0668 rad.")
+    print("=" * 78)
+
+    leg_ids, _ = entity.find_joints([".*hip.*", ".*knee.*", ".*ankle.*"], preserve_order=False)
+    leg_ids = torch.as_tensor(sorted(leg_ids), device=env.device)
+
+    def rollout(ids, per_joint):
+      """One condition -> (steady-state pitch, mean leg joint speed, mean action rate),
+      each averaged over the last third of the rollout and over seeds."""
+      out = []
+      for seed_idx in range(cfg.eval_seeds):
+        torch.manual_seed(42 + seed_idx)
+        with torch.inference_mode():
+          obs, _ = env.reset()
+          # After reset: encoder_bias is a startup event, so this overwrite is the value
+          # that stands for the whole rollout.
+          robot.encoder_bias[:] = 0.0
+          if ids is not None:
+            robot.encoder_bias[:, ids] = per_joint
+          tail, dq, ar = [], [], []
+          prev = None
+          for step_i in range(cfg.probe_lean):
+            act = policy(obs)
+            obs, _, _, _ = env.step(act.to(env.device))
+            if step_i >= (2 * cfg.probe_lean) // 3:  # steady state = last third
+              g = robot.projected_gravity_b
+              tail.append(torch.atan2(g[:, 0], -g[:, 2]).mean().item())
+              dq.append(robot.joint_vel[:, leg_ids].abs().mean().item())
+              if prev is not None:
+                ar.append((act - prev).norm(dim=-1).mean().item())
+            prev = act.clone()
+        n = max(len(tail), 1)
+        out.append((sum(tail) / n, sum(dq) / n, sum(ar) / max(len(ar), 1)))
+      k = len(out)
+      mean = [sum(o[i] for o in out) / k for i in range(3)]
+      sd = (sum((o[0] - mean[0]) ** 2 for o in out) / k) ** 0.5
+      return mean[0], sd, mean[1], mean[2]
+
+    rows = []
+    if cfg.probe_gravity_noise:
+      # Gravity-corruption sweep (ADR-0006 discriminator). The obs manager reads
+      # `term_cfg.noise` live every step, so mutating it here takes effect immediately.
+      from mjlab.utils.noise.noise_cfg import UniformNoiseCfg
+      om = uenv.observation_manager
+      gterm = next(
+        c for n, c in zip(om.active_terms["actor"],
+                          om._group_obs_term_cfgs["actor"], strict=False)  # noqa: SLF001
+        if n == "projected_gravity"
+      )
+      base = gterm.noise
+      assert base is not None, "projected_gravity has no noise term to sweep"
+      print("  MODE: projected_gravity corruption (encoder held CLEAN). 0.05 = training "
+            "default = control.")
+      print("-" * 78)
+      for nz in [float(x) for x in cfg.probe_gravity_noise.split(",")]:
+        gterm.noise = UniformNoiseCfg(n_min=-nz, n_max=nz, operation=base.operation)
+        p, s, dq, ar = rollout(None, 0.0)
+        rows.append({"grav_noise": nz, "pitch": p, "pitch_std": s, "leg_dq": dq,
+                     "action_rate": ar})
+        print(f"  grav_noise +-{nz:<6.3f} -> pitch {p:+.4f} +- {s:.4f} rad "
+              f"({math.degrees(p):+6.2f} deg)  leg|dq| {dq:6.3f}  act_rate {ar:6.3f}")
+      gterm.noise = base
+    else:
+      for grp in groups:
+        ids, _ = entity.find_joints(pats[grp], preserve_order=False)
+        ids = torch.as_tensor(sorted(ids), device=env.device)
+        for b in biases:
+          per_joint = b / n_chain.get(grp, 1)
+          m, s, dq, ar = rollout(ids, per_joint)
+          rows.append({"group": grp, "bias": b, "per_joint": per_joint,
+                       "joint_offset": -b, "pitch": m, "pitch_std": s, "leg_dq": dq,
+                       "action_rate": ar})
+          print(f"  {grp:<11} bias {b:+.4f} (per-joint {per_joint:+.4f}, "
+                f"joint_offset {-b:+.4f}) -> pitch {m:+.4f} +- {s:.4f} rad "
+                f"({math.degrees(m):+.2f} deg)  leg|dq| {dq:5.3f}  act {ar:5.3f}")
+
+    print("-" * 78)
+    if cfg.probe_gravity_noise:
+      # Degradation relative to the training-default noise: the quantity to compare
+      # BETWEEN policies. A policy that leans on the IMU should degrade faster.
+      ctl = min(rows, key=lambda r: abs(r["grav_noise"] - 0.05))
+      print(f"  degradation vs the +-{ctl['grav_noise']:.3f} control "
+            f"(leg|dq| {ctl['leg_dq']:.3f}, act {ctl['action_rate']:.3f}):")
+      for r in rows:
+        print(f"    grav_noise +-{r['grav_noise']:<6.3f} leg|dq| x{r['leg_dq']/ctl['leg_dq']:5.2f}  "
+              f"act x{r['action_rate']/ctl['action_rate']:5.2f}  "
+              f"pitch drift {math.degrees(r['pitch']-ctl['pitch']):+6.2f} deg")
+      print("=" * 78)
+      print(f"[LEANPROBE] {json.dumps({'label': str(resume_path) if resume_path else 'unknown', 'mode': 'gravity', 'rows': rows})}")
+      env.close()
+      return
+    print("  sensitivity d(pitch)/d(bias), least-squares through the swept points:")
+    for grp in groups:
+      pts = [(r["bias"], r["pitch"]) for r in rows if r["group"] == grp]
+      if len(pts) < 2:
+        continue
+      mb = sum(p[0] for p in pts) / len(pts)
+      mp = sum(p[1] for p in pts) / len(pts)
+      den = sum((p[0] - mb) ** 2 for p in pts)
+      slope = sum((p[0] - mb) * (p[1] - mp) for p in pts) / den if den else float("nan")
+      # What chain bias explains the real lean? Measured as a DELTA from this policy's own
+      # unbiased stand, which is not itself at 0 (the sim policy has its own small offset).
+      p0 = next((p[1] for p in pts if p[0] == 0.0), mp - slope * mb)
+      need = (-0.0668 - p0) / slope if slope else float("nan")
+      print(f"    {grp:<11} d(pitch)/d(bias) = {slope:+7.3f} rad/rad  "
+            f"=> bias explaining the full -0.0668 rad lean: {need:+.4f} rad "
+            f"({math.degrees(need):+.2f} deg)")
+    print("=" * 78)
+    print(f"[LEANPROBE] {json.dumps({'label': str(resume_path) if resume_path else 'unknown', 'rows': rows})}")
     env.close()
     return
 

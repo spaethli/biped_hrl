@@ -24,6 +24,7 @@ RW = REPO / "src/tasks/velocity/mdp/rewards.py"
 HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
 YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy.yaml"
+REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy_real.yaml"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -111,6 +112,28 @@ MUTATIONS = [
   ("deploy cadence range drifts from agent.yaml (cadence silently rescaled)", YML,
    "cadence_period_range: [0.35, 1.0]", "cadence_period_range: [0.35, 1.3]",
    "test_deploy_cadence_period_range_matches_training"),
+
+  ("joint_offset (ADR-0006 Spec B) truncated to 26 entries", REAL_YML,
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0]",
+   "test_joint_offset_is_27_long_and_inert_when_absent"),
+
+  ("joint_offset (ADR-0006) lands on the waist slot — a slot typo shifting the held pose",
+   REAL_YML,
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0.0317, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
+   "test_joint_offset_touches_only_leg_joints"),
+
+  ("joint_offset (ADR-0006) decimal slip: 0.12 rad (6.9 deg) instead of 0.012", REAL_YML,
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
+   "joint_offset: [0,0.12,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
+   "test_joint_offset_magnitude_is_physically_sane"),
+
+  ("joint_offset (ADR-0006 Spec B) leaks into a sim config", YML,
+   "# keep their old yaml unchanged.\nhrl:",
+   "# keep their old yaml unchanged.\n"
+   "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]\nhrl:",
+   "test_joint_offset_absent_from_sim_configs"),
 ]
 
 

@@ -51,6 +51,11 @@ int main(int argc, char** argv)
     init_fsm_state();
 
     FSMState::lowcmd->msg_.mode_machine() = 6;
+    // H1-2's ankle is a PARALLEL A/B mechanism: indices 4/5 (and 10/11) mean ankle
+    // pitch/roll in PR mode and motor B/A in AB mode. We command pitch/roll, so PR is
+    // required. Set explicitly -- we were previously relying on the IDL default
+    // (mode_pr_ = 0 == PR), which is not a contract (ADR-0006 Spec C).
+    FSMState::lowcmd->msg_.mode_pr() = 0;  // PR
     if(!FSMState::lowcmd->check_mode_machine(FSMState::lowstate)) {
         spdlog::critical("Unmatched robot type.");
         exit(-1);

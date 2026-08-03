@@ -5,6 +5,60 @@ Reuses the shared HRL machinery in `.claude/docs/hrl-infra.md` (co-train loop, g
 space, warm-start, reward decomp, ONNX export) — read that first; this doc only
 describes what A2 *adds* on top of A1.
 
+## Hardware motivation (measured 2026-07-31 → 2026-08-03)
+
+A2's adaptation module is usually motivated from the literature. On this robot it is
+motivated by **two independent hardware results**, each of which rules out one of the
+two obvious alternatives to online estimation. Both came out of the WL-B backward-lean
+investigation (`docs/adr/0006`), where the H1-2 stands 5-7 deg pitched backward while
+sim stands upright.
+
+**(1) A memoryless policy cannot exploit domain randomisation of a hidden parameter.**
+The encoder-bias DR was already active (±0.86 deg/joint) but only its actuation half was
+wired; flipping the observation half on (`biased=True`, so encoders and gravity disagree
+exactly as they do on hardware) and retraining A0 at the deployed protocol *did* work in
+sim — the policy's static-offset gain fell from 1.263 to 0.772, crossing from amplifying
+a calibration error to attenuating it, at no benchmark cost. **On hardware it failed and
+made things worse**: no lean improvement (0.2-0.3 deg, inside instrument resolution,
+against 1.36 deg predicted) and **4.3x the joint motion at zero command** (still-fraction
+76.0% vs the keeper's 91.6%), with visible swinging into steady state and stabilising
+steps. The mechanism: with `history_length=1` nothing in a single observation identifies
+the bias, so the only strategy available to the policy is to **down-weight `joint_pos`
+and lean harder on `projected_gravity`**. That is free against sim's gravity (ground-truth
+quaternion, no lag, no linear-acceleration coupling) and expensive against a real IMU,
+which has all three. **This was measured, not just inferred**: corrupting only the
+`projected_gravity` observation (encoder held clean) leaves the biased-obs policy
+**1.2-2.4x more agitated than the keeper at every noise level, including the training
+default** — 1.80x leg joint speed and 1.45x action rate at ±0.05, where nothing is
+out-of-distribution for either. The standard benchmark missed it because play mode
+disables observation corruption entirely, which is the one condition where the two are
+equal; a real IMU always has noise. **The policy traded encoder-error sensitivity for
+IMU-error sensitivity, and on this robot the IMU is the worse of the two.** Robustness
+training cannot substitute for identification when the policy has no way to identify.
+
+**(2) Static calibration cannot fix it either, because the parameter is not constant.**
+A deploy-side `joint_offset` sweep (chain-sum over hip_pitch/knee/ankle_pitch) confirmed
+the encoder channel is the dominant lever on stand pitch — the lean moved monotonically
+from **+5.5 deg backward at zero offset to −4.0 deg forward at 0.075 rad**, crossing
+upright at ~0.040 rad. But **repeating the identical offsets in a second session gave a
+2.7-4.0 deg different pitch**, and the null point moved to 0.054-0.076 rad. The
+zero-offset baseline itself ranges 5.5-6.9 deg across four sessions. A fixed calibration
+constant is therefore right for one session and 1-2 deg wrong for the next.
+
+**Together these are the RMA argument, measured rather than assumed:** the latent that
+governs this robot's posture is *not observable from a single frame* and *not constant
+across sessions*, so neither DR-for-robustness nor offline calibration is sufficient. What
+remains is **online estimation of the extrinsics from a short history of proprioception** —
+which is exactly what the Phase-2 adaptation module does. A2 is thus the first architecture
+in this thesis with a hardware-measured reason to exist, independent of its hierarchy.
+
+*Caveats, stated for honesty:* the sweep is n=2 sessions, and "the encoder zeros shift
+between sessions" is the leading but not the only reading (setup/placement differences and
+thermal/mechanical settling are not excluded). Separately, **stepping moves the reading
+0.5-1.3 deg toward upright within a session**, consistent with the independently measured
+stillness-vs-lean correlation (r = −0.96) — so every stand-pitch number must be reported
+with its stillness, and cross-policy pitch comparisons are not valid without it.
+
 ## 1. What A2 is
 
 A2 = **A1's HIRO hierarchy, unchanged, with A-RMA bolted onto the low level.** The

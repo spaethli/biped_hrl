@@ -23,6 +23,17 @@ LIMITS_H = DEPLOY / "include/h1_2_limits.h"
 HRL_YAML = DEPLOY / "config/policy/velocity_hrl/v0/params/deploy.yaml"
 ROBOT_XML = REPO / "src/assets/robots/unitree_h1_2/xmls/h1_2.xml"
 
+# ADR-0006 Spec B: joint_offset only ever belongs in the REAL-robot configs (hardware
+# encoder-zero calibration); the sim configs' encoders are perfect by construction.
+REAL_YAMLS = [
+  DEPLOY / "config/policy/velocity/v0/params/deploy_real.yaml",
+  DEPLOY / "config/policy/velocity_hrl/v0/params/deploy_real.yaml",
+]
+SIM_YAMLS = [
+  DEPLOY / "config/policy/velocity/v0/params/deploy.yaml",
+  HRL_YAML,
+]
+
 # The deploy YAML names observation terms after their mdp functions; training names them
 # after the quantity. Same term, same order — only the label differs.
 DEPLOY_TO_TRAINING_OBS = {
@@ -110,6 +121,66 @@ def test_every_actuated_joint_has_a_deploy_limit(limits_header, model_ranges):
   names, _ = limits_header
   covered = {_joint_xml_name(n) for n in names}
   assert covered == set(model_ranges), f"unprotected joints: {set(model_ranges) - covered}"
+
+
+# --- ADR-0006 Spec B: joint_offset (encoder-zero correction) -----------------
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_joint_offset_is_27_long_and_inert_when_absent(yaml_path):
+  """Absent must mean a dead no-op (unitree_articulation.h and State_RL*.cpp both fall
+  back to a 27-zero vector), and a present vector must be exactly 27 long — a short one
+  would leave the tail joints uncorrected on one side of the read/write pair, which is
+  precisely the sensor-vs-command inconsistency Spec B exists to remove."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  offset = cfg.get("joint_offset", [0.0] * 27)
+  assert len(offset) == 27
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_joint_offset_touches_only_leg_joints(yaml_path):
+  """A non-zero joint_offset is a legitimate per-session encoder calibration (ADR-0006,
+  kept from 2026-08-03 because it improves posture and walk stability, not just pitch).
+  But only the 12 leg slots are ever calibrated: the waist and arms are held at
+  default_joint_pos, so a non-zero entry there is a slot typo that silently shifts the
+  held pose instead of correcting an encoder."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  offset = cfg.get("joint_offset", [0.0] * 27)
+  assert all(v == 0.0 for v in offset[12:]), f"offset outside the legs: {offset[12:]}"
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_joint_offset_magnitude_is_physically_sane(yaml_path):
+  """Guards a decimal slip. Measured calibration values are <= 0.025 rad/joint (the
+  ADR-0006 sweep), so 0.05 rad (2.9 deg) leaves 2x headroom over anything observed; a
+  slipped 0.12-for-0.012 is 6.9 deg on one joint, enough to topple the robot on the first
+  step. The required value also drifts between sessions, so a stale-but-plausible offset
+  must stay recoverable — an implausible one must not reach the robot at all."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  offset = cfg.get("joint_offset", [0.0] * 27)
+  assert all(abs(v) <= 0.05 for v in offset), f"implausible joint_offset: {offset}"
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_joint_offset_is_not_a_policy_space_constant(yaml_path):
+  """joint_offset is hardware calibration, not policy-space: it must never collapse onto
+  default_joint_pos or the action offset (both trained constants), which would silently
+  mean a Spec B edit also moved the trained pose/action mapping."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  if "joint_offset" not in cfg:
+    pytest.skip("joint_offset not set in this config")
+  offset = cfg["joint_offset"]
+  assert len(offset) == 27
+  assert offset != cfg["default_joint_pos"]
+  assert offset != cfg["actions"]["JointPositionAction"]["offset"]
+
+
+@pytest.mark.parametrize("yaml_path", SIM_YAMLS)
+def test_joint_offset_absent_from_sim_configs(yaml_path):
+  """Sim encoders are perfect by construction (ADR-0006 Spec B rationale) -- joint_offset
+  belongs only in deploy_real.yaml, never in the keyboard/sim deploy.yaml twins."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  assert "joint_offset" not in cfg
 
 
 # --- observation layout: the warm-start premise ------------------------------

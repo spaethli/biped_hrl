@@ -137,6 +137,19 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   fall_rate, action_rate, orient_dev, height_dev) + `[BENCH] {json}`, multi-seed mean±std.
   **Use `fall_rate`, NOT `ep_len`, for survival** (`episode_length_s=1e9`, no resets in play).
   A0 baseline 0.09/0.11/0.10. Strips exploration noise → judge HLs by this, not training err.
+- **Lean / calibration-sensitivity probe** (ADR-0006, arch-agnostic): `play.py
+  --checkpoint-file <pt> --num-envs 64 --eval-seeds 2 --eval-cmd-vx 0 --probe-lean 400`
+  → steady-state base pitch + leg joint speed + action rate at a held zero command, per
+  swept perturbation, with `[LEANPROBE] {json}`. Two modes: `--probe-lean-bias/-joints`
+  sweeps a **deterministic `encoder_bias`** on a leg group (d(lean)/d(calibration error),
+  superposition across joints holds to 2.3%); `--probe-gravity-noise` instead corrupts the
+  **`projected_gravity` observation** with the encoder clean, which separates IMU-dependence
+  from encoder-OOD. Both force `joint_pos` to `biased=True` for the eval — **without that
+  flag mjlab shows the policy the TRUE joint angle, so the bias is trivially nulled and the
+  probe measures nothing.** The gravity mode also re-enables `enable_corruption` (play mode
+  strips it) and zeroes every other actor term's noise, so gravity is the only varying
+  channel. **Judge policies on ABSOLUTE `leg|dq|`/`act_rate`, not the ratio to their own
+  control** — a policy with a worse baseline flatters itself in ratio terms.
 - **Goal probe** (A1 HL-vs-LL error decomposition): `play.py --checkpoint-file <pt>
   --diagnose-goals 600 --eval-seeds 2 --num-envs 64` → per-window `(command−achieved) =
   (command−V*) [HL goal err] + (V*−achieved) [LL reach err]`, raw `|g|` + saturation frac,
@@ -153,6 +166,36 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   WL-C). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
   frozen `hrl_phase` clock** (the loop didn't advance it; de-entrained LL ⇒ flattering) —
   fixed to mirror `get_inference_policy`.
+- **IMU velocity-increment bench** (deploy feasibility, 2026-08-01): `play.py
+  --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` → per-axis
+  RMS error of an IMU-only reconstruction of the within-window base-velocity increment, over
+  a rung ladder (raw / gravity-removed / +Coriolis / vs IMU site / waist-corrected @50Hz /
+  @200Hz) + `[VELINC] {json}`, with a verdict against the ≤0.05 / 0.05–0.15 / >0.15 m/s bands.
+  **The mechanism it exists to exploit — load-bearing for every deploy of a `delta`-mode
+  hierarchy:** the LL goal obs is `V*−s_i = scale·g − (s_i−s_t0)`, so **absolute base velocity
+  cancels**. Deploy needs only the *increment* since window start, which resets every `c` steps
+  (0.16 s at c=8) so drift cannot accumulate — which is why A1 is deployable despite E1 proving
+  the onboard absolute estimator absent. Two corrections the bench forced: gravity removal must
+  happen in the **torso** frame (the `imu` site is on `torso_link` behind the yaw `torso_joint`,
+  NOT the pelvis whose velocity the goal space uses — `h1_2.xml:138-145`), and the residual is
+  dominated by **sampling rate**, so the deploy integrator belongs in `State_RLHRL::run()` (1 kHz),
+  never in `policy_step()` (50 Hz). Numbers + verdict → the A1a deploy journal (research KB), 2026-08-01.
+- **Leg-odometry velocity bench** (the HL's ABSOLUTE velocity, which `delta` does NOT cancel):
+  `play.py --check-leg-odometry 480 --num-envs 64 --eval-seeds 2` → `[LEGODOM] {json}`.
+  `v_pelvis_b = -d(p_foot_b)/dt - w_b x p_foot_b` from the stance foot (gravity-projected
+  lower foot; `LowState` has no foot force sensor), scored vs truth with phase/speed splits,
+  a physics-rate rung and contact-ORACLE reference rungs. Ruled out by it: `tau_est` load
+  stance (net regression) and contact detection in general (a perfect contact signal buys
+  ~nothing — 85% of steps are single-support, where there is no attribution ambiguity).
+- ⚠ **Rate gotcha, cost 2-4x and flipped two verdicts on 2026-08-03: never finite-difference
+  or integrate a fast signal at the 50 Hz control rate.** Both `[VELINC]` and `[LEGODOM]`
+  first measured at `step_dt` and read 2-4x worse than at the physics rate. Deploy runs these
+  in `State_RLHRL::run()` (1 kHz), so benches must too — hook
+  `metrics_manager.compute_substep()`, which the decimation loop calls per substep
+  (`manager_based_rl_env.py:421-427`).
+- **`find_joints`/`find_sites` return MODEL order, not query order** (`preserve_order=False`
+  by default, `mjlab/entity/entity.py:505,549`). Pass `preserve_order=True` and assert the
+  names whenever index order is load-bearing (e.g. pairing per-leg joints with foot sites).
 - **Play structure-restore:** play.py restores structure keys (`c, goal_components,
   goal_weights, hl_algorithm, hl_ppo, hl_td3, relabeling, gamma_hi, hl_target_mode, hl_obs_vel,
   hl_cadence, cadence_period_range, ll_cadence_coef, hl_cot_coef, hl_cadence_source,

@@ -29,10 +29,12 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     const char* cfg_env = std::getenv("H1_2_DEPLOY_CFG");
     std::string deploy_cfg = cfg_env ? cfg_env : "deploy.yaml";
     spdlog::info("Using deploy config: {}", deploy_cfg);
-    env = std::make_unique<isaaclab::ManagerBasedRLEnv>(
-        YAML::LoadFile(policy_dir / "params" / deploy_cfg),
-        std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate)
-    );
+    YAML::Node deploy_yaml = YAML::LoadFile(policy_dir / "params" / deploy_cfg);
+    auto articulation = std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate);
+    // ADR-0006 Spec B: optional per-joint encoder-zero correction, absent = 27 zeros (no-op).
+    if (deploy_yaml["joint_offset"])
+        articulation->joint_offset = deploy_yaml["joint_offset"].as<std::vector<float>>();
+    env = std::make_unique<isaaclab::ManagerBasedRLEnv>(deploy_yaml, articulation);
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
 
     this->registered_checks.emplace_back(
@@ -51,6 +53,13 @@ void State_RLBase::run()
     // instead of the policy action (upper body held; obs still see all joints).
     static const auto hold_ids = env->cfg["hold_joint_ids"]
         ? env->cfg["hold_joint_ids"].as<std::vector<int>>() : std::vector<int>{};
+
+    // ADR-0006 Spec B: same per-joint encoder-zero correction the articulation applied on
+    // read (unitree_articulation.h). q_cmd below is in TRUE joint coordinates; convert back
+    // to reported coordinates right before the wire write, AFTER the safety clamp, so the
+    // clamp keeps protecting in the coordinates the firmware itself compares against.
+    static const auto joint_offset = env->cfg["joint_offset"]
+        ? env->cfg["joint_offset"].as<std::vector<float>>() : std::vector<float>{};
 
 #if SAFETY_FILTER
     // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
@@ -115,7 +124,8 @@ void State_RLBase::run()
         }
         if (std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end())
             q_cmd = env->robot->data.default_joint_pos[i];
-        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
+        const float offset = (i < (int)joint_offset.size()) ? joint_offset[i] : 0.0f;
+        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd - offset;
     }
     joint_hold = any_clamp;  // recorded as trig_joint in the flight log (no hold effect)
 
@@ -178,7 +188,9 @@ void State_RLBase::run()
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {
         int jid = (int)env->robot->data.joint_ids_map[i];
         bool held = std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end();
-        lowcmd->msg_.motor_cmd()[jid].q() = held ? env->robot->data.default_joint_pos[i] : action[i];
+        float q_cmd = held ? env->robot->data.default_joint_pos[i] : action[i];
+        const float offset = (i < (int)joint_offset.size()) ? joint_offset[i] : 0.0f;
+        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd - offset;
     }
 #endif
 }
