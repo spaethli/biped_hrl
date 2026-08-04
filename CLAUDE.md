@@ -27,6 +27,10 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   steady-state + `t90` numbers, and check the `[HOLDDIAG]` per-env split — batch means
   hide bimodal backwards modes): the random-command aggregate hides sustained-command
   failures (2026-07-13/15, `A1a_plan.md` tables e/f).
+- IMU velocity-increment bench (deploy feasibility): `python scripts/play.py <TaskID>
+  --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` — prints
+  `[VELINC] {json}`. `delta`-mode goal obs cancels absolute velocity, so deploy needs only the
+  within-window increment → `.claude/docs/hrl-infra.md`.
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2 --num-envs 64` (defaults to
   1 env without the flag; pre-2026-07-15 probes on cadence ckpts ran frozen-phase — see

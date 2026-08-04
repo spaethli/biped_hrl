@@ -32,6 +32,16 @@
 #   LL_ENERGY         float (default 0.0)          -> arm 4d; >0 tags _energyXpXX
 #   LL_JOINT_ACC      float (default 0.0)          -> WL-D 2026-07-24 joint-accel mirror;
 #                     >0 tags _jacc<val>
+#   LL_JOINT_LIMITS   float (default 0.0)          -> WL-D joint_pos_limits (soft-limit
+#                     crossing) mirror, the largest measured A1-vs-A0 reward-gap term
+#                     (~515x); >0 tags _jlimXpX
+#   LL_SOFT_LANDING   float (default 0.0)          -> WL-D soft_landing (first-contact
+#                     impact-force) mirror; >0 tags _softlandXpXXX
+#   LL_BODY_ANG_VEL   float (default 0.0)          -> WL-D body_angular_velocity_penalty
+#                     (torso xy ang-vel) mirror; >0 tags _bodyangvelXpXX
+#   POSTURE_ALL_JOINTS True|False (default False)  -> extends the LL posture anchor to
+#                     every joint instead of the arms+waist+hip-yaw/roll subset (closest
+#                     analog to A0's variable_posture); True tags _postureall
 #   LL_ACTION_RATE    float (default 0.02)          -> WL-D combo batch (2026-07-23)
 #                     "smoothness" lever / A0-mirror action-rate weight; != 0.02 tags
 #                     _arXpXX (A0's own action_rate_l2 weight is 0.05, vs A1's tuned 0.02
@@ -88,6 +98,8 @@
 #   sbatch --export=ALL,LL_PUSHOFF=0.5 train_h1_2_a1a_LL_rewards.sh
 #   # arm 10 (formulation B, the primary training arm):
 #   sbatch --export=ALL,LL_SYMMETRY=0.25 train_h1_2_a1a_LL_rewards.sh
+#   # all A0 rewards in the LL:
+#   sbatch --export=ALL,LL_ENERGY=0.05,LL_ACTION_RATE=0.05,LL_ANGMOM=0.025,LL_FOOTSLIP=0.25,LL_FOOTCLEAR=1.0,LL_STAND_STILL=1.0,LL_BODY_ANG_VEL=0.05,LL_SOFT_LANDING=1e-3,LL_JOINT_LIMITS=10.0,POSTURE_ALL_JOINTS=True train_h1_2_a1a_LL_rewards.sh
 
 eval "$($WORK/miniconda3/bin/conda shell.bash hook)"
 conda activate unitree_mjlab_h1_2_rl
@@ -114,6 +126,10 @@ LL_FOOTSLIP=${LL_FOOTSLIP:-0.0}
 LL_FOOTCLEAR=${LL_FOOTCLEAR:-0.0}
 LL_ENERGY=${LL_ENERGY:-0.0}
 LL_JOINT_ACC=${LL_JOINT_ACC:-0.0}
+LL_JOINT_LIMITS=${LL_JOINT_LIMITS:-0.0}
+LL_SOFT_LANDING=${LL_SOFT_LANDING:-0.0}
+LL_BODY_ANG_VEL=${LL_BODY_ANG_VEL:-0.0}
+POSTURE_ALL_JOINTS=${POSTURE_ALL_JOINTS:-False}
 LL_ACTION_RATE=${LL_ACTION_RATE:-0.02}
 ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
 LL_PITCHREF=${LL_PITCHREF:-0.0}
@@ -164,6 +180,21 @@ JA_FLAG=""; JA_TAG=""
 awk "BEGIN{exit !($LL_JOINT_ACC > 0)}" && JA_FLAG="--agent.ll-joint-acc-coef ${LL_JOINT_ACC}" \
   && JA_TAG="_jacc$(echo $LL_JOINT_ACC | tr '.' 'p')"
 
+# WL-D: joint_pos_limits mirror (the largest measured A1-vs-A0 reward-gap term).
+JL_FLAG=""; JL_TAG=""
+awk "BEGIN{exit !($LL_JOINT_LIMITS > 0)}" && JL_FLAG="--agent.ll-joint-limits-coef ${LL_JOINT_LIMITS}" \
+  && JL_TAG="_jlim$(echo $LL_JOINT_LIMITS | tr '.' 'p')"
+
+# WL-D: soft_landing mirror (first-contact impact-force penalty).
+SL_FLAG=""; SL_TAG=""
+awk "BEGIN{exit !($LL_SOFT_LANDING > 0)}" && SL_FLAG="--agent.ll-soft-landing-coef ${LL_SOFT_LANDING}" \
+  && SL_TAG="_softland$(echo $LL_SOFT_LANDING | tr '.' 'p')"
+
+# WL-D: body_angular_velocity_penalty mirror (torso xy angular velocity).
+BAV_FLAG=""; BAV_TAG=""
+awk "BEGIN{exit !($LL_BODY_ANG_VEL > 0)}" && BAV_FLAG="--agent.ll-body-ang-vel-coef ${LL_BODY_ANG_VEL}" \
+  && BAV_TAG="_bodyangvel$(echo $LL_BODY_ANG_VEL | tr '.' 'p')"
+
 # WL-D combo batch (2026-07-23): ll_action_rate_coef override (smoothness lever / A0
 # action-rate mirror). Default 0.02 is the rl_cfg default, so only tag on divergence.
 AR_FLAG=""; AR_TAG=""
@@ -174,6 +205,11 @@ awk "BEGIN{exit !($LL_ACTION_RATE != 0.02)}" && AR_FLAG="--agent.ll-action-rate-
 ANKLE_FLAG=""; ANKLE_TAG=""
 [[ "$ANKLE_ANCHOR" == "True" ]] && ANKLE_FLAG="--agent.ll-posture-anchor-ankle-roll True" \
   && ANKLE_TAG="_ankle"
+
+# WL-D: extend the LL posture anchor to every joint (supersedes the subset + ankle_roll).
+PAJ_FLAG=""; PAJ_TAG=""
+[[ "$POSTURE_ALL_JOINTS" == "True" ]] && PAJ_FLAG="--agent.ll-posture-all-joints True" \
+  && PAJ_TAG="_postureall"
 
 # Arm 6 (formulation A - see A1a_plan.md Arm 6): tagless at 0.0/off.
 PR_FLAG=""; PR_TAG=""
@@ -197,9 +233,9 @@ MIR_FLAG=""; MIR_TAG=""
 awk "BEGIN{exit !($LL_MIRROR > 0)}" && MIR_FLAG="--agent.ll-mirror-coef ${LL_MIRROR}" \
   && MIR_TAG="_mirror$(echo $LL_MIRROR | tr '.' 'p')"
 
-RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${JA_TAG}${AR_TAG}${ANKLE_TAG}${PR_TAG}${PO_TAG}${SYM_TAG}${MIR_TAG}_s${SEED}"
+RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${JA_TAG}${JL_TAG}${SL_TAG}${BAV_TAG}${AR_TAG}${ANKLE_TAG}${PAJ_TAG}${PR_TAG}${PO_TAG}${SYM_TAG}${MIR_TAG}_s${SEED}"
 
-echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
+echo "[a1a-ll] RUN=$RUN_NAME  cadence=${CAD_TAG}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  joint_limits=${LL_JOINT_LIMITS}  soft_landing=${LL_SOFT_LANDING}  body_ang_vel=${LL_BODY_ANG_VEL}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  posture_all_joints=${POSTURE_ALL_JOINTS}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
 
 python scripts/train.py Unitree-H1_2-Flat-A1 \
     --env.scene.num-envs ${NUM_ENVS} \
@@ -207,7 +243,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     --agent.seed ${SEED} \
     --agent.ll-cadence-coef ${LL_CADENCE_COEF} \
     $CAD_FLAG \
-    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $JA_FLAG $AR_FLAG $ANKLE_FLAG $PR_FLAG $PO_FLAG $SYM_FLAG $MIR_FLAG \
+    $SS_FLAG $AM_FLAG $FS_FLAG $FC_FLAG $EN_FLAG $JA_FLAG $JL_FLAG $SL_FLAG $BAV_FLAG $AR_FLAG $ANKLE_FLAG $PAJ_FLAG $PR_FLAG $PO_FLAG $SYM_FLAG $MIR_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all

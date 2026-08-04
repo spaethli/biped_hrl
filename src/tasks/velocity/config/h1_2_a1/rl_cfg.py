@@ -279,6 +279,17 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   from ``ll_posture_weights``'s ``ankle_roll`` entry (4.0 default — the joint's range is
   only +-15 deg, far narrower than the shoulders, so it needs much less pull). Off by
   default (byte-identical to pre-arm-5 behavior)."""
+  ll_posture_all_joints: bool = False
+  """WL-D: extends the LL posture anchor from the arms+waist+hip-yaw/roll subset (plus
+  ankle_roll if ``ll_posture_anchor_ankle_roll``) to EVERY joint - the closest available
+  analog to A0's ``pose``/``variable_posture`` term (A0's single largest reward, +0.835,
+  which pins ALL joints with per-joint speed-scheduled stds while A1 only anchors a
+  subset). Motivated by the 2026-07-28 action-rate decomposition finding that A1's excess
+  action rate is arms-heavy (arms share 0.304 vs A0's 0.115). When True this SUPERSEDES
+  both the subset list and ``ll_posture_anchor_ankle_roll`` (all joints already includes
+  ankle roll). ``ll_posture_weights`` still applies on top of whichever set is anchored;
+  unmatched joints stay at 1.0. False by default (byte-identical to pre-existing
+  behavior)."""
   ll_stand_still_coef: float = 0.0
   """WL-D arm 3 (2026-07-17): mirrors A0's ``stand_still`` term (joint deviation from
   default, gated ``|cmd| < command_threshold``) into the LL intrinsic - targets the
@@ -311,6 +322,23 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   A0, not just goal-stepping). The LL never sees this env term otherwise
   (``ll_task_reward_coef=0``). Start at A0's 2.5e-7; the LL intrinsic runs hotter than A0's
   task reward so it may read weak. 0 disables (byte-identical baseline)."""
+  ll_joint_limits_coef: float = 0.0
+  """WL-D: mirrors A0's ``joint_pos_limits`` (mjlab's soft-limit crossing penalty, A0
+  weight -10.0) into the LL intrinsic - the largest measured A1-vs-A0 episode-reward gap
+  in the whole reward set (A0 -0.00025 vs A1 -0.128, ~515x), consistent with the
+  documented deploy failure where A1a rides its joint stops far more of a bridge session
+  than A0. Uses the default asset_cfg (all joints), mirroring ``joint_acc_l2``'s call
+  style. 0 disables (byte-identical baseline)."""
+  ll_soft_landing_coef: float = 0.0
+  """WL-D: mirrors A0's ``soft_landing`` (first-contact impact-force penalty, A0 weight
+  -1e-3) into the LL intrinsic - targets the measured gap (A0 -0.024 vs A1 -0.085). Same
+  params A0 uses: sensor_name="feet_ground_contact", command_name="twist",
+  command_threshold=0.1. 0 disables."""
+  ll_body_ang_vel_coef: float = 0.0
+  """WL-D: mirrors A0's ``body_angular_velocity_penalty`` (torso xy angular velocity, A0
+  weight -0.05) into the LL intrinsic - targets the measured gap (A0 -0.0085 vs A1
+  -0.016). Resolved once against a torso_link asset_cfg (mirrors ``_foot_asset_cfg``'s
+  idiom). 0 disables."""
   ll_pitchref_coef: float = 0.0
   """WL-D arm 6, formulation A (2026-07-17, approved): heel-to-toe ankle roll-over
   phase-locking - matches ``ankle_pitch`` to a raised-cosine reference interpolated
@@ -394,13 +422,33 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   above, just applied to the wrong (ungated, direction-blind) power distribution."""
   ll_rollover_coef: float = 0.0
   """WL-D arm 6, formulation C: contact-sequence-based heel-to-toe push-off reward
-  (2026-07-24). Rewards the actual foot contact sequence (toe in contact AND heel
-  lifted) during terminal stance, directly measuring the "roll-over" defect rather than
-  joint angle. Formulations A/B only shaped ``ankle_pitch`` and empirically produced
-  simultaneous whole-foot liftoff despite correct angle rotation. Requires ``hl_cadence``."""
+  (2026-07-24, position-based redesign 2026-07-29). Rewards the actual foot contact
+  sequence (toe in contact AND heel lifted) during terminal stance, directly measuring
+  the "roll-over" defect rather than joint angle. Formulations A/B only shaped
+  ``ankle_pitch`` and empirically produced simultaneous whole-foot liftoff despite
+  correct angle rotation. Requires ``hl_cadence``.
+
+  **Redesigned 2026-07-29**: the original per-geom heel(foot1/2)/toe(foot5/6) grouping
+  was wrong - ``h1_2.xml`` shows those are capsules and 5 of the 7 sub-geoms per foot
+  each span the *entire* foot length (heel to near-toe), varying mainly in the
+  medial/lateral axis. That grouping's dominant learnable signal ended up being ankle
+  ROLL, not pitch (confirmed by replay: the trained checkpoint rolled the foot inward
+  rather than pitching it). Fixed by classifying each contact by its actual local
+  x-POSITION along the capsule (see ``mdp.heel_toe_rollover_contact`` and
+  ``ll_rollover_heel_x_max``/``ll_rollover_toe_x_min``) instead of by geom identity."""
   ll_rollover_w: float = 0.175
   """Terminal-stance window width (``phi in [1-w, 1)``) for formulation C, matching
   formulation B's window (0.175 = midpoint of the spec's 0.15-0.2 range)."""
+  ll_rollover_heel_x_max: float = -0.03
+  """Formulation C: a contact counts as "heel" if its position in the owning
+  ``ankle_roll_link``'s local frame has x below this. The foot's collision capsules
+  span local x in [-0.08 (heel), +0.17 (toe tip)] (``h1_2.xml``); -0.03 sits solidly in
+  the rear third, leaving a neutral midfoot band before the toe threshold. Free knob,
+  not yet probe-measured against real contact-position distributions."""
+  ll_rollover_toe_x_min: float = 0.08
+  """Formulation C: a contact counts as "toe" if its local x exceeds this - past the
+  midfoot, into the region foot1/foot7 (the two short, toe-only capsules) always occupy
+  when in contact. Free knob, not yet probe-measured."""
   ll_symmetry_coef: float = 0.0
   """WL-D arm 10, formulation B (2026-07-20, primary training arm): step-time
   left/right symmetry index penalty, ``r = exp(-SI^2/sigma_si^2)``, ``SI =

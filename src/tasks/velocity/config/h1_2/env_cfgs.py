@@ -51,7 +51,12 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     num_slots=1,
     track_air_time=True,
   )
-  # WL-D arm 6 formulation C (2026-07-24): contact-sequence-based push-off reward.
+  # WL-D arm 6 formulation C (2026-07-24, position-based redesign 2026-07-29):
+  # contact-sequence-based push-off reward. "pos" (global-frame contact point) is
+  # required by the redesign: several sub-geoms are long capsules spanning the whole
+  # foot, so a boolean "found" alone can't say which end (heel vs toe) is touching -
+  # see heel_toe_rollover_contact's docstring. reduce="maxforce" keeps whichever end
+  # currently bears more load, tracking the real center-of-pressure sweep.
   foot_subgeom_contact_cfg = ContactSensorCfg(
     name="foot_subgeom_contact",
     primary=ContactMatch(
@@ -60,7 +65,7 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       entity="robot",
     ),
     secondary=ContactMatch(mode="body", pattern="terrain"),
-    fields=("found",),
+    fields=("found", "pos"),
     reduce="maxforce",
   )
   self_collision_cfg = ContactSensorCfg(

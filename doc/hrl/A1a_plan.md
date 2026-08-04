@@ -25,9 +25,13 @@ reference, Cost of transport) in `CONTEXT.md`.
   Co-training stays the line regardless, since the hierarchy is the
   architecture's point rather than this one metric.
 - **Known gap:** A1 is twitchier than A0. Root-caused to a small structural
-  cost from the goal channel's 6.25 Hz step plus a large uniform floor
-  concentrated in the arms, pointing at A0's `pose`/`variable_posture` term as
-  the missing mirror.
+  cost from the goal channel's 6.25 Hz step (worth ~4%) plus a large uniform
+  floor concentrated in the arms, pointing at A0's `pose`/`variable_posture`
+  term as the missing mirror. **Mirroring A0's other smoothness term
+  (`joint_acc_l2`, `ll_joint_acc_coef`) was tested at 2 doses 2026-07-28 and is
+  CLOSED as negative**: it does not move the arms share, makes `ub_arm_vel`
+  worse, is non-monotonic on action rate, and badly breaks standing at zero
+  command (touchdowns 142 -> 346/5325). The knob stays in the code, default 0.0.
 - **Deploy status lives in `A1a_deploy_plan.md`**; this doc is training/sim only.
 
 ## Thesis hook

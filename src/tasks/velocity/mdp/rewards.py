@@ -369,8 +369,11 @@ def ankle_pushoff_power(
 def heel_toe_rollover_contact(
         env: ManagerBasedRlEnv,
         sensor_name: str,
-        heel_geom_ids: list[list[int]],
-        toe_geom_ids: list[list[int]],
+        asset_cfg: SceneEntityCfg,
+        geom_ids: list[list[int]],
+        body_ids: list[int],
+        heel_x_max: float,
+        toe_x_min: float,
         command_name: str,
         command_threshold: float,
         w: float,
@@ -381,38 +384,60 @@ def heel_toe_rollover_contact(
         swing_time: float = 0.0,
         duty_max: float = 0.70,
 ) -> torch.Tensor:
-    """WL-D arm 6, formulation C: heel-to-toe contact-sequence push-off (2026-07-24).
+    """WL-D arm 6, formulation C: heel-to-toe contact-sequence push-off (2026-07-24,
+    position-based redesign 2026-07-29).
 
     Rewards the actual foot contact SEQUENCE (not joint angle): specifically the
     "heel lifts before toe" state (toe in contact AND heel not in contact) during
     terminal stance. Formulations A/B only shaped ``ankle_pitch`` joint angle; empirical
     replay showed whole feet lifted simultaneously despite correct angle rotation.
-    This formulation reads the contact sensor directly.
 
-    Heel group = foot1 + foot2 (offset_rank 0.13, 1.27 — leave earliest);
-    toe group = foot5 + foot6 (offset_rank 4.48, 5.53 — leave latest); foot3/4/7 are
-    the ambiguous middle and omitted. ``heel_geom_ids``/``toe_geom_ids`` are PER-LEG
-    (outer list index 0/1 = left/right, matching ``offset``'s [0.0, 0.5] convention) -
-    computed once at runner init time. Evaluated and summed over BOTH legs (like
-    ``ankle_pushoff_power``), not just one - an earlier version of this function
-    collapsed both feet's geoms into one scalar and only read the left leg's gate,
-    silently ignoring the right foot and cross-contaminating the two feet's contact
-    signals; fixed 2026-07-24.
+    **Redesigned 2026-07-29** - the original version grouped the 7 collision sub-geoms
+    per foot into a fixed "heel" set (foot1/2) and "toe" set (foot5/6) by contact-onset
+    TIMING rank on the untrained baseline. Reading ``h1_2.xml`` directly showed this was
+    wrong: the sub-geoms are CAPSULES defined by ``fromto`` endpoints, and 5 of the 7
+    (foot2-foot6) each individually span the foot's *entire* heel-to-toe length
+    (local x from -0.08 to +0.14/+0.17) - only foot1/foot7 are short and toe-only
+    (x in [0.045, 0.10]). A capsule's boolean ``found`` flag can't say WHICH end is
+    touching, so the old foot1+2-vs-foot5+6 grouping mostly differed in Y (medial vs
+    lateral), not X (heel vs toe) - it trained an ankle ROLL, exactly what the user's
+    replay caught ("foot is rolling inward... not pitch... both feet roll").
+
+    Fix: read each contact's actual world POSITION (``sensor.data.pos``, populated when
+    ``reduce="maxforce"`` picks the highest-force contact per primary - during a rolling
+    stance that point migrates from the heel end of a long capsule to its toe end,
+    tracking the real center-of-pressure sweep) and transform it into the owning
+    ``{side}_ankle_roll_link`` body's LOCAL frame (the same frame the ``fromto``
+    coordinates are defined in, since these geoms are direct children of that body with
+    no further nesting - confirmed in ``h1_2.xml``). A contact classifies as heel if its
+    local x < ``heel_x_max`` and toe if x > ``toe_x_min``, leaving a neutral midfoot band
+    between the two thresholds. This works even for the long, ambiguous capsules because
+    it classifies by contact POSITION, not by geom identity - foot1/foot7 (already
+    toe-only by construction) simply always land in the toe bucket when in contact.
+
+    ``geom_ids``/``body_ids`` are PER-LEG (outer list index 0/1 = left/right, matching
+    ``offset``'s [0.0, 0.5] convention) - resolved once at runner init time. Evaluated
+    and summed over BOTH legs (like ``ankle_pushoff_power``).
 
     Gate: terminal-stance window + SCHEDULE only (gate pin ii, A1a_plan.md Arm 6).
-    Requires ``hl_cadence`` and a contact sensor with per-subgeom ``.found`` data.
+    Requires ``hl_cadence`` and a contact sensor with per-subgeom ``.found``/``.pos`` data.
     """
     sensor: ContactSensor = env.scene[sensor_name]
-    assert sensor.data.found is not None
+    assert sensor.data.found is not None and sensor.data.pos is not None
     found = sensor.data.found  # [B, N_geoms]
-    n_legs = len(heel_geom_ids)
+    pos_w = sensor.data.pos  # [B, N_geoms, 3]
+    asset: Entity = env.scene[asset_cfg.name]
+    n_legs = len(geom_ids)
     heel_contact = torch.zeros(found.shape[0], n_legs, dtype=torch.bool, device=found.device)
     toe_contact = torch.zeros(found.shape[0], n_legs, dtype=torch.bool, device=found.device)
     for leg in range(n_legs):
-      for idx in heel_geom_ids[leg]:
-        heel_contact[:, leg] |= found[:, idx] > 0
-      for idx in toe_geom_ids[leg]:
-        toe_contact[:, leg] |= found[:, idx] > 0
+      body_pos_w = asset.data.body_link_pos_w[:, body_ids[leg]]
+      body_quat_w = asset.data.body_link_quat_w[:, body_ids[leg]]
+      for idx in geom_ids[leg]:
+        is_found = found[:, idx] > 0
+        local_x = quat_apply_inverse(body_quat_w, pos_w[:, idx] - body_pos_w)[:, 0]
+        heel_contact[:, leg] |= is_found & (local_x < heel_x_max)
+        toe_contact[:, leg] |= is_found & (local_x > toe_x_min)
     # Per-leg indicator: toe in contact AND heel NOT in contact (heel lifted, toe still down)
     rollover = toe_contact & ~heel_contact  # [B, n_legs]
     # Gate: terminal-stance window (phi in [1-w, 1)) on the SCHEDULE (not actual contact)

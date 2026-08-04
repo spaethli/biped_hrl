@@ -200,16 +200,31 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   first measured at `step_dt` and read 2-4x worse than at the physics rate. Benches must hook
   `metrics_manager.compute_substep()`, which the decimation loop calls per substep
   (`manager_based_rl_env.py:421-427`).
-  **But the deploy platform does NOT sustain 1 kHz** (measured 2026-08-03 from the safety
-  CSV written by `State_RLHRL::run()`): dt p50 1-2 ms but **p90=p99=max=10.00 ms** across
-  three independent runs, on top of a known 2-6 ms system lag. So a sim measurement at
-  physics rate is an upper bound the hardware may not reach — the bridge read the estimator
-  5-8x worse than sim predicted (vx 0.115/vy 0.205 vs 0.020/0.025). Whether the 10 ms tail is
-  a control stall, a logger decimation or the DDS republish period is UNRESOLVED.
-- ⚠ **Verify which policy is actually deployed before any bridge run** — by **md5 against the
-  run dir**, not the ONNX `run_path` metadata (training-time exports write `local`). On
-  2026-08-03 three bridge runs and an estimator measurement were invalidated because the
-  deploy dir held a parked WL-D arm-6 export (`rolloverfix0p5`) that fell reproducibly.
+  ~~**But the deploy platform does NOT sustain 1 kHz**~~ **RETRACTED 2026-08-04. The
+  deploy platform DOES sustain ~1 kHz; the "10 ms tail" was a printf artifact.** Two
+  defects made the CSV unable to measure rate at all: (i) `t` was `tick_counter × nominal
+  dt` (`safety_logger.h:133`), an iteration index, never a clock; (ii) `setprecision(4)` is
+  4 SIGNIFICANT digits, so past t=10 s the column quantised to 0.01 s bins — which is the
+  entire "p90=p99=max=10.00 ms". Below 10 s the same files show dt ∈ {1 ms, 2 ms} and
+  nothing else, exactly what `log_every_=2` predicts. The three "mean rates"
+  (942/525/700 Hz) were logged-row fractions, i.e. `trig_joint` in disguise (triggered
+  ticks bypass decimation). **Measured rate: 990.4 Hz**, now read directly off the new
+  `t_wall` column, and independently 989±2 Hz from comparing `bridge_session.py`'s scripted
+  hold durations against `t`. Corroborating: the bridge publishes `lowstate` at 1 kHz
+  (`unitree_sdk2_bridge.h:170-171`). **Lesson: never measure a rate with a clock you have
+  not verified is a clock.**
+- ⚠ **Verify which policy is actually deployed before any bridge run.** Use
+  `scripts/deploy_provenance.py --check --checkpoint-file <pt>`: it md5s the deployed ONNX
+  against a reverse index of `logs/rsl_rl/**/*.onnx` and **names the source run**, then
+  fails if that is not the run you asked to validate. Never trust the ONNX `run_path`
+  metadata (training-time exports write `local`). On 2026-08-03 three bridge runs and an
+  estimator measurement were invalidated because the deploy dir held a parked WL-D arm-6
+  export (`rolloverfix0p5`) that fell reproducibly. The deploy dir is a single mutable slot
+  with hardcoded filenames (`State_RLHRL.cpp:206-207`), so `--stage` now owns filling it and
+  writes `exported/PROVENANCE.json` recording run, checkpoint and md5s.
+  **`onnx_parity.py --onnx-dir` scores the DEPLOYED file** — without it that tool only ever
+  compared a checkpoint against its own fresh temp export, so a correct export function plus
+  a stale deployed file passed clean, which is why W4 could never have caught this.
   Attribute any bridge failure by **policy-swap against A0 as control** before suspecting
   code: A0 exercises the shared layer (articulation, `joint_offset`, safety filter) without
   the HRL path, so A0-clean + HRL-fails isolates the fault to the HRL path or the policy.

@@ -46,15 +46,25 @@ separate, now-disentangled causes**:
 
    Fix staged for the next model version (leg mass + foot-sole geometry,
    `docs/adr/0006-leg-mass-foot-geometry-nominal-correction.md`), held so it does not
-   rebase the training plant mid-WL-D-batch. **Next action is free and needs no retrain:
-   run Unitree's zero-point calibration on the 6 leg joints, repeat the 60 s policy
-   stand, and re-measure — expect the residual to fall from −0.048 rad to about −0.016
-   rad (the sole-wedge floor), not to zero.** FALSIFIED along the way: IMU mounting
-   offset, attitude-estimator convention, lab floor slope, pelvis-vs-torso frame,
-   symmetric CoM shift, harness down-force, and head mass. **Still open**: the L/R leg
-   asymmetry (the sole wedge does not explain it — differential only 0.375°, wrong
-   sign). → the deploy journal in the research KB for the full method (three independent
-   pitch estimates), the hypothesis table, and the 2026-07-24/28 corrections.
+   rebase the training plant mid-WL-D-batch. **V1 (leg mass alone) is the approved
+   sequencing (2026-07-28); the encoder-zero part of Component A is fixed deploy-side by
+   Spec B (`joint_offset`) instead of a vendor re-zero** — the parallel A/B ankle makes a
+   botched vendor re-zero worse than the error we have and unverifiable before it's
+   committed to the motors, so that route is not recommended (superseded the earlier
+   "try Unitree's zero-point calibration first" framing). **Spec B + Spec C implemented
+   and bridge-validated in sim 2026-07-31 (WL-B0c)**: `joint_offset` plumbing (read+write,
+   applied after the safety clamp) is unit-tested (pytest 55/55, sensitivity 22/22) and
+   confirmed inert-when-absent plus round-trip-correct-when-set on the live sim bridge
+   (a working one-sided negative control leaked the full injected offset; the shipped
+   symmetric code leaked only 2.6% — PD-droop noise, not a defect). No numeric offset is
+   committed yet (stays all-zero pending the hardware residual re-measurement). Expect the
+   hardware residual to fall from −0.048 rad to about −0.016 rad (the sole-wedge floor),
+   not to zero. FALSIFIED along the way: IMU mounting offset, attitude-estimator
+   convention, lab floor slope, pelvis-vs-torso frame, symmetric CoM shift, harness
+   down-force, and head mass. **Still open**: the L/R leg asymmetry (the sole wedge does
+   not explain it — differential only 0.375°, wrong sign). → the deploy journal in the
+   research KB for the full method (three independent pitch estimates), the hypothesis
+   table, and the 2026-07-24/28/31 updates.
 
 E-stop chain was also corrected this session: `p`→Passive is the verified primary stop;
 Ctrl+C is **not** a verified E-stop (no signal handler exists) — see "E-STOP chain"
@@ -76,18 +86,22 @@ which voids every pre-2026-07-21 live bridge result for both A0 and A1. Confirme
 working on real hardware (joystick path) in the 2026-07-23 A0 session too.
 
 **Not yet done / still open, either track:** WL-B1's full live gate battery on arm4d;
-the **leg-joint zero-point re-calibration** and its re-measured stand (free, no retrain,
-the next action on the lean — expect residual −0.048 → ~−0.016 rad); the Model v3
-leg-mass + foot-sole-geometry fix (staged, `docs/adr/0006`, held so it does not rebase
-the plant mid-WL-D-batch); the **L/R leg asymmetry** (right leg carries more load; the
+the **hardware validation session for Spec B** (60 s policy stand, spotted, no walking;
+plumbing is done and sim-validated, the pre-registered pass criterion is the residual
+landing at about −0.016 rad, not zero — landing exactly there confirms the wedge/encoder
+split); the Model v3 leg-mass + foot-sole-geometry fix (staged, `docs/adr/0006`, held so
+it does not rebase the plant mid-WL-D-batch; V1 leg-mass-alone retrain is the approved
+next step ahead of it); the **L/R leg asymmetry** (right leg carries more load; the
 sole wedge was checked and does NOT explain it); the repeat/second session for G3.3
 "repeatable" plus the user's qualitative sign-off that the stumbling is gone; the
 keyboard-latch fix (Defect 1, downgraded, characterized exactly by `bridge_session.py`
 but not fixed). Resolved since the last pass: **Component A of the backward lean is no
 longer open — the 2026-07-28 inclinometer session vindicated the IMU and split the error
-into ~0.9° foot-sole wedge + ~1.3° encoder zeros** (see item 2 above); the out-of-process
-E-stop question (LAN-cable pull verified, see "E-STOP: verified behaviour" below) and
-Defect 2 (the ONNX re-export — confirmed correct as of the 2026-07-22 G2 battery).
+into ~0.9° foot-sole wedge + ~1.3° encoder zeros** (see item 2 above); **Spec B + Spec C
+deploy plumbing (2026-07-31, WL-B0c)**, sim-validated, pending the hardware session; the
+out-of-process E-stop question (LAN-cable pull verified, see "E-STOP: verified behaviour"
+below) and Defect 2 (the ONNX re-export — confirmed correct as of the 2026-07-22 G2
+battery).
 
 The evidence, numbers and mechanism detail behind this dashboard (dated sessions, bridge
 post-mortems, defect-by-defect diagnosis, the backward-lean hypothesis table) live in
@@ -111,7 +125,24 @@ hierarchy-only.
 
 ## Decisions locked (grill session 2026-07-14)
 
-1. **Bridge plant: vendor reference + stress variant** (REVISED 2026-07-15; the
+1. **Bridge plant: SHIPPED UNITREE SCENE ONLY** (REVISED AGAIN 2026-08-04 — supersedes the
+   2026-07-15 text kept below). The "vendor reference" naming used throughout this item was
+   a **misnomer**: `h1_2_handless_stress.xml` / `scene_stress.xml` is the official
+   Unitree-shipped scene, and `h1_2_handless.xml` — the one this item calls the vendor
+   reference and the honest hardware proxy — is a hand-made training-proximate variant.
+   The shipped scene now holds the blocking verdict (`robot_scene: scene_stress.xml`), on
+   the grounds that real harmonic-drive joints carry substantial friction and damping. Its
+   floating base is explicitly zeroed (the inherited default put damping/armature/
+   frictionloss on all six free-base DOF, which is unphysical; removing it measurably
+   changed nothing). **Costs recorded at decision time:** the shipped plant is calmer and
+   therefore the LESS sensitive twitch detector, and **every reference number in this
+   document predating 2026-08-04 was measured on the other scene and does not transfer**
+   (leg action rates, arm4d's live pass, the G2.2 parity bars) — re-baseline first. The
+   latency reasoning in the original text stays valid; only the provenance and the realism
+   claim were wrong. G2.7 is no longer a separate stress gate: it IS the main battery now.
+
+   *Original 2026-07-15 text, values correct, "vendor" label wrong:*
+   **Bridge plant: vendor reference + stress variant** (REVISED 2026-07-15; the
    original "faithful to training nominal" choice was implemented and FAILED on the
    robot bridge — FixStand leaned/twitched, A0 unstable). Diagnosis: the bridge's
    explicit 500 Hz PD carries ~2-4 ms real feedback latency; on a dissipation-free
@@ -184,6 +215,51 @@ implementation follows the mapping above, matching the training-side semantics a
 `hrl_runner.py` (hl_vel append order: policy, command, hl_vel) and `td3.py`
 (tanh -> range affine map, same endpoints as the S1c test: g=-1 -> range lo, g=+1 -> hi).
 
+## Automated gate execution (2026-08-04): `scripts/deploy_readiness.py`
+
+The G1/G2 ladder below is now **run by one command**, not by hand. Ad-hoc bridge sessions
+are what produced the 2026-08-03 failures (a policy nobody had checked, a rate read off a
+column that was never a clock, a session called good from its FSM transition log).
+
+```bash
+python scripts/deploy_readiness.py Unitree-H1_2-Flat-A1 --checkpoint-file <pt> --tag <name>
+```
+
+`provenance → sim → replica → bridge (candidate + A0 control) → analyze`, ~15-25 min.
+Exit **0 GO · 3 GO-WITH-CAVEAT · 1 NO-GO · 2 INFRASTRUCTURE**. It computes no metrics of
+its own — every number comes from a marker an existing tool already prints.
+
+**Fail-closed:** never reports GO from a stage it could not score; an unrunnable or
+unscoreable stage is exit 2, never a pass. Falls come from CSV evidence (height,
+`trig_fall`, `trig_tilt`), never from FSM transitions.
+**Failure handling:** provenance aborts before any process starts; every later stage runs
+to completion, so one invocation yields the whole evidence set including the A0 control arm
+(cached on a fingerprint of A0 ONNX + `h1_2_ctrl` binary + deploy YAML + scene + sequence;
+`--refresh-control` forces it).
+
+| blocking gate | bar |
+|---|---|
+| provenance P1-P6 | deployed ONNX md5 identifies the requested run; dims match YAML (HL 94/92, LL 89+goal_dim); `goal_scale` present; parity vs the **deployed** file < 1e-4; `robot_scene` == shipped |
+| bench + both holds | `fall_rate == 0` |
+| safety filter | zero engagement (`alpha_max == 0`) anywhere in the bridge |
+| falls | none in any phase **including transition windows** |
+| estimator | sim ≤0.05 / bridge ≤0.075 (metric `max(vx,vy)`; middle band → exit 3) |
+
+**Reported, never gated:** leg action rate, transition overshoot (vs A0 on the identical
+sequence), `trig_joint` rate + magnitude past the stop, whole-body `act_rate`, stride
+period, cmd-0 drift, measured loop rate.
+**Explicitly UNKNOWN and surfaced as such:** what leg action rate is actually unsafe; what
+`trig_joint` rate is acceptable.
+
+**Bridge sequence** = full G2.2 + G2.3, ~253 s/arm. Deviation on record: the keyboard map
+has no ±0.3 lateral preset, so backward/strafe run at ±0.5 — *stricter* than G2.2
+specifies, not weaker.
+
+**Re-baselining owed (2026-08-04):** the plant switched to the shipped Unitree scene, so
+every reference number in this document predating that date was measured on the retired
+training-proximate plant and **does not transfer** (leg action rates 0.5908/0.7552/0.8125,
+arm4d's live pass, the G2.2 parity bars). The first shipped-scene runs re-establish them.
+
 ## Phase G1: mjlab candidate battery (per candidate, ~30 min)
 
 | Gate | What is tested | Pass criterion | Unblocks |
@@ -214,7 +290,7 @@ Exit rule: all blocking gates pass on the SAME candidate + the exact config
 
 | Gate | What is tested | Pass criterion | Unblocks |
 |---|---|---|---|
-| **E1** | Onboard odometry availability + quality: in low-level mode on the real H1-2, log whatever publishes velocity/height (rt/sportmodestate or equivalent) during FixStand, manual perturbation, and (if available) a Unitree-controller walk; score noise std and bias drift against references (tape-measure walks, stopwatch). **Must be a BASE (pelvis) velocity estimate** (2026-07-15 finding: an IMU/torso-frame velocity destabilizes the LL via the goal channel; the bridge sensor was retargeted to pelvis for the same reason). | The topic exists in low-level mode AND supplies base-frame vx/vy with noise/bias within the DR-trained envelope (bias_range 0.1); height usable. FAIL -> decision returns to the user (custom estimator vs absolute-V* retrain). | G3 |
+| **E1** | Onboard odometry availability + quality: in low-level mode on the real H1-2, log whatever publishes velocity/height (rt/sportmodestate or equivalent) during FixStand, manual perturbation, and (if available) a Unitree-controller walk; score noise std and bias drift against references (tape-measure walks, stopwatch). **Must be a BASE (pelvis) velocity estimate** (2026-07-15 finding: an IMU/torso-frame velocity destabilizes the LL via the goal channel; the bridge sensor was retargeted to pelvis for the same reason). | The topic exists in low-level mode AND supplies base-frame vx/vy with noise/bias within the DR-trained envelope (bias_range 0.1); height usable. FAILED 2026-07-20 (topic structurally absent), and **the gate is now MOOT: `delta` mode never needed an absolute estimate — see "RESOLVED 2026-08-01" below**. | G3 |
 | **E2** | IMU convention: standing in FixStand, verify `a_world_z = (R a_imu).z - 9.81 ~ 0` (specific-force assumption behind the fall trigger). | Within tolerance; no false fall trigger over >= 60 s standing. | G3 |
 
 ## Phase G3: real robot (A1 track: M2 winner only; gantry/harness)
@@ -409,19 +485,54 @@ track. It only matters for the eventual A1 keeper hardware attempt, which is alr
 downstream of A0 per the existing sequencing. When that comes up, this is E1's documented
 fallback for real, and this session's result is also the real-hardware verdict for the
 thesis's own M5 "IMU-velocity feasibility probe" (`sec:a1a-deploy`, still marked
-`\planned` there) — three options, undecided:
+`\planned` there).
 
-1. A custom leg-odometry estimator (kinematics from the joint encoders + IMU, which work
-   fine under `lowstate` independent of the vendor's motion service).
-2. The absolute-`V*` LL retrain (removes the runtime velocity dependency entirely).
-3. **Swap velocity/height for acceleration in the goal space** — this is the existing
-   roadmap idea `#6` / thesis M4 ("Richer, Real-Robot-Measurable Goal Space",
-   `sec:a1a-goal`), not a new idea; today's E1 result is the concrete trigger that makes
-   it a live decision instead of a deferred one. Canonical spec + open questions (the
-   held-window target-semantics problem, the target-map rework) →
-   the hierarchy-benefit roadmap (research KB) `#6`. Not re-described here.
+**RESOLVED 2026-08-01 — none of the three fallbacks once listed here (custom leg-odometry
+estimator / absolute-`V*` LL retrain / acceleration goal space, roadmap `#6`) is needed.**
+The premise that A1
+requires an absolute velocity estimate was wrong. In `delta` mode the LL goal obs is
+`V*−s_i = scale·g − (s_i−s_t0)`, so absolute velocity **cancels**; deploy needs only the
+within-window increment, which the IMU supplies and which resets every `c` steps.
+Measured in sim on the keeper (`[VELINC]`, mechanism + tool →
+`.claude/docs/hrl-infra.md`): reconstruction RMS **vx 0.020 / vy 0.025 m/s**, inside the
+≤0.05 ship band, so **no retrain and no goal-space rework**. ⚠ **PROVISIONAL since
+2026-08-03: the sim figure does NOT transfer to the bridge.** With the C++ estimator live
+and the keeper deployed, the bridge scores **vx 0.115 / vy 0.205** (5-8x worse). Leading
+cause: `run()` does not sustain 1 kHz (dt p90=max=10.00 ms, plus the known 2-6 ms lag), so
+the faster-than-50 Hz integration the fix depends on is not being delivered. The ship-band
+claim is not re-established until that is closed. Requirements this imposes on
+the deploy code, both mandatory:
 
-Not resolved now; the user's call when A1 hardware is actually next.
+1. **Integrate in `run()` (1 kHz), not `policy_step()` (50 Hz).** At 50 Hz the same
+   reconstruction is 4x worse (vy 0.102) — aliased foot-impact transients, not estimator error.
+2. **Correct the torso-mounted IMU to the pelvis:** `v_pelvis = Rz(psi)·(v_site − w x r)`,
+   with `psi` the `torso_joint` encoder and `r` the site offset. Uncorrected this is the
+   single largest error term (vy 0.227). Remove gravity in the torso frame, not the pelvis frame.
+
+> **PROVISIONAL STATUS LIFTED 2026-08-04 — the ship-band claim is confirmed on the bridge.**
+> The 5-8x sim-vs-bridge gap was **a broken ground-truth reference, not an estimator or
+> rate failure**. `State_RLHRL.cpp:408` subtracted a lever-arm term from `v_gt_b`, which is
+> already the PELVIS velocity — the bridge publishes `framelinvel` on body `pelvis` but
+> `framepos` on the imu SITE (`h1_2_handless.xml:331,340`), and the code's comment claimed
+> both were at the site. Because `est_vel` carries the identical `−(L_i − L_0)` term, the
+> spurious one **cancelled in the difference**, so the telemetry was scoring the
+> UNCORRECTED reconstruction — whose bench value (vy 0.227) is what the bridge reported
+> (0.205). Fixed; re-measured on the keeper: **vx 0.0139 / vy 0.0288**, inside the ≤0.05
+> sim band, not merely the widened bridge band. **No retrain, no goal-space rework, no DR
+> arm.**
+>
+> Attribution, measured rather than assumed (same 7.7 s stand window): the code fix alone
+> accounts for **4.2x (vx) / 5.0x (vy)** with the plant held constant; the plant switch to
+> the shipped Unitree scene accounts for a further **5.8x / 4.8x**. Both contribute — an
+> earlier claim that the reference bug explained the whole gap was overstated. The plant
+> effect during walking is unmeasured (the old-plant control run ended at 7.7 s).
+>
+> The rate hypothesis that motivated all of this is **withdrawn**: `run()` sustains
+> **990.4 Hz** (measured, `t_wall`). See `hrl-infra.md`.
+
+Base **height** is still absolute and unmeasurable this way; it comes from leg FK
+(lowest-foot, no contact sensing — `unitree_hg/LowState` has none), anchored as
+`nominal_h + (h_FK − h_FK_at_nominal_pose)` so the frame bias cancels.
 
 IMU-side data (E2, gyro for the frame-check windows) came through the `lowstate`
 subscription correctly throughout, so this was isolated to the sport/odom-state path, not

@@ -29,7 +29,37 @@ Observation assembly: `deploy/robots/h1_2/include/h1_2_observations.h`
 (`keyboard_velocity_commands`; moved there from `State_RLBase.cpp` on 2026-07-21 with the
 `gait_phase_cmd` fix, see A1a_deploy_plan.md "Defect 0 FIXED").
 
-## Bridge plant (RESOLVED 2026-07-15 — faithful + stress variant)
+## Bridge plant
+
+> **NAMING CORRECTED + PLANT SWITCHED, 2026-08-04.** Everything below called
+> `h1_2_handless.xml` the "vendor reference" and treated it as the hardware-realistic
+> plant. **That label was wrong.** `h1_2_handless_stress.xml` / `scene_stress.xml` is the
+> **official Unitree-shipped scene**; `h1_2_handless.xml` is a **hand-made
+> training-proximate variant**. The 2026-07-15 reasoning about latency (below) is still
+> correct and still explains why the exact training nominal fails — only the provenance of
+> the values, and hence the realism argument, was mislabelled.
+>
+> **The shipped scene is now the single gating plant** (`robot_scene: scene_stress.xml`).
+> Its harsh joint values are the better hardware proxy: real harmonic-drive joints carry
+> substantial friction and damping. Its floating base is now explicitly zeroed — inheriting
+> the file default put damping 1 / armature 0.1 / frictionloss 0.2 on all six free-base
+> DOF, i.e. drag and fictitious inertia on motion through space, which nothing physical
+> produces. Measured A/B: removing it changed behaviour negligibly.
+>
+> **Two costs on record.** (1) The shipped plant is *calmer*, so it is the LESS sensitive
+> twitch detector — and twitch is what separated every failed A1 candidate from arm4d
+> (act_rate A0 0.57–0.75 vs A1 0.92–1.28). Keep `h1_2_handless.xml` for A/B work.
+> (2) **Every reference number predating 2026-08-04 was measured on the training-proximate
+> scene and does NOT transfer** — leg action rates 0.5908 / 0.7552 / 0.8125, arm4d's live
+> pass, the G2.x parity bars. Re-baseline before comparing. Measured example of the gap:
+> over an identical cmd-0 stand window the same keeper's estimator residual reads ~5x
+> higher on the training-proximate plant than on the shipped one.
+>
+> Falsified along the way: that the fictional free-base damper was what made the shipped
+> scene look calm. It is the **joint** damping (1 vs 0.001, a 1000x difference) — zeroing
+> the base changed almost nothing.
+
+### Original 2026-07-15 record (values right, "vendor" label wrong)
 
 **The live bridge is `/opt/unitree_mujoco`** (`simulate/build/unitree_mujoco`, config
 `/opt/unitree_mujoco/simulate/config.yaml`, scene `unitree_robots/h1_2/scene.xml` →

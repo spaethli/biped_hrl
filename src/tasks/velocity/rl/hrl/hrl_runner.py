@@ -37,7 +37,7 @@ from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 from .state_noise import GoalStateNoise
 from .td3 import HighLevelTd3
 from ...mdp import rewards as mdp_rewards
-from mjlab.envs.mdp.rewards import joint_acc_l2
+from mjlab.envs.mdp.rewards import joint_acc_l2, joint_pos_limits
 
 
 class HierarchicalRunner(VelocityOnPolicyRunner):
@@ -76,6 +76,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_footclear_coef: float = train_cfg.get("ll_footclear_coef", 0.0)
     self.ll_energy_coef: float = train_cfg.get("ll_energy_coef", 0.0)
     self.ll_joint_acc_coef: float = train_cfg.get("ll_joint_acc_coef", 0.0)
+    self.ll_joint_limits_coef: float = train_cfg.get("ll_joint_limits_coef", 0.0)
+    self.ll_soft_landing_coef: float = train_cfg.get("ll_soft_landing_coef", 0.0)
+    self.ll_body_ang_vel_coef: float = train_cfg.get("ll_body_ang_vel_coef", 0.0)
     # WL-D arm 6 (2026-07-17): heel-to-toe roll-over (A) / push-off power burst (B) /
     # contact-sequence (C). Probe-derived defaults (D2 checkpoint constants probe, 2026-07-17);
     # sigma/k/w are free knobs (sigma anchored to env_cfgs.py's std_walking ankle_pitch tolerance).
@@ -89,6 +92,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_pushoff_p_scale: float = train_cfg.get("ll_pushoff_p_scale", 40.0)
     self.ll_rollover_coef: float = train_cfg.get("ll_rollover_coef", 0.0)
     self.ll_rollover_w: float = train_cfg.get("ll_rollover_w", 0.175)
+    self.ll_rollover_heel_x_max: float = train_cfg.get("ll_rollover_heel_x_max", -0.03)
+    self.ll_rollover_toe_x_min: float = train_cfg.get("ll_rollover_toe_x_min", 0.08)
     # WL-D arm 10 (2026-07-20): left/right gait symmetry. Formulation B (step-time
     # symmetry index) is the primary training arm; formulation A (phase-shifted joint
     # mirror) is implemented alongside but left untrained pending B's read (the arm 6
@@ -141,9 +146,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self._pitchref_gait_params = {
       k: v for k, v in self._gait_params.items() if k != "sensor_name"
     }
-    # WL-D arm 6 formulation C (2026-07-24): resolve heel/toe geom indices for the
-    # heel_toe_rollover_contact reward (foot1/2 = heel, foot5/6 = toe). The sensor
-    # tracks all 14 sub-geoms; we need their indices in the sensor's found array.
+    # WL-D arm 6 formulation C (2026-07-24, position-based redesign 2026-07-29): resolve
+    # per-leg geom indices (all 7 sub-geoms, not a fixed heel/toe split - see
+    # heel_toe_rollover_contact's docstring for why the geometry rules that out) plus
+    # each leg's owning ankle_roll_link body id, needed to transform each contact's
+    # world position into that foot's local frame.
     robot = env.unwrapped.scene["robot"]
     # Find all geoms matching the foot sub-geom pattern. The sensor's primary_names
     # will have resolved these in order (left_foot1..7, right_foot1..7).
@@ -154,14 +161,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Build the index mapping (assumption: sensor data matches pattern order)
     geom_name_to_idx = {name: i for i, name in enumerate(geom_names)}
     # PER-LEG (outer index 0/1 = left/right, matching offset=[0.0, 0.5]) - NOT a flat
-    # combined list: heel_toe_rollover_contact evaluates+sums both legs separately, so
-    # each leg's own heel/toe geoms must stay in their own sublist (fixed 2026-07-24 -
-    # the original flat-list version silently only rewarded the left leg's gate against
-    # an OR of both feet's geoms, ignoring the right foot and cross-contaminating them).
-    self._heel_geom_ids = [[geom_name_to_idx[f"{s}_foot{i}_collision"] for i in (1, 2)]
-                           for s in ("left", "right")]
-    self._toe_geom_ids = [[geom_name_to_idx[f"{s}_foot{i}_collision"] for i in (5, 6)]
-                          for s in ("left", "right")]
+    # combined list: heel_toe_rollover_contact evaluates+sums both legs separately.
+    self._rollover_geom_ids = [[geom_name_to_idx[f"{s}_foot{i}_collision"] for i in range(1, 8)]
+                               for s in ("left", "right")]
+    body_ids, _ = robot.find_bodies(
+      ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
+    )
+    self._rollover_body_ids = body_ids
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
@@ -170,11 +176,18 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # WL-D arm 5 (2026-07-17): replay defect (ankles roll inward) - extend the anchor.
     if train_cfg.get("ll_posture_anchor_ankle_roll", False):
       anchor_patterns.append(".*ankle_roll.*")
+    # WL-D: all-joints anchor supersedes both the subset and the ankle_roll flag above.
+    if train_cfg.get("ll_posture_all_joints", False):
+      anchor_patterns = [".*"]
     ub_ids, ub_names = env.unwrapped.scene["robot"].find_joints(anchor_patterns)
     # WL-D arm 4b/4c: resolved foot-site cfg for the feet_slip/feet_clearance mirrors
     # (same sites A0's own foot_slip/foot_clearance terms use).
     self._foot_asset_cfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot"))
     self._foot_asset_cfg.resolve(env.unwrapped.scene)
+    # WL-D: resolved torso body cfg for the body_ang_vel mirror (mirrors A0's own
+    # body_ang_vel asset_cfg, config/h1_2/env_cfgs.py).
+    self._torso_asset_cfg = SceneEntityCfg("robot", body_names=("torso_link",))
+    self._torso_asset_cfg.resolve(env.unwrapped.scene)
     # WL-D arm 6 (2026-07-17): ankle_pitch joints for the roll-over/push-off intrinsic
     # terms - left,right order matches _gait_params's offset order [0.0, 0.5].
     self._ankle_asset_cfg = SceneEntityCfg(
@@ -504,6 +517,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
       stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
       joint_acc_sum = 0.0
+      joint_limits_sum = soft_landing_sum = body_ang_vel_sum = 0.0
       pitchref_sum = pushoff_sum = rollover_sum = 0.0
       symmetry_sum = mirror_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
@@ -626,6 +640,25 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             ja_pen = self.ll_joint_acc_coef * joint_acc_l2(uenv)
             r_lo = r_lo - ja_pen
             joint_acc_sum += -ja_pen.mean().item()
+          # WL-D: mirror A0's joint_pos_limits (soft-limit crossing penalty) - the
+          # largest measured A1-vs-A0 episode-reward gap (~515x, WL-D reward-gap audit).
+          if self.ll_joint_limits_coef != 0.0:
+            jl_pen = self.ll_joint_limits_coef * joint_pos_limits(uenv)
+            r_lo = r_lo - jl_pen
+            joint_limits_sum += -jl_pen.mean().item()
+          # WL-D: mirror A0's soft_landing (first-contact impact-force penalty).
+          if self.ll_soft_landing_coef != 0.0:
+            sl_pen = self.ll_soft_landing_coef * mdp_rewards.soft_landing(
+              uenv, sensor_name="feet_ground_contact", command_name="twist",
+              command_threshold=0.1)
+            r_lo = r_lo - sl_pen
+            soft_landing_sum += -sl_pen.mean().item()
+          # WL-D: mirror A0's body_angular_velocity_penalty (torso xy angular velocity).
+          if self.ll_body_ang_vel_coef != 0.0:
+            bav_pen = self.ll_body_ang_vel_coef * mdp_rewards.body_angular_velocity_penalty(
+              uenv, asset_cfg=self._torso_asset_cfg)
+            r_lo = r_lo - bav_pen
+            body_ang_vel_sum += -bav_pen.mean().item()
           # A1a cadence entrainment (ADR-0004): reward the LL for matching the contact
           # schedule of the HL-commanded stride period. Positive feet_gait term.
           if self.hl_cadence and self.ll_cadence_coef != 0.0:
@@ -653,13 +686,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
               use_commanded_phase=True, **self._gait_params)
             r_lo = r_lo + self.ll_pushoff_coef * po
             pushoff_sum += (self.ll_pushoff_coef * po).mean().item()
-          # WL-D arm 6 formulation C (2026-07-24): contact-sequence heel-to-toe roll-over,
-          # gated command + SCHEDULED stance only (gate pin ii: phi is only well-defined
-          # on the schedule).
+          # WL-D arm 6 formulation C (2026-07-24, position-based redesign 2026-07-29):
+          # contact-sequence heel-to-toe roll-over, gated command + SCHEDULED stance
+          # only (gate pin ii: phi is only well-defined on the schedule).
           if self.hl_cadence and self.ll_rollover_coef != 0.0:
             ro = mdp_rewards.heel_toe_rollover_contact(
-              uenv, sensor_name="foot_subgeom_contact",
-              heel_geom_ids=self._heel_geom_ids, toe_geom_ids=self._toe_geom_ids,
+              uenv, sensor_name="foot_subgeom_contact", asset_cfg=SceneEntityCfg("robot"),
+              geom_ids=self._rollover_geom_ids, body_ids=self._rollover_body_ids,
+              heel_x_max=self.ll_rollover_heel_x_max, toe_x_min=self.ll_rollover_toe_x_min,
               w=self.ll_rollover_w, use_commanded_phase=True, **self._pitchref_gait_params)
             r_lo = r_lo + self.ll_rollover_coef * ro
             rollover_sum += (self.ll_rollover_coef * ro).mean().item()
@@ -780,6 +814,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/footclear_pen": footclear_sum / n_steps,
         "ll/energy_pen": energy_sum / n_steps,
         "ll/joint_acc_pen": joint_acc_sum / n_steps,
+        "ll/joint_limits_pen": joint_limits_sum / n_steps,
+        "ll/soft_landing_pen": soft_landing_sum / n_steps,
+        "ll/body_ang_vel_pen": body_ang_vel_sum / n_steps,
         "ll/pitchref_rew": pitchref_sum / n_steps,
         "ll/pushoff_rew": pushoff_sum / n_steps,
         "ll/rollover_rew": rollover_sum / n_steps,
