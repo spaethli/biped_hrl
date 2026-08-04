@@ -25,6 +25,9 @@ HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
 YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy.yaml"
 REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy_real.yaml"
+DGA = REPO / "scripts/deploy_gate_analyzer.py"
+PRV = REPO / "scripts/deploy_provenance.py"
+BSN = REPO / "scripts/bridge_session.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -134,6 +137,62 @@ MUTATIONS = [
    "# keep their old yaml unchanged.\n"
    "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]\nhrl:",
    "test_joint_offset_absent_from_sim_configs"),
+
+  # --- readiness pipeline (2026-08-04). Each mutation is a defect that actually shipped.
+  ("analyzer dt back to median(diff(t)) — the ZeroDivisionError on quantised timestamps", DGA,
+   "  return float(t[-1] - t[0]) / max(len(t) - 1, 1) if len(t) > 1 else 0.0",
+   "  return float(np.median(np.diff(t))) if len(t) > 1 else 0.0",
+   "test_row_dt_survives_the_quantised_timestamps_that_crashed_the_analyzer"),
+
+  ("stride_proxy divides by a zero dt instead of returning NaN", DGA,
+   "  if not (dt > 0) or not np.isfinite(dt):\n    return float(\"nan\")",
+   "  if False:\n    return float(\"nan\")",
+   "test_stride_proxy_returns_nan_rather_than_raising_on_a_degenerate_segment"),
+
+  ("transition windows stop reporting falls (the 0.5->0 decel fall goes unseen)", DGA,
+   '"fell": bool(fell_mask[m].any()),', '"fell": False,',
+   "test_transition_window_catches_a_fall_on_the_deceleration"),
+
+  # The pre-fix code verbatim: any failing hold won (sticky-False) AND post-fall holds were
+  # scored, so a robot that walked 7.1 m and then fell was reported as "band never
+  # released" -- a real FALL masked as a harness artifact, i.e. NO-GO downgraded to
+  # "this run tells you nothing".
+  ("band check: sticky-False accumulator + post-fall holds scored (fall masked as INFRA)", DGA,
+   "    if post_fall:\n      continue  # explained by the fall, not by the harness\n"
+   "    band_ok = True if travel >= BAND_MIN_TRAVEL_M else (band_ok or False)",
+   "    band_ok = (band_ok is not False) and travel >= BAND_MIN_TRAVEL_M",
+   "test_band_check_ignores_holds_after_a_fall"),
+
+  ("stand drift reports magnitude only, losing the backward/left direction", DGA,
+   '"heading_deg": round(float(np.degrees(np.arctan2(dy, dx))), 1),',
+   '"heading_deg": 0.0,',
+   "test_stand_drift_reports_direction_not_just_magnitude"),
+
+  ("joint clamp reports rate but not magnitude past the stop", DGA,
+   '"max_past_stop_rad": round(float(over[:, i].max()), 4),',
+   '"max_past_stop_rad": 0.0,',
+   "test_joint_clamp_reports_magnitude_past_the_stop_not_only_rate"),
+
+  ("HL dim expectation ignores hl_obs_vel (94 vs 92 mismatch reaches the C++)", PRV,
+   '"high_level.onnx": 92 + (2 if hrl.get("hl_obs_vel") else 0),',
+   '"high_level.onnx": 92,',
+   "test_expected_dims_track_hl_obs_vel_and_goal_components"),
+
+  ("reverse md5 index keeps only one path per hash (cannot name every holding run)", PRV,
+   "    index.setdefault(md5(onnx_path), []).append(onnx_path)",
+   "    index[md5(onnx_path)] = [onnx_path]",
+   "test_index_maps_one_hash_to_every_run_that_holds_it"),
+
+  # Must remove EVERY qualifying hold, not just the first line's -- the trailing
+  # '5:12' also satisfies >=10 s at >=0.3, so a partial mutation leaves the test
+  # correctly passing (it did, on the first attempt).
+  ("the default bridge sequence loses its long hold (band check silently skipped)", BSN,
+   "DEFAULT_SEQ = ('0:8,3:30,0:6,5:30,0:6,w:30,0:8,'\n"
+   "               's:15,0:6,a:15,0:6,d:15,0:6,'\n"
+   "               'q:15,0:6,e:15,0:6,'\n"
+   "               '5:12,q:8,0:10')",
+   "DEFAULT_SEQ = '0:8,3:5,0:6,5:5,0:6,w:5,0:8'",
+   "test_band_thresholds_are_reachable_by_the_default_sequence"),
 ]
 
 

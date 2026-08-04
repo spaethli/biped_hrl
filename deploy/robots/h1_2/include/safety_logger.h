@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
@@ -86,7 +87,15 @@ public:
 
         // --- csv header ---
         buf_.str("");
-        buf_ << "t";
+        // t      = tick counter x nominal control_dt. NOT a clock: it advances one dt per
+        //          run() iteration regardless of how long that iteration actually took.
+        // t_wall = real elapsed seconds (steady_clock) since the first record() of this
+        //          process. Added 2026-08-04: the loop rate had never been directly
+        //          measurable from this file, so a print artifact in `t` was mistaken for
+        //          a control stall and had to be disproved indirectly, by comparing
+        //          bridge_session.py's scripted hold durations against `t`. With both
+        //          columns present, rate = d(t_wall)/d(t) is read straight off the CSV.
+        buf_ << "t,t_wall";
         for (int i = 0; i < n_; i++) buf_ << ",raw_q" << i;
         for (int i = 0; i < n_; i++) buf_ << ",meas_q" << i;
         for (int i = 0; i < n_; i++) buf_ << ",meas_dq" << i;
@@ -130,7 +139,19 @@ public:
         // rows from that tail and undercount engaged_ticks/engaged_time_s downstream.
         bool trig = trig_joint || trig_tilt || trig_fall || alpha > 0.0f;
         if (!trig && (this_tick % log_every_) != 0) return;  // decimated quiet tick, skip
-        buf_ << (this_tick * dt_);
+        // `t` needs its OWN precision, not the buffer's 4 SIGNIFICANT digits (set in
+        // init()): 4 sig digits quantises time to 0.01 s once t passes 10 s, which made
+        // every dt read off this column past that point either 0.00 or exactly 10.00 ms.
+        // That artifact was misread as a 100 Hz control stall on 2026-08-03 and briefly
+        // "falsified" the 1 kHz assumption; the loop was measured at 989 Hz afterwards by
+        // comparing scripted wall-clock holds against this column. Fixed decimal places
+        // here, restored to significant digits for every other float on the row.
+        // NOTE this column is still a TICK COUNTER x nominal dt, not a clock -- see t_wall.
+        if (!wall0_set_) { wall0_ = std::chrono::steady_clock::now(); wall0_set_ = true; }
+        const double t_wall = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - wall0_).count();
+        buf_ << std::fixed << std::setprecision(4) << (this_tick * dt_) << ',' << t_wall
+             << std::defaultfloat << std::setprecision(4);
         for (int i = 0; i < n_; i++) buf_ << ',' << raw_q[i];
         for (int i = 0; i < n_; i++) buf_ << ',' << meas_q[i];
         for (int i = 0; i < n_; i++) buf_ << ',' << meas_dq[i];
@@ -162,6 +183,11 @@ private:
     float dt_{0.001f};
     long tick_{0};
     int log_every_{1};
+    // Wall clock is anchored at the first record(), not at init(): init() runs on FSM
+    // entry and a re-entry must not restart the clock while tick_ keeps counting, or
+    // d(t_wall)/d(t) goes negative across the seam.
+    std::chrono::steady_clock::time_point wall0_{};
+    bool wall0_set_{false};
     std::ostringstream buf_;
     int rows_since_flush_{0};
 };

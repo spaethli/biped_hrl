@@ -5,17 +5,26 @@
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include "h1_2_observations.h"  // robot-local terms: keyboard_velocity_commands, gait_phase_cmd
 
+#include <cmath>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
 
-// [SAFETY FILTER] master switch lives in FSM/State_RLHRL.h (gates filter + logger).
-#if SAFETY_FILTER
-#  include "h1_2_limits.h"
-#  include <cmath>
-#  include <algorithm>
-#endif
+// h1_2_limits.h is included unconditionally (not just under SAFETY_FILTER) since
+// 2026-08-03: the 1 kHz base-velocity integrator in run() needs H1_2_CONTROL_DT.
+#include "h1_2_limits.h"
+
+// Deployable base-state estimator geometry (IMU lever arm, waist yaw, leg FK). Kept in a
+// header so test/base_state_estimator_test.cpp can pin it against MuJoCo's own kinematics
+// and against the play.py --check-vel-increment reference.
+#include "hrl/base_state.h"
+
+using hrl::base_vel_increment;
+using hrl::kGravity;
+using hrl::kImuOffsetT;
+using hrl::lowest_foot_z;
+using hrl::rz;
 
 State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
 : FSMState(state_mode, state_string)
@@ -27,10 +36,12 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     const char* cfg_env = std::getenv("H1_2_DEPLOY_CFG");
     std::string deploy_cfg = cfg_env ? cfg_env : "deploy.yaml";
     spdlog::info("[HRL] Using deploy config: {}", deploy_cfg);
-    env = std::make_unique<isaaclab::ManagerBasedRLEnv>(
-        YAML::LoadFile(policy_dir / "params" / deploy_cfg),
-        std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate)
-    );
+    YAML::Node deploy_yaml = YAML::LoadFile(policy_dir / "params" / deploy_cfg);
+    auto articulation = std::make_shared<unitree::BaseArticulation<LowState_t::SharedPtr>>(FSMState::lowstate);
+    // ADR-0006 Spec B: optional per-joint encoder-zero correction, absent = 27 zeros (no-op).
+    if (deploy_yaml["joint_offset"])
+        articulation->joint_offset = deploy_yaml["joint_offset"].as<std::vector<float>>();
+    env = std::make_unique<isaaclab::ManagerBasedRLEnv>(deploy_yaml, articulation);
 
     // ONNX live here; loaded lazily on first enter() (see ensure_models_loaded).
     exported_dir_ = policy_dir / "exported";
@@ -44,8 +55,8 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     // anything else (default) -> learned HL from high_level.onnx. Default keeps old behavior.
     oracle_ = hrl["hl_algorithm"] && hrl["hl_algorithm"].as<std::string>() == "oracle";
     auto goal_components = hrl["goal_components"].as<std::vector<std::string>>();
-    float nominal_h = hrl["nominal_root_height"].as<float>();
-    goal_space_ = std::make_unique<hrl::GoalSpace>(goal_components, nominal_h);
+    nominal_h_ = hrl["nominal_root_height"].as<float>();
+    goal_space_ = std::make_unique<hrl::GoalSpace>(goal_components, nominal_h_);
     target_ = Eigen::VectorXf::Zero(goal_space_->dim());
 
     // Keeper structure (2026-07-14): velocity-goals-only HL, HL lin-vel input, HL-owned
@@ -94,15 +105,65 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
                      "estimator noise; clear hrl.state_noise for clean runs", s);
     }
 
+    // Deployable base-state estimator (2026-08-03; see FSM/State_RLHRL.h). Absent keys keep
+    // the SportModeState path, so every pre-2026-08-03 config runs byte-identically.
+    vel_from_imu_ = hrl["base_vel_from_imu"] && hrl["base_vel_from_imu"].as<bool>();
+    height_from_fk_ = hrl["base_height_from_fk"] && hrl["base_height_from_fk"].as<bool>();
+    // sdk motor id -> articulation slot for the legs + waist. Everything else in this file
+    // indexes by sdk id (joint_ids_map[i]); the FK and the waist encoder need the inverse.
+    sdk_slot_.fill(-1);
+    for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); ++i) {
+        const int jid = (int)env->robot->data.joint_ids_map[i];
+        if (jid >= 0 && jid < (int)sdk_slot_.size()) sdk_slot_[jid] = i;
+    }
+    // FK height at the deploy default pose. No longer an anchor for est_h (that is computed
+    // directly in policy_step since 2026-08-04) -- kept as a STARTUP CROSS-CHECK, because
+    // the gap between this pose and the goal space's training-referenced nominal is exactly
+    // the error class that produced the +0.0325 m height bias and went unnoticed for a day.
+    {
+        float qn[12];
+        for (int k = 0; k < 12; ++k)
+            qn[k] = sdk_slot_[k] >= 0 ? env->robot->data.default_joint_pos[sdk_slot_[k]] : 0.0f;
+        fk_h_nominal_ = -lowest_foot_z(qn);
+    }
+    // A large gap means the deploy hold pose sits far from the pose the policy was trained
+    // around, which changes what the height goal column means. 0.028 m (the measured keeper
+    // value) is expected and silent; 0.05 m is not.
+    if (const float gap = nominal_h_ - (fk_h_nominal_ + hrl::kImuOffsetT.z());
+        std::abs(gap) > 0.05f) {
+        spdlog::warn("[HRL] height nominal gap {:.4f} m: hrl.nominal_root_height={:.4f} vs "
+                     "FK-at-default_joint_pos+imu_lever={:.4f}. The deploy default pose is "
+                     "far from the training nominal; check default_joint_pos and "
+                     "nominal_root_height agree with the checkpoint.",
+                     gap, nominal_h_, fk_h_nominal_ + hrl::kImuOffsetT.z());
+    }
+
     // Ground-truth base velocity + height for the goal-space state (the LowState IMU has
     // neither). Provided by the MuJoCo sim bridge's SportModeState publisher
-    // (rt/sportmodestate). SIM-ONLY privileged signal; a real robot needs a state estimator.
+    // (rt/sportmodestate). SIM-ONLY privileged signal; on real hardware it reads ZEROS once
+    // our own low-level controller has command — which is what the estimator above replaces.
     highstate_ = std::make_shared<unitree::robot::go2::subscription::SportModeState>();
     spdlog::info("[HRL] hl_algorithm={} c={} hl_target_mode={} goal_dim={} velgoal={} "
                  "hl_obs_vel={} cadence_dim={} period_range=[{},{}] pin_period={} "
+                 "base_vel_from_imu={} base_height_from_fk={} fk_h_nominal={:.4f} "
                  "(HighState=rt/sportmodestate)",
                  oracle_ ? "oracle" : "learned", c_, hl_target_mode_, goal_space_->dim(),
-                 velgoal_, hl_obs_vel_, cadence_dim_, period_lo_, period_hi_, pin_period_);
+                 velgoal_, hl_obs_vel_, cadence_dim_, period_lo_, period_hi_, pin_period_,
+                 vel_from_imu_, height_from_fk_, fk_h_nominal_);
+    // The IMU rung reconstructs the WITHIN-WINDOW INCREMENT only, which is exactly what the
+    // LL's `delta` goal needs and exactly what the HL's absolute lin-vel input does NOT get:
+    // s[0..1] is 0 by construction at every window start, i.e. at every HL fire. Flag it —
+    // on real hardware the SportModeState alternative already reads 0 there, so this is not
+    // a regression, but in the bridge it IS a behavior change vs the privileged path.
+    if (vel_from_imu_ && hl_obs_vel_)
+        spdlog::warn("[HRL] base_vel_from_imu + hl_obs_vel: the HL's (vx,vy) input is the "
+                     "within-window increment, which is 0 at every HL fire step. The HL's "
+                     "ABSOLUTE velocity input is NOT solved by this estimator (leg odometry "
+                     "— play.py --check-leg-odometry — is the intended source).");
+    if (vel_from_imu_ && hl_target_mode_ != "delta")
+        spdlog::warn("[HRL] base_vel_from_imu with hl_target_mode={}: the increment "
+                     "substitution is only valid in `delta` mode, where the absolute "
+                     "velocity cancels in V* - s. Expect wrong goals.", hl_target_mode_);
 
     this->registered_checks.emplace_back(
         std::make_pair(
@@ -251,11 +312,85 @@ void State_RLHRL::policy_step()
 
     // Goal-space state s: base lin vel (world->body via the IMU quat) + ang_vel/orientation
     // (IMU) + height (sim HighState). frame_vel is published in the WORLD frame; rotate it.
+    // FRAMES, CORRECTED 2026-08-04 (the previous note here claimed both came from the imu
+    // SITE, and the gt_dvel below was built on that): the bridge publishes the two sensors
+    // at DIFFERENT places --
+    //   <framelinvel name="frame_vel" objtype="body" objname="pelvis"/>   (the 2026-07-15
+    //   retarget documented in deployment.md)  ->  v_world is the PELVIS velocity
+    //   <framepos    name="frame_pos" objtype="site" objname="imu"/>      ->  h_gt is the
+    //   imu-SITE height
+    // root_quat_w is the IMU (torso) attitude, so v_gt_b is the pelvis velocity expressed
+    // in the TORSO frame: it needs the Rz(psi) waist rotation but carries NO lever arm.
+    // (h1_2_handless.xml:331,340 in the bridge; the in-repo scene_h1_2.xml is not loaded.)
     const Eigen::Vector3f v_world = highstate_->velocity();
-    const Eigen::Vector3f lin_vel_b = env->robot->data.root_quat_w.conjugate() * v_world;
-    const float height = highstate_->position().z();
+    const Eigen::Vector3f v_gt_b = env->robot->data.root_quat_w.conjugate() * v_world;
+    const float h_gt = highstate_->position().z();
+
+    // --- Deployable base-state estimate (2026-08-03) ---------------------------------
+    // Mirrors the "waist-corr" rung of play.py --check-vel-increment. The pelvis velocity
+    // behind the torso-mounted IMU is
+    //     v_pelvis_P = Rz(psi) * (v_site_T - w_T x r)
+    // and only the WITHIN-WINDOW increment of v_site_T is observable (integrated accel), so
+    //     dv_pelvis = Rz(psi_i) * (dv_int - w_i x r) + Rz(psi_0) * (w_0 x r)
+    // dropping the unmodellable [Rz(psi_i) - Rz(psi_0)] * v_site_T(t0) residual (small while
+    // the waist barely turns inside one window; the bench's RMS already includes it).
+    // dv_int is accumulated by run() at 1 kHz — NOT here at 50 Hz, where the same
+    // reconstruction is ~4x worse from aliased foot-impact transients.
+    const float psi = sdk_slot_[12] >= 0 ? env->robot->data.joint_pos[sdk_slot_[12]] : 0.0f;
+    const Eigen::Vector3f w_T = env->robot->data.root_ang_vel_b;  // gyro, torso frame
+    const Eigen::Vector3f lev = w_T.cross(kImuOffsetT);
+    const bool window_start = (step_ % c_ == 0);
+    Eigen::Vector3f dv;
+    {
+        std::lock_guard<std::mutex> lock(est_mu_);
+        if (window_start) dv_.setZero();  // reset every c steps -> drift cannot accumulate
+        dv = dv_;
+    }
+    if (window_start) {
+        lev0_ = rz(psi, lev);
+        // NO lever subtraction here (fixed 2026-08-04): v_gt_b is already the PELVIS
+        // velocity (see the FRAMES note above), so `- lev` was removing a lever arm the
+        // signal never had. Because est_vel carries the identical -(L_i - L_0) term, the
+        // spurious one CANCELLED in est-minus-gt and the telemetry was silently scoring
+        // the UNCORRECTED, site-frame reconstruction. That is why the bridge read
+        // vy 0.205 against a corrected sim prediction of 0.026: 0.205 is the bench's
+        // "lever arm (site-pelvis)" rung (0.227), not an estimator failure.
+        gt_vel0_ = rz(psi, v_gt_b);
+    }
+    const Eigen::Vector3f est_vel = base_vel_increment(psi, w_T, dv, lev0_);
+    // Lowest-foot FK. No contact sensing: unitree_hg::msg::LowState has no foot-force field.
+    float qleg[12];
+    for (int k = 0; k < 12; ++k)
+        qleg[k] = sdk_slot_[k] >= 0 ? env->robot->data.joint_pos[sdk_slot_[k]] : 0.0f;
+    // HEIGHT ANCHOR, CORRECTED 2026-08-04. est_h has to reproduce gt_h -- the imu-SITE
+    // world height -- because when base_height_from_fk is on it REPLACES gt_h in the goal
+    // state. Upright on a flat floor that height is just (pelvis above sole) + (torso->imu
+    // lever), computed directly, with no anchor constant to get wrong:
+    const float est_h = -lowest_foot_z(qleg) + hrl::kImuOffsetT.z();
+    // The previous form was `nominal_h_ + (P(q) - P(q_def))`, which overloaded ONE constant
+    // with TWO different jobs. `nominal_root_height` (1.3076) is the goal space's
+    // TRAINING-referenced nominal -- training pelvis 1.03004 + 0.27756 -- and it must stay
+    // that, because the deploy height delta cancels the frame offset against gt_h. The FK
+    // anchor instead has to be the imu height at the DEPLOY `default_joint_pos`, a crouched
+    // PD-hold pose (knee 0.5, hip pitch -0.2) whose pelvis sits at 1.00236. That 0.02768 m
+    // pose gap was the dominant term in the +0.0325 m est_h-vs-gt_h bias measured on
+    // 2026-08-03 -- reproducible to 0.6 mm across two completely different gaits, i.e.
+    // static, not gait noise. GoalSpace is untouched here, so the gt_h path is unchanged.
+    // Known residuals, deliberately NOT compensated: the lever is applied along world z
+    // without rotating by base attitude (~1 mm at a 5 deg lean), and the FK's sole constant
+    // (-0.045, the training capsule) differs from the BRIDGE's mesh foot by -0.013 m -- a
+    // bridge modelling difference, not a robot one, so correcting for it here would be
+    // wrong on hardware. Pre-registered: this fix alone should take the bias from +0.0325
+    // to about +0.005 m; bar is <=5 mm on a cmd-0 stand.
+
+    // Feed the policy the estimate only where the operator opted in; otherwise the
+    // privileged bridge reading, byte-identical to the pre-2026-08-03 path.
+    const Eigen::Vector3f lin_vel_b = vel_from_imu_ ? est_vel : v_gt_b;
+    const float height = height_from_fk_ ? est_h : h_gt;
     // Cached for the flight recorder (run() doesn't otherwise see command/achieved-vel).
-    last_lin_vel_b_ = lin_vel_b;
+    // Deliberately the GROUND TRUTH, not `lin_vel_b`: the SafetyLogger's ach_* columns are
+    // defined as the bridge's ground truth and are shared with A0's CSV — keep them comparable.
+    last_lin_vel_b_ = v_gt_b;
     if (command.size() == 3) last_cmd_ = Eigen::Vector3f(command[0], command[1], command[2]);
     Eigen::VectorXf s = goal_space_->state(env.get(), lin_vel_b, height);
 
@@ -267,7 +402,7 @@ void State_RLHRL::policy_step()
     }
 
     // High level fires at the start of each window -> new absolute target V* (held for c steps).
-    if (step_ % c_ == 0) {
+    if (window_start) {
         if (oracle_) {
             // Analytic target: commanded twist + nominal pose (no network).
             const Eigen::Vector3f cmd(command[0], command[1], command[2]);
@@ -311,8 +446,20 @@ void State_RLHRL::policy_step()
         last_action_ = action;
         // The live phase clock in every mode (yaml default / ctor pin / HL-written).
         const float period = phase_params_["period"].as<float>();
+        // Regression guard: the deployable estimate next to the bridge's ground truth,
+        // logged whether or not it is feeding the policy. Both velocity pairs are
+        // WITHIN-WINDOW INCREMENTS of the pelvis-frame base velocity, so they are directly
+        // comparable; gt_* is 0 on real hardware (dead rt/sportmodestate).
+        // See the window_start block: `- lev` removed here too (2026-08-04). v_gt_b is the
+        // pelvis velocity, so this is now the true pelvis-frame increment and the residual
+        // est-minus-gt finally scores the waist-corrected estimator rather than cancelling
+        // its correction away.
+        const Eigen::Vector3f gt_dvel = rz(psi, v_gt_b) - gt_vel0_;
+        const float est[3] = { est_vel.x(), est_vel.y(), est_h };
+        const float gt[3]  = { gt_dvel.x(), gt_dvel.y(), h_gt };
         telemetry_.record(step_ * (float)env->step_dt, command.data(), s, target_, period,
-                          env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar);
+                          env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar,
+                          est, gt);
     }
 }
 
@@ -324,6 +471,51 @@ void State_RLHRL::run()
     // instead of the policy action (upper body held; obs still see all joints).
     static const auto hold_ids = env->cfg["hold_joint_ids"]
         ? env->cfg["hold_joint_ids"].as<std::vector<int>>() : std::vector<int>{};
+
+    // ADR-0006 Spec B: same per-joint encoder-zero correction the articulation applied on
+    // read (unitree_articulation.h). q_cmd below is in TRUE joint coordinates; convert back
+    // to reported coordinates right before the wire write, AFTER the safety clamp, so the
+    // clamp keeps protecting in the coordinates the firmware itself compares against.
+    static const auto joint_offset = env->cfg["joint_offset"]
+        ? env->cfg["joint_offset"].as<std::vector<float>>() : std::vector<float>{};
+
+    // [ESTIMATOR] Integrate the gravity-free IMU acceleration at the 1 kHz CONTROL rate.
+    // This must live here and NOT in policy_step(): at the 50 Hz policy rate the same
+    // reconstruction is ~4x worse, because foot-impact transients alias
+    // (play.py --check-vel-increment prints both rungs: "waist-corr @50Hz" vs "@200Hz",
+    // and 200 Hz is only a conservative stand-in for what this loop gets).
+    // The accelerometer includes gravity like any real IMU, so removal is a + proj_grav*|g|.
+    // BOTH are already in the TORSO frame: the H1-2 IMU — and the bridge's `imu` site
+    // (scene_h1_2.xml framequat/gyro/accelerometer) — sit on torso_link, so root_quat_w IS
+    // the torso attitude. The python reference has to undo the waist yaw first only because
+    // its projected_gravity_b is the PELVIS frame; applying Rz(-psi) here would be a bug.
+    // This takes its OWN lowstate snapshot rather than sharing the safety filter's read
+    // below: msg_ is republished asynchronously by the DDS callback thread (Subscription.h),
+    // so folding the two reads into one would silently change WHICH sample the fall detector
+    // sees. An extra uncontended lock per 1 ms tick is the cheaper price.
+    Eigen::Vector3f est_acc_b;
+    Eigen::Quaternionf est_quat;
+    {
+        std::lock_guard<std::mutex> lock(lowstate->mutex_);
+        est_acc_b = Eigen::Vector3f(
+            lowstate->msg_.imu_state().accelerometer()[0],
+            lowstate->msg_.imu_state().accelerometer()[1],
+            lowstate->msg_.imu_state().accelerometer()[2]
+        );
+        est_quat = Eigen::Quaternionf(
+            lowstate->msg_.imu_state().quaternion()[0],
+            lowstate->msg_.imu_state().quaternion()[1],
+            lowstate->msg_.imu_state().quaternion()[2],
+            lowstate->msg_.imu_state().quaternion()[3]
+        );
+    }
+    {
+        // Only dv_ crosses the thread boundary; policy_step() reads and zeroes it under the
+        // same mutex. Three floats, uncontended — nothing else here is shared.
+        std::lock_guard<std::mutex> lock(est_mu_);
+        dv_ += (est_acc_b + (est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W) * kGravity)
+               * H1_2_CONTROL_DT;
+    }
 
 #if SAFETY_FILTER
     // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
@@ -376,7 +568,8 @@ void State_RLHRL::run()
         if (q_cmd < lo || q_cmd > hi) { q_cmd = std::clamp(q_cmd, lo, hi); any_clamp = true; }
         if (std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end())
             q_cmd = env->robot->data.default_joint_pos[i];
-        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd;
+        const float offset = (i < (int)joint_offset.size()) ? joint_offset[i] : 0.0f;
+        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd - offset;
     }
     joint_hold = any_clamp;  // recorded as trig_joint in the flight log (no hold effect)
 
@@ -397,7 +590,9 @@ void State_RLHRL::run()
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {
         int jid = (int)env->robot->data.joint_ids_map[i];
         bool held = std::find(hold_ids.begin(), hold_ids.end(), jid) != hold_ids.end();
-        lowcmd->msg_.motor_cmd()[jid].q() = held ? env->robot->data.default_joint_pos[i] : action[i];
+        float q_cmd = held ? env->robot->data.default_joint_pos[i] : action[i];
+        const float offset = (i < (int)joint_offset.size()) ? joint_offset[i] : 0.0f;
+        lowcmd->msg_.motor_cmd()[jid].q() = q_cmd - offset;
     }
 #endif
 }

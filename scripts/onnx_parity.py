@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -127,6 +128,14 @@ def main():
   ap.add_argument("--seed", type=int, default=0)
   ap.add_argument("--tol", type=float, default=1e-4)
   ap.add_argument("--device", default=None)
+  ap.add_argument("--onnx-dir", default=None,
+                  help="Compare the checkpoint's torch actor(s) against the ONNX files in "
+                       "THIS directory (e.g. deploy/.../exported/) instead of against a "
+                       "fresh temp export. Without it this script only ever validates the "
+                       "export FUNCTION -- a correct function plus a stale DEPLOYED file "
+                       "passes clean, which is exactly how a parked WL-D arm-6 export ran "
+                       "unnoticed on 2026-08-03. Use this to prove that what is deployed "
+                       "IS the named checkpoint, numerically, when md5 cannot say so.")
   args = ap.parse_args()
 
   import mjlab.tasks  # noqa: F401  (populates the task registry)
@@ -192,6 +201,21 @@ def main():
     policy_model = runner.alg.get_policy().to("cpu")
     nets["policy"] = (lambda x, m=policy_model: _mlp_forward(m, x), policy_model.obs_dim,
                       os.path.join(tmp, "policy.onnx"))
+
+  if args.onnx_dir:
+    # Point the comparison (and, via nets[...][2], the metadata cross-check) at the
+    # DEPLOYED files. The torch side stays the reference, so a pass here means "the ONNX
+    # sitting in that directory computes this checkpoint's policy". The temp export above
+    # still ran and is left untouched -- it costs little and doubles as a control.
+    target = Path(args.onnx_dir).resolve()
+    missing = [f"{n}.onnx" for n in nets if not (target / f"{n}.onnx").exists()]
+    if missing:
+      raise SystemExit(f"--onnx-dir {target}: missing {', '.join(missing)}")
+    nets = {n: (fn, dim, str(target / f"{n}.onnx")) for n, (fn, dim, _) in nets.items()}
+    print(f"\n[PARITY] comparing against DEPLOYED ONNX in {target}")
+    for n in nets:
+      print(f"[PARITY]   {n}.onnx md5="
+            f"{hashlib.md5((target / f'{n}.onnx').read_bytes()).hexdigest()}")
 
   torch.manual_seed(args.seed)
   results: dict = {}

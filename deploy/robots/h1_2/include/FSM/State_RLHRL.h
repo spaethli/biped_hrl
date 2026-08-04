@@ -2,20 +2,25 @@
 // obs), this runs the hierarchy: a high level fires every `c` steps and emits a bounded
 // goal g -> absolute target V* (held over the window); the low level observes the
 // remaining delta V* - s (command removed) and acts. Velocity/height for the goal-space
-// state s come from the sim HighState (SportModeState) — see State_RLHRL.cpp.
+// state s come from the sim HighState (SportModeState) — see State_RLHRL.cpp — or, opt-in
+// (`hrl.base_vel_from_imu` / `hrl.base_height_from_fk`), from the deployable IMU/FK
+// estimator described below, which is what a real H1-2 can actually run on.
 //
 // A0 path (State_RLBase) is untouched; pick this state via config.yaml `type: RLHRL`.
 #pragma once
 
 #include "FSM/FSMState.h"
 #include "isaaclab/envs/mdp/terminations.h"
+#include "hrl/base_state.h"
 #include "hrl/goal_space.h"
 #include "hrl/hrl_telemetry.h"
 
 #include <unitree/dds_wrapper/robots/go2/go2.h>  // go2::subscription::SportModeState
 
+#include <array>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <thread>
 #include <cstdlib>
@@ -52,6 +57,26 @@ public:
         }
 
         env->robot->update();
+
+        // Re-prime the base-state estimator for this entry. Without it a re-entry keeps the
+        // dv_ left over from the last tick before exit(), plus the lev0_/gt_vel0_ captured
+        // in the previous entry's window, until the next window start clears them — up to
+        // c-1 policy steps of a bogus velocity increment (bounded by |w||r| ~ 0.4 m/s),
+        // which the LL would see as a real goal error. step_ deliberately does NOT reset
+        // here (telemetry continuity), so the first partial window after a re-entry is a
+        // little short; that window's target_ is stale from before the exit anyway.
+        {
+            const float psi = sdk_slot_[12] >= 0
+                ? env->robot->data.joint_pos[sdk_slot_[12]] : 0.0f;
+            const Eigen::Vector3f lev =
+                env->robot->data.root_ang_vel_b.cross(hrl::kImuOffsetT);
+            std::lock_guard<std::mutex> lock(est_mu_);
+            dv_.setZero();
+            lev0_ = hrl::rz(psi, lev);
+            gt_vel0_ = hrl::rz(psi, (env->robot->data.root_quat_w.conjugate()
+                                     * highstate_->velocity()) - lev);
+        }
+
         // step_ drives the telemetry timestamp (t = step_*step_dt) and the HL firing
         // schedule (step_ % c_); only zero it on the FIRST entry this process, so re-
         // entries (retries within one session) don't collide their `t` back onto an
@@ -152,6 +177,35 @@ private:
     // step_dt cadence, read by run() at the 1kHz control loop, same split as last_action_.
     Eigen::Vector3f last_cmd_{0, 0, 0};
     Eigen::Vector3f last_lin_vel_b_{0, 0, 0};  // sim-only ground truth, ~0 on real hardware
+
+    // --- Deployable base-state estimator (2026-08-03) --------------------------------
+    // rt/sportmodestate is the only source of base velocity/height today, and it publishes
+    // ZEROS once our own low-level controller has command of a real H1-2 (E1). Two
+    // replacements, both opt-in from deploy.yaml's `hrl:` block; an ABSENT key keeps the
+    // SportModeState path, so every existing config/checkpoint replays byte-identically:
+    //   base_vel_from_imu   -> the WITHIN-WINDOW base-velocity increment, integrated from
+    //                          the torso IMU in run() at 1 kHz. Legitimate only because
+    //                          `delta` mode cancels absolute velocity:
+    //                          V* - s_i = scale*g - (s_i - s_t0).
+    //   base_height_from_fk -> lowest-foot forward kinematics off the leg encoders.
+    // Both are computed UNCONDITIONALLY so the telemetry can score them against the sim
+    // bridge's ground truth (permanent regression guard) even while the policy is still
+    // being fed the privileged signal.
+    bool vel_from_imu_{false};
+    bool height_from_fk_{false};
+    float nominal_h_{0.0f};        // hrl.nominal_root_height (imu-site referenced, 1.3076)
+    float fk_h_nominal_{0.0f};     // leg FK evaluated at default_joint_pos -> the anchor
+    std::array<int, 13> sdk_slot_; // sdk motor id (0-11 legs, 12 waist) -> articulation slot
+
+    // dv_ is the ONLY state shared across the two threads: run() (1 kHz control loop)
+    // integrates the gravity-free IMU acceleration into it; policy_step() (50 Hz policy
+    // thread) reads it and zeroes it at each HL window start. Three floats under est_mu_.
+    std::mutex est_mu_;
+    Eigen::Vector3f dv_{0, 0, 0};
+    // Policy-thread-only (never touched by run(), so no lock): the window-start lever-arm
+    // term and the window-start ground-truth pelvis velocity.
+    Eigen::Vector3f lev0_{0, 0, 0};
+    Eigen::Vector3f gt_vel0_{0, 0, 0};
 
     std::thread policy_thread;
     bool policy_thread_running = false;

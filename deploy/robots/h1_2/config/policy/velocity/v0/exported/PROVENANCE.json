@@ -1,0 +1,10 @@
+{
+  "staged_at": "2026-08-04T13:38:44+02:00",
+  "checkpoint": "logs/rsl_rl/h1_2_velocity_v2/2026-07-15_08-29-26_a0_v2_optB_rs20_baseline/model_10000.pt",
+  "source_run": "2026-07-15_08-29-26_a0_v2_optB_rs20_baseline",
+  "md5": {
+    "policy.onnx": "8a3871d534030cadf7409f4c8fe08771"
+  },
+  "staged_by": "scripts/deploy_provenance.py",
+  "checkpoint_verified_numerically": false
+}

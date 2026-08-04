@@ -42,8 +42,22 @@ REPO = Path(__file__).resolve().parent.parent
 BRIDGE = '/opt/unitree_mujoco/simulate/build/unitree_mujoco'
 SETUP = Path.home() / 'ramlab_ws' / 'setup_all_mujoco.sh'
 CTRL_DIR = REPO / 'deploy' / 'robots' / 'h1_2' / 'build'
-# G2.1 stand -> G2.2 held 0.3/0.5/1.0 -> G2.3 return to stand. `w` is the vx=1.0 range edge.
-DEFAULT_SEQ = '0:10,3:12,0:4,5:12,0:4,w:12,0:8'
+# Full G2.2 + G2.3 battery (2026-08-04). ~253 s. Every command change is a scored
+# TRANSITION window in deploy_gate_analyzer -- steady holds alone miss decel failures, and
+# the 2026-08-03 fall happened on the 0.5 -> 0 deceleration, not inside any hold.
+#   line 1: G2.2 forward parity holds (>=30 s each) + G2.3's 0->1.0-from-stand, the case
+#           the plan calls the historical bridge killer
+#   line 2: backward + strafe both ways        line 3: yaw both ways
+#   line 4: G2.3 walk -> turn -> stop
+# DEVIATION ON RECORD: the keyboard map (h1_2_observations.h:36-53) has no +-0.3 lateral
+# preset -- s=-0.5, a/d=+-0.5, q/e=+-0.5 -- so G2.2's backward/strafe legs run at +-0.5,
+# STRICTER than the gate specifies. Not silently weakened, and not "fixed" by editing the
+# key map, which would change what every historical capture means.
+# The 3:30 hold is also what the analyzer's band-release detector needs (>=10 s at >=0.3).
+DEFAULT_SEQ = ('0:8,3:30,0:6,5:30,0:6,w:30,0:8,'
+               's:15,0:6,a:15,0:6,d:15,0:6,'
+               'q:15,0:6,e:15,0:6,'
+               '5:12,q:8,0:10')
 
 
 def setup_env():
@@ -86,14 +100,33 @@ def release_band(key='9'):
   if hit is None:
     print('[band] no mujoco window found -- band NOT released')
     return False
+  # Focus WITHOUT raising (2026-08-04). The band toggle is a GLFW key callback
+  # (main.cc:622-631), and GLFW only sees keys for the FOCUSED window, so XTEST needs
+  # focus -- but not a raise. Dropping the forced raise lets the window sit behind
+  # everything else during an unattended run. An ICONIFIED window still cannot work: it is
+  # unmapped, so it cannot hold focus, which is why the assert below exists.
   hit.set_input_focus(X.RevertToParent, X.CurrentTime)
-  hit.configure(stack_mode=X.Above)
   d.sync()
   time.sleep(0.4)
+  # Assert focus actually landed. Without this the function returned True having proved
+  # nothing: the toggle is silent (no log line anywhere), so a swallowed keypress produced
+  # a session that looked perfect -- correct FSM transitions, CSV written, commands held --
+  # with the robot hanging on the harness for the entire run.
+  focused = d.get_input_focus().focus
+  try:
+    ok = focused.id == hit.id or focused.query_tree().parent.id == hit.id
+  except Exception:
+    ok = False
+  if not ok:
+    print('[band] FOCUS DID NOT LAND on the mujoco window -- band NOT released. '
+          'Is the window iconified? It must be mapped (backgrounded is fine).')
+    return False
   code = d.keysym_to_keycode(ord(key))
   xtest.fake_input(d, X.KeyPress, code); d.sync(); time.sleep(0.05)
   xtest.fake_input(d, X.KeyRelease, code); d.sync()
-  print(f'[band] released (key {key})')
+  # NB this is a TOGGLE, not a release: sending it twice re-attaches the band. The
+  # analyzer's travel check is the backstop that catches that (and every other cause).
+  print(f'[band] released (key {key}, focus verified)')
   return True
 
 
@@ -107,6 +140,11 @@ def main():
   ap.add_argument('--stand-s', type=float, default=6.0, help='FixStand settle before takeover')
   ap.add_argument('--no-band', action='store_true', help='leave the elastic band attached')
   ap.add_argument('--no-analyze', action='store_true')
+  ap.add_argument('--deploy-cfg', default=None,
+                  help='override H1_2_DEPLOY_CFG (default: whatever setup_all_mujoco.sh '
+                       'exports, deploy.yaml). Filename must exist under the policy_dir\'s '
+                       'params/ directory. For testing a params variant against the sim '
+                       'bridge without touching the shipped deploy.yaml/deploy_real.yaml.')
   args = ap.parse_args()
 
   # A stale controller holds the DDS lowcmd channel and the new one refuses to start
@@ -118,6 +156,9 @@ def main():
 
   env = setup_env()
   env['DISPLAY'] = env.get('DISPLAY', ':0')
+  if args.deploy_cfg:
+    env['H1_2_DEPLOY_CFG'] = args.deploy_cfg
+    print(f'[cfg] H1_2_DEPLOY_CFG overridden -> {args.deploy_cfg}')
   ts = time.strftime('%Y-%m-%d_%H-%M-%S')
   base = REPO / 'logs' / 'deploy_safety' / f'{ts}_{args.tag}'
   base.parent.mkdir(parents=True, exist_ok=True)
@@ -177,8 +218,17 @@ def main():
       f.close()
 
   print(f'[done] {base}.csv')
-  if not args.no_analyze and (Path(f'{base}.csv')).exists():
-    subprocess.run(['python', str(REPO / 'scripts' / 'deploy_gate_analyzer.py'), f'{base}.csv'])
+  if not args.no_analyze:
+    # Both CSVs, not just the base one (D1, fixed 2026-08-04). An HRL session writes TWO
+    # files and this used to hand over only `<base>.csv`, so `_hrl.csv` -- the one with
+    # height, the pre-computed act_rate/period, and since 2026-08-03 the est_*/gt_*
+    # estimator columns -- was never read at all. They are complementary, not
+    # alternatives: the base CSV carries the safety triggers and the A0-comparable
+    # columns, the hrl CSV carries everything the hierarchy adds.
+    for csv_path in (f'{base}_hrl.csv', f'{base}.csv'):
+      if Path(csv_path).exists():
+        print(f'\n=== analyzing {Path(csv_path).name}')
+        subprocess.run(['python', str(REPO / 'scripts' / 'deploy_gate_analyzer.py'), csv_path])
 
 
 if __name__ == '__main__':

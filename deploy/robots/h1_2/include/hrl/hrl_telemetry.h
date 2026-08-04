@@ -48,19 +48,31 @@ public:
         std::fprintf(f, "t,cmd_vx,cmd_vy,cmd_wz");
         for (int i = 0; i < goal_dim_; ++i) std::fprintf(f, ",s%d", i);
         for (int i = 0; i < goal_dim_; ++i) std::fprintf(f, ",tgt%d", i);
-        std::fprintf(f, ",period,hip_pitch_l,hip_pitch_r,act_rate,entry\n");
+        std::fprintf(f, ",period,hip_pitch_l,hip_pitch_r,act_rate,entry");
+        // Deployable-estimator regression guard (2026-08-03). est_* is what the real robot
+        // can compute for itself (IMU-integrated velocity increment + leg-FK height);
+        // gt_* is the sim bridge's SportModeState ground truth. Logged side by side EVEN
+        // WHEN the estimator is not feeding the policy (hrl.base_vel_from_imu /
+        // base_height_from_fk absent), so any bridge session doubles as a regression check.
+        // est_vx/est_vy and gt_vx/gt_vy are WITHIN-WINDOW INCREMENTS of the pelvis-frame
+        // base velocity (the quantity `delta` mode actually needs), reset at every HL
+        // window start; est_h/gt_h are absolute heights. On real hardware gt_* read 0
+        // (rt/sportmodestate goes silent) — only a bridge run scores this pair.
+        std::fprintf(f, ",est_vx,est_vy,est_h,gt_vx,gt_vy,gt_h\n");
         std::fclose(f);
     }
 
     bool enabled() const { return enabled_; }
 
+    // est/gt: {vx, vy, h} — see the est_*/gt_* header note in init().
     void record(float t, const float* cmd, const Eigen::VectorXf& s,
                 const Eigen::VectorXf& target, float period,
-                float hip_pitch_l, float hip_pitch_r, float act_rate)
+                float hip_pitch_l, float hip_pitch_r, float act_rate,
+                const float est[3], const float gt[3])
     {
         if (!enabled_) return;
         std::vector<float> row;
-        row.reserve(8 + 2 * goal_dim_);
+        row.reserve(14 + 2 * goal_dim_);
         row.push_back(t);
         row.insert(row.end(), cmd, cmd + 3);
         row.insert(row.end(), s.data(), s.data() + goal_dim_);
@@ -70,6 +82,8 @@ public:
         row.push_back(hip_pitch_r);
         row.push_back(act_rate);
         row.push_back((float)entry_);
+        row.insert(row.end(), est, est + 3);
+        row.insert(row.end(), gt, gt + 3);
         rows_.push_back(std::move(row));
         if (rows_.size() >= FLUSH_ROWS) flush();
     }
