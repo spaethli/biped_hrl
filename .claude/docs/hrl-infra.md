@@ -166,6 +166,14 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   WL-C). **Caveat: pre-2026-07-15 probe numbers on cadence-HL checkpoints ran with a
   frozen `hrl_phase` clock** (the loop didn't advance it; de-entrained LL ⇒ flattering) —
   fixed to mirror `get_inference_policy`.
+- **Action-rate decomposition** (smoothness, 2026-07-28): `play.py --checkpoint-file <pt>
+  --diagnose-action-rate 600 --eval-seeds 2 --num-envs 64` → bins `||a_t − a_{t−1}||` by
+  position in the HL window (`step % c`; bin 0 = the fire step, where the goal obs jumps) and
+  by joint group (legs/arms/waist), + `[ARDIAG] {json}`. Answers "is A1's twitch the goal
+  channel stepping at `1/(c·dt)` Hz, or a uniform floor?" Key fields: `fire_excess`
+  (= bin0 ÷ mean of the rest; **A0 ≈ 0.98 is the flat control** — run it, any structure there
+  is a binning artifact), `ar_mean` (reproduces the bench `action_rate`, a built-in
+  cross-check), and the per-group shares. Works on A0 (no `c`; defaults to 8).
 - **IMU velocity-increment bench** (deploy feasibility, 2026-08-01): `play.py
   --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` → per-axis
   RMS error of an IMU-only reconstruction of the within-window base-velocity increment, over
@@ -189,10 +197,22 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   ~nothing — 85% of steps are single-support, where there is no attribution ambiguity).
 - ⚠ **Rate gotcha, cost 2-4x and flipped two verdicts on 2026-08-03: never finite-difference
   or integrate a fast signal at the 50 Hz control rate.** Both `[VELINC]` and `[LEGODOM]`
-  first measured at `step_dt` and read 2-4x worse than at the physics rate. Deploy runs these
-  in `State_RLHRL::run()` (1 kHz), so benches must too — hook
+  first measured at `step_dt` and read 2-4x worse than at the physics rate. Benches must hook
   `metrics_manager.compute_substep()`, which the decimation loop calls per substep
   (`manager_based_rl_env.py:421-427`).
+  **But the deploy platform does NOT sustain 1 kHz** (measured 2026-08-03 from the safety
+  CSV written by `State_RLHRL::run()`): dt p50 1-2 ms but **p90=p99=max=10.00 ms** across
+  three independent runs, on top of a known 2-6 ms system lag. So a sim measurement at
+  physics rate is an upper bound the hardware may not reach — the bridge read the estimator
+  5-8x worse than sim predicted (vx 0.115/vy 0.205 vs 0.020/0.025). Whether the 10 ms tail is
+  a control stall, a logger decimation or the DDS republish period is UNRESOLVED.
+- ⚠ **Verify which policy is actually deployed before any bridge run** — by **md5 against the
+  run dir**, not the ONNX `run_path` metadata (training-time exports write `local`). On
+  2026-08-03 three bridge runs and an estimator measurement were invalidated because the
+  deploy dir held a parked WL-D arm-6 export (`rolloverfix0p5`) that fell reproducibly.
+  Attribute any bridge failure by **policy-swap against A0 as control** before suspecting
+  code: A0 exercises the shared layer (articulation, `joint_offset`, safety filter) without
+  the HRL path, so A0-clean + HRL-fails isolates the fault to the HRL path or the policy.
 - **`find_joints`/`find_sites` return MODEL order, not query order** (`preserve_order=False`
   by default, `mjlab/entity/entity.py:505,549`). Pass `preserve_order=True` and assert the
   names whenever index order is load-bearing (e.g. pairing per-leg joints with foot sites).
