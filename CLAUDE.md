@@ -88,10 +88,26 @@ a few lines), work in explicit stages and get explicit user go-ahead between the
    after implementing; report results honestly.
 
 **Regression suite (2026-07-29):** `pytest` (CPU-only, no MuJoCo/GPU, ~3 s) guards the
-goal decode, reward-term direction/gating, the warm-start column map and deploy/training
-config parity. Run it before and after any change to those. New tests must be proven
-able to fail: `python scripts/check_test_sensitivity.py` re-introduces each historical
-defect and checks it is caught. Details → `.claude/docs/hrl-infra.md`.
+goal decode, reward-term direction/gating, the warm-start column map, deploy/training
+config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
+change to those. New tests must be proven able to fail:
+`python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
+it is caught (74 tests, 32/32 mutations). A test that restates the logic it guards cannot
+fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
+
+**Deploy readiness (2026-08-04): one command, one verdict.**
+```bash
+python scripts/deploy_readiness.py <TaskID> --checkpoint-file <pt> --tag <name>
+```
+`provenance → sim → bridge (candidate + A0 control) → analyze`, ~15-25 min, exit
+**0 GO / 3 CAVEAT / 1 NO-GO / 2 INFRA**. Fail-closed: never GO from a stage it could not
+score. Use it instead of hand-driven bridge sessions. **Always check what is deployed
+first** — `scripts/deploy_provenance.py --check --checkpoint-file <pt>` md5-identifies the
+deployed ONNX against every run export and names the source run (`run_path` metadata is
+always `local`). **Step-by-step operating manual, each step mapped to its manual W/G gate
+and the command to run it by hand → `doc/hrl/A1a_deploy_plan.md` "HOW TO RUN THE GATES".**
+⚠ `bridge_replica.py` is **retired as a gate** (no C++, no DDS, doesn't model the safety
+filter or `hold_joint_ids`); opt-in via `--stages ...,replica` for plant/latency A/B only.
 
 Don't start editing code mid-diagnosis because a fix "seems obvious" — present the
 analysis and the proposed change first.

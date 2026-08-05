@@ -215,6 +215,76 @@ implementation follows the mapping above, matching the training-side semantics a
 `hrl_runner.py` (hl_vel append order: policy, command, hl_vel) and `td3.py`
 (tanh -> range affine map, same endpoints as the S1c test: g=-1 -> range lo, g=+1 -> hi).
 
+## HOW TO RUN THE GATES (2026-08-05) — automated, with the manual equivalent of each step
+
+The G1/G2 ladder is executed by one command. This section is the operating manual: what
+each step does, what it checks, what the corresponding manual gate is, and the exact
+command to run that step by hand if you need to.
+
+```bash
+conda activate unitree_mjlab_h1_2_rl
+python scripts/deploy_readiness.py Unitree-H1_2-Flat-A1 \
+    --checkpoint-file logs/rsl_rl/h1_2_velocity_a1_v2/<run>/model_10000.pt \
+    --tag <session-name>
+```
+Runs ~15-25 min unattended. It takes the display for the two bridge phases (the MuJoCo
+window may sit in the background but must **not** be iconified — an iconified window cannot
+hold X focus and the elastic-band release is silently swallowed).
+
+**Exit codes:** `0` GO · `3` GO-WITH-CAVEAT · `1` NO-GO · `2` INFRASTRUCTURE.
+Useful flags: `--stages a,b,c` (subset) · `--no-stage-policy` (validate what is already in
+`exported/` instead of staging) · `--refresh-control` (force a fresh A0 arm) ·
+`--seq "..."` (override the bridge sequence) · `--policy-dir` / `--a0-dir`.
+
+### Step-by-step, with manual equivalents
+
+| # | automated step | what it actually checks | manual gate | run it by hand |
+|---|---|---|---|---|
+| 1 | **provenance P1** | md5s the deployed ONNX against a reverse index of every `logs/rsl_rl/**/*.onnx` and **names the source run**; fails if that is not the requested checkpoint's run. Stages the right one and writes `exported/PROVENANCE.json`. | *(new — no manual gate existed; its absence caused the 2026-08-03 loss)* | `python scripts/deploy_provenance.py --check --checkpoint-file <pt>` |
+| 2 | **provenance P2/P3/P4** | ONNX input dims vs deploy.yaml (HL 94 with `hl_obs_vel`, else 92; LL 89+goal_dim); `goal_scale` metadata present; `c`/`hl_target_mode`/`goal_components`/cadence range agree between ONNX and YAML. | **W5** (deploy YAML refresh) | same command as above |
+| 3 | **provenance P5** | torch actor vs the **deployed** ONNX file, < 1e-4. | **G1.2 / W4** (ONNX parity) | `python scripts/onnx_parity.py --task <T> --checkpoint-file <pt> --onnx-dir deploy/robots/h1_2/config/policy/velocity_hrl/v0/exported` |
+| 4 | **provenance P6** | `/opt/unitree_mujoco/simulate/config.yaml` `robot_scene` == the shipped scene. Asserted, never silently rewritten. | *(new)* | `grep robot_scene /opt/unitree_mujoco/simulate/config.yaml` |
+| 5 | **sim S2.1** | deterministic bench, 64 envs x 600 steps x 2 seeds. Gate: `fall_rate == 0`. | **G1.1** (bench) | `python scripts/play.py <T> --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --eval-seeds 2` |
+| 6 | **sim S2.2** | leg-group action rate (`[ARDIAG]`). **Report-only** — whole-body `act_rate` is misleading under `hold_joint_ids`. | **G1.1** (metrics) | add `--diagnose-action-rate 600` |
+| 7 | **sim S2.3** | held-command evals at vx 0.5 and 1.0. Gate: `fall_rate == 0`; records `ss_err`, `t90`, and the `[HOLDDIAG]` per-env split. | **G1.1** (held-command) | add `--eval-cmd-vx 0.5` (then `1.0`) |
+| 8 | **sim S2.4** | IMU velocity-increment reconstruction, `[VELINC].gate_rms` (the deployable waist-corrected rung — **never** the raw rung). | **E1 successor** | add `--check-vel-increment 480` |
+| 9 | **bridge (candidate)** | the real `h1_2_ctrl` binary over DDS against `/opt/unitree_mujoco`, full G2.2+G2.3 sequence, ~253 s. | **G2.0-G2.4, G2.7** | `python scripts/bridge_session.py --policy hrl --seq "<seq>" --tag <name>` |
+| 10 | **bridge (A0 control)** | identical binary, config and sequence with the A0 policy. Fingerprint-cached on A0 ONNX + `h1_2_ctrl` + deploy YAML + scene + sequence. | *(new — encodes the attribution method)* | `python scripts/bridge_session.py --policy a0 --seq "<same seq>" --tag <name>_a0` |
+| 11 | **analyze** | scores both CSVs: falls, safety-filter engagement, **transition windows**, band-release, `trig_joint` rate+magnitude, cmd-0 drift, measured loop rate, bridge estimator error. | **G2.1-G2.4 bars + W3 telemetry** | `python scripts/deploy_gate_analyzer.py <base>_hrl.csv` and `<base>.csv` |
+
+### Reading the verdict
+
+- **GO (0)** — every blocking gate passed. Cleared for the next tier, not for hardware on
+  its own; G3 protocol (harness, spotter, E-stop rehearsal) still applies.
+- **GO-WITH-CAVEAT (3)** — an estimator gate landed in its middle band. The documented
+  remedy is a `state_noise` DR retrain; the call is yours, not the pipeline's.
+- **NO-GO (1)** — a blocking gate failed. Read the A0 control column first: **A0 clean +
+  candidate failed ⇒ the fault is in the HRL path or the policy**, not the shared layer
+  (articulation, `joint_offset`, safety filter). Both failed ⇒ suspect the shared layer.
+- **INFRASTRUCTURE (2)** — a stage could not be run or scored. **This is not a pass and not
+  a failure**; the run tells you nothing about the policy. Most common cause is
+  `BAND-NOT-RELEASED` (the MuJoCo window was iconified, or the band toggle was swallowed).
+
+### What is deliberately NOT gated
+
+Reported every run, never blocking: leg action rate, transition overshoot (with A0 on the
+identical sequence alongside), `trig_joint` rate and magnitude past the stop, whole-body
+`act_rate`, stride period, cmd-0 drift, measured loop rate.
+**Surfaced as UNKNOWN:** what leg action rate is actually unsafe; what `trig_joint` rate is
+acceptable. Do not invent thresholds for these.
+
+### `bridge_replica.py` — RETIRED as a gate (2026-08-05)
+
+Removed from the default chain; still available via `--stages ...,replica`. It never ran
+C++ and **never ran DDS** (its imports are numpy/mujoco/onnxruntime/yaml), and `--delay-ms`
+emulates a *constant* latency via a deque rather than reproducing real transport jitter. It
+models neither the safety filter nor `hold_joint_ids` — i.e. not the config the robot walks
+in — nor `joint_offset`, nor the base-state estimator. **Demonstrated 2026-08-05:** on the
+shipped scene with the keeper it passed every phase including all four stops, while the real
+bridge fell on the 0.5 → 0 decel. It screens; it cannot clear. Keep it for what it is good
+at: headless plant/latency A/B (`--delay-ms`, `--plant nominal`), which the real bridge
+cannot do cheaply.
+
 ## Automated gate execution (2026-08-04): `scripts/deploy_readiness.py`
 
 The G1/G2 ladder below is now **run by one command**, not by hand. Ad-hoc bridge sessions
@@ -259,6 +329,34 @@ specifies, not weaker.
 every reference number in this document predating that date was measured on the retired
 training-proximate plant and **does not transfer** (leg action rates 0.5908/0.7552/0.8125,
 arm4d's live pass, the G2.2 parity bars). The first shipped-scene runs re-establish them.
+
+### ⚠ First full-battery result (2026-08-04): the keeper FAILS G2.2/G2.3 on the shipped plant
+
+The pipeline's first real run, on the locked B1 candidate `arm4d`:
+
+| phase | result |
+|---|---|
+| stand, cmd 0 | clean, `alpha_max` 0 |
+| held 0.3, 30 s | clean, achieved 0.239, `alpha_max` 0, travelled 7.1 m |
+| held 0.5, 30 s | clean, achieved 0.420, `alpha_max` 0, travelled 12.5 m |
+| **0.5 → 0 decel @ t=77.4** | **FALL.** `alpha` 0.58 → 1.0; down for the remaining ~170 s |
+| **A0 control, identical sequence** | **clean — 0 falls, 19/19 transitions clean, `alpha_max` 0** |
+
+Same signature as the 2026-08-03 fall: **the deceleration, not any held segment**. This is
+exactly the failure class the transition gate was added for, and the old 4-command sequence
+(`0:8,3:15,5:15,0:8`) does **not** reproduce it — a 15 s hold before the decel passes where a
+30 s hold falls.
+
+**Attribution, per the A0-control methodology:** A0 clean + candidate falls on the identical
+binary, config and sequence ⇒ the fault is in **the HRL path or the policy**, not the shared
+layer (articulation, `joint_offset`, safety filter).
+
+**Caveats, on the record.** n=1. The keeper's "bridge-passed" status was earned on the
+retired training-proximate plant, never on the shipped one, so this is a first measurement
+rather than a regression. Whether it is the longer hold, the plant, or run-to-run variance
+is **not yet separated** — the cheap next step is repeat runs at 15 s vs 30 s holds on both
+plants. **Until that is done, `arm4d` should not be treated as a validated hardware
+candidate on the shipped plant.**
 
 ## Phase G1: mjlab candidate battery (per candidate, ~30 min)
 

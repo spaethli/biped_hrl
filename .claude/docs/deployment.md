@@ -219,9 +219,20 @@ of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity esti
 
 ## Stage-D bridge validation battery (designed 2026-07-14, grilled; run before any H1-2 session)
 
-Tooling (2026-07-15/16): `scripts/onnx_parity.py` (step 1, `[PARITY]` json, CPU-vs-CPU);
-`scripts/bridge_replica.py` (headless bridge replica, A0+HRL, both scenes, `--delay-ms`,
-full chain — pre-session sanity + plant/latency A/B; NOT a substitute for the C++ gates);
+> **RUN THIS VIA `scripts/deploy_readiness.py` (2026-08-04).** One command chains
+> provenance → sim → bridge (candidate + A0 control) → analyze into a single verdict
+> (exit 0 GO / 3 CAVEAT / 1 NO-GO / 2 INFRA). Step-by-step operating manual, with the
+> manual command for each step and its corresponding W/G gate, is in
+> `doc/hrl/A1a_deploy_plan.md` ("HOW TO RUN THE GATES"). Check what is deployed FIRST:
+> `python scripts/deploy_provenance.py --check --checkpoint-file <pt>`.
+
+Tooling (2026-07-15/16): `scripts/onnx_parity.py` (step 1, `[PARITY]` json, CPU-vs-CPU;
+pass `--onnx-dir` to score the **deployed** file rather than a fresh temp export);
+`scripts/bridge_replica.py` (⚠ **RETIRED as a gate 2026-08-05** — no C++, **no DDS at all**,
+`--delay-ms` emulates a constant latency via a deque; models neither the safety filter nor
+`hold_joint_ids` nor `joint_offset` nor the base-state estimator. It passed every phase on
+the shipped scene where the real bridge fell on the 0.5→0 decel. Out of the default chain;
+keep for headless plant/latency A/B only — it screens, it cannot clear);
 `scripts/deploy_gate_analyzer.py` (per-segment metrics from the `<base>_hrl.csv` telemetry
 that State_RLHRL writes when `H1_2_SAFETY_LOG` is set). Full gate plan:
 `doc/hrl/A1a_deploy_plan.md`. **Two bugs fixed in `bridge_replica.py` (2026-07-17):** a

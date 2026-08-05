@@ -5,7 +5,9 @@ marker another tool already prints. Replaces ad-hoc bridge sessions, which is wh
 2026-08-03 failures came from: a policy nobody had checked, a rate read off a column that
 was never a clock, and a session called good from its FSM transition log.
 
-  provenance -> sim -> replica -> bridge (candidate + A0 control) -> analyze
+  provenance -> sim -> bridge (candidate + A0 control) -> analyze
+
+  (`replica` exists as an opt-in stage but is NOT in the default chain -- see stage_replica.)
 
 EXIT CODES        0 GO | 3 GO-WITH-CAVEAT | 1 NO-GO | 2 INFRASTRUCTURE
 FAIL-CLOSED RULE  never report GO from a stage that could not be scored. An unrunnable or
@@ -203,13 +205,29 @@ def _velinc_gate(v: dict):
 
 
 def stage_replica(args, results):
+  """Headless python re-implementation of the bridge loop. Cheap plant/latency screen; it
+  CANNOT see C++ defects (it does not run `h1_2_ctrl` at all), so it screens, never clears.
+
+  `--scene` must be passed explicitly: bridge_replica defaults to `scene.xml`, which is the
+  RETIRED training-proximate plant, so omitting it silently screens against a plant we no
+  longer gate on.
+  """
   rc, out = run(["python", "scripts/bridge_replica.py", "--policy",
                  "hrl" if "A1" in args.task else "a0",
-                 "--onnx-dir", str(args.policy_dir / "exported"), "--delay-ms", "4"])
-  fell = "fall" in out.lower() and "no fall" not in out.lower()
-  results.append(Result("replica", "S3 replica @4ms",
-                        "INFRA" if rc != 0 else ("FAIL" if fell else "PASS"),
-                        f"rc={rc}"))
+                 "--onnx-dir", str(args.policy_dir / "exported"),
+                 "--delay-ms", "4", "--scene", EXPECTED_SCENE])
+  # Read the tool's own verdict. A previous version tested `"fall" in out.lower()`, but the
+  # replica prints "FELL"/"ok" -- and "fell" does not contain "fall", so that gate was
+  # silently ALWAYS-PASS. Never scrape prose for a verdict a tool already publishes.
+  rep = marker(out, "REPLICA")
+  if rep is None or "pass" not in rep:
+    results.append(Result("replica", "S3 replica @4ms", "INFRA",
+                          f"no [REPLICA] verdict (rc={rc})"))
+    return
+  bad = [p.get("phase", "?") for p in rep.get("phases", []) if p.get("fell")]
+  results.append(Result("replica", f"S3 replica @4ms ({EXPECTED_SCENE})",
+                        "PASS" if rep["pass"] else "FAIL",
+                        "no falls" if rep["pass"] else f"fell in: {', '.join(bad)}"))
 
 
 def control_fingerprint(args) -> str:
@@ -342,7 +360,12 @@ def main() -> int:
   ap.add_argument("--checkpoint-file", type=Path, required=True)
   ap.add_argument("--policy-dir", type=Path, default=prov.HRL_DIR)
   ap.add_argument("--a0-dir", type=Path, default=prov.A0_DIR)
-  ap.add_argument("--stages", default="provenance,sim,replica,bridge,analyze")
+  # `replica` is NOT in the default chain (2026-08-05). It runs no C++ and no DDS, models
+  # neither the safety filter nor `hold_joint_ids` (the actual hardware config), and it
+  # passed every phase -- including all four stops -- on the same keeper/plant where the
+  # real bridge fell on the 0.5->0 decel. Opt in with --stages ...,replica for a plant or
+  # latency A/B, which is the one thing it is still good at.
+  ap.add_argument("--stages", default="provenance,sim,bridge,analyze")
   ap.add_argument("--tag", default="readiness")
   ap.add_argument("--seq", default=None, help="bridge sequence (default: the full battery)")
   ap.add_argument("--refresh-control", action="store_true")

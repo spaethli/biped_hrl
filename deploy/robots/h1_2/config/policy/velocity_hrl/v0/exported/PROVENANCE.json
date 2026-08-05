@@ -1,5 +1,5 @@
 {
-  "staged_at": "2026-08-04T14:03:04+02:00",
+  "staged_at": "2026-08-05T08:35:40+02:00",
   "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-07-17_21-46-14_a1a_cot0p2_cad0p5_energy0p05_s42/model_10000.pt",
   "source_run": "2026-07-17_21-46-14_a1a_cot0p2_cad0p5_energy0p05_s42",
   "md5": {

@@ -1,5 +1,28 @@
 """Headless replica of the /opt/unitree_mujoco C++ bridge (deploy plan, born 2026-07-15).
 
+>>> RETIRED AS A GATE 2026-08-05. Special-purpose instrument only; NOT in the
+>>> `deploy_readiness.py` default chain. Use `scripts/bridge_session.py` (the real binary)
+>>> for anything that has to be trusted.
+>>>
+>>> WHY. It never ran C++ and it never ran DDS -- the imports here are numpy/mujoco/
+>>> onnxruntime/yaml and nothing else; "DDS" below describes only what --delay-ms EMULATES.
+>>> That delay is a fixed-length deque on (q, dq), i.e. a clean CONSTANT latency, not the
+>>> variable jitter/scheduling of the real transport. And it has drifted far from what
+>>> ships: it models neither the safety filter (alpha ramp, trig_tilt/trig_fall) nor
+>>> `hold_joint_ids` (the split-deploy config the robot actually walks in), nor
+>>> `joint_offset` (ADR-0006 Spec B), nor the 2026-08-03/04 base-state estimator. Its joint
+>>> limits, PD gains and FixStand pose are hand-copied constants with no shared source of
+>>> truth.
+>>>
+>>> DEMONSTRATED COST, 2026-08-05: on the shipped scene with the keeper it passed EVERY
+>>> phase including all four stops, while the real bridge fell on the 0.5 -> 0 deceleration.
+>>> Same policy, same plant, same ONNX. It screens; it can never clear.
+>>>
+>>> STILL GENUINELY USEFUL FOR: plant and latency A/B sweeps (`--delay-ms`, `--plant
+>>> nominal`), where re-implementing the controller is the POINT -- you can sweep conditions
+>>> headlessly in seconds. That is what it was built for (WL-E / the 2026-07-15 latency
+>>> finding) and it remains the only tool that can do it.
+
 Reproduces the bridge loop without the GUI: explicit torque PD at the scene physics dt,
 optional feedback delay (the bridge's DDS/thread latency, the destabilizer that killed the
 training-nominal plant), the elastic band (k=200 d=100 anchor (0,0,3)), and the deployed
