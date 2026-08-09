@@ -83,3 +83,57 @@ class GoalStateNoise:
       self.drift = self.drift_decay * self.drift + torch.randn_like(self.drift) * self.drift_std
     noisy = filt + self.bias + self.drift
     return state.clone().index_copy_(1, self.cols_t, noisy)
+
+
+class HlVelJitter:
+  """HL-only base-velocity jitter (leg-odometry probe, 2026-08-05).
+
+  Corrupts ONLY the value written to ``obs["hl_vel"]`` (the TD3 HL's optional deployable
+  base lin-vel input, ``hl_obs_vel``) — never ``state``/``state_n``. This is deliberately
+  a *separate* mechanism from :class:`GoalStateNoise`: that class corrupts ``state_n``,
+  which feeds the LL's goal delta ``V*-state_n`` too, and a `delta`-mode LL cancels any
+  *constant* corruption there (only ``noise_off`` — the reused ``GoalStateNoise`` offset —
+  is safe to carry into ``V*``). White-ish per-window jitter does NOT cancel in that
+  difference map, so it must never reach ``state_n`` — corrupting it here would corrupt
+  the one channel measured accurate on the bridge (vx 0.0139 / vy 0.0288). Two components:
+
+  * **bias** — a fixed per-axis constant (leg odometry's own systematic error; NOT
+    resampled — it is a property of the estimation method, not per-episode randomness).
+  * **jitter** — Gaussian, resampled once per HL fire (every ``c`` steps): the per-window
+    component of leg-odometry error (the probe's own account: "per-window jitter" is the
+    error shape the bias-only probe could NOT capture).
+
+  Disabled (``enable=False``) -> transparent passthrough (RQ2-safe, byte-identical to
+  pre-existing behavior). ``__call__`` never mutates its input in place — callers pass a
+  VIEW (``state_n[:, 0:2]``), and an in-place op would silently corrupt ``state_n`` itself
+  (see ``tests/test_hl_vel_jitter_isolation.py``).
+  """
+
+  def __init__(self, cfg: dict, num_envs: int, device: str) -> None:
+    cfg = cfg or {}
+    self.enable = bool(cfg.get("enable", False))
+    self.device = device
+    self.bias = torch.tensor(
+      [cfg.get("bias_vx", 0.0), cfg.get("bias_vy", 0.0)], device=device
+    )
+    self.jitter_std = torch.tensor(
+      [cfg.get("jitter_std_vx", 0.0), cfg.get("jitter_std_vy", 0.0)], device=device
+    )
+    self.sample = torch.zeros(num_envs, 2, device=device)
+
+  def resample(self) -> None:
+    """Draw a fresh per-window Gaussian jitter sample. Call once per HL fire (``k % c
+    == 0``) — NOT every step — so one window's worth of ``obs["hl_vel"]`` writes (the
+    fire-time read and the per-step post-step refresh) share one noise realization,
+    matching leg odometry's error being ~constant within a single 0.16 s control window.
+    """
+    if not self.enable:
+      return
+    self.sample = torch.randn(self.sample.shape, device=self.device) * self.jitter_std
+
+  def __call__(self, v_est: torch.Tensor) -> torch.Tensor:
+    """Return ``v_est`` (``[N, 2]`` vx,vy) with the HL-only bias+jitter added. Not
+    in-place — never mutates ``v_est``."""
+    if not self.enable:
+      return v_est
+    return v_est + self.bias + self.sample

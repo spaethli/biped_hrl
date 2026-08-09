@@ -34,7 +34,7 @@ from mjlab.utils.lab_api.string import resolve_matching_names_values
 from ..runner import VelocityOnPolicyRunner
 from .goal_space import build_goal_space, init_goal_buffer
 from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
-from .state_noise import GoalStateNoise
+from .state_noise import GoalStateNoise, HlVelJitter
 from .td3 import HighLevelTd3
 from ...mdp import rewards as mdp_rewards
 from mjlab.envs.mdp.rewards import joint_acc_l2, joint_pos_limits
@@ -168,6 +168,21 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       ["left_ankle_roll_link", "right_ankle_roll_link"], preserve_order=True
     )
     self._rollover_body_ids = body_ids
+    # Deploy diagnostics (2026-08-07): leg joint ids for metrics/act_rate_legs +
+    # metrics/jacc_legs (see `learn`'s loss_dict) - coef-independent, unlike
+    # `_ub_joint_ids` below which only gates a reward term. Same leg patterns as
+    # ARDIAG's g_legs (scripts/play.py); resolve individually since find_joints raises
+    # if ANY pattern in the list matches zero joints.
+    leg_ids: set[int] = set()
+    for p in (".*hip.*", ".*knee.*", ".*ankle.*"):
+      try:
+        pids, _ = robot.find_joints([p])
+      except ValueError:
+        continue
+      leg_ids.update(pids)
+    self._diag_leg_joint_ids = (
+      torch.as_tensor(sorted(leg_ids), device=device) if leg_ids else None
+    )
     # Arms+waist (ADR-0002) + hip yaw/roll (2026-07-07): the goal space is heading-
     # invariant, so nothing else anchors leg alignment — from-scratch LLs walked with a
     # ~20° hip twist. A0 pins the same two joints via its tightest variable_posture stds.
@@ -449,7 +464,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       state = self.goal_space.extract(uenv)
       if step % self.c == 0:
         # Eval is noise-free: feed the HL the clean lin-vel (deploy substitutes the
-        # sportmode estimate). No-op unless hl_obs_vel is on.
+        # sportmode estimate). No-op unless hl_obs_vel is on. hl_vel_jitter (#8b HL
+        # probe) is deliberately NOT applied here either -- same precedent as
+        # GoalStateNoise (also absent from this function): DR is a train-time-only
+        # mechanism, so play.py's [BENCH]/[GOALDIAG] eval measures the trained
+        # policy's competence against ground truth, matching how A0 and every prior
+        # A1a comparator (blind-HL, bias-only probe) were scored.
         if self.hl_obs_vel:
           obs["hl_vel"] = state[:, 0:2]
         target = self.hl.act_inference(uenv, obs, state)
@@ -533,9 +553,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # Built from the clean state so the absolute-mode reward target stays privileged.
           if k % self.c == 0:
             # Optional HL lin-vel input: the SAME noisy estimate the LL conditions on
-            # (state_n vx,vy), so HL and LL see one consistent deployable reading.
+            # (state_n vx,vy), so HL and LL see one consistent deployable reading, PLUS
+            # the HL-only leg-odometry jitter (#8b HL probe) on top -- resampled here,
+            # once per fire, and held for the rest of this window (below). Applied to
+            # state_n (not `state`) so the two DR mechanisms compose the way deploy will:
+            # the real HL never sees ground truth either.
+            self.hl_vel_jitter.resample()
             if self.hl_obs_vel:
-              obs["hl_vel"] = state_n[:, 0:2]
+              obs["hl_vel"] = self.hl_vel_jitter(state_n[:, 0:2])
             self._target = self.hl.act(uenv, obs, state)
             # Faithful delta DR (#8b): the LL-obs target base uses the noisy estimate so a
             # constant bias cancels in V*-s, matching deploy (V* = v_est(t0) + g, obs = V*-v_est).
@@ -747,9 +772,20 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           uenv.hrl_goal = post_delta
           obs["goal"] = post_delta
           # Refresh the HL lin-vel input on the post-step obs (same noisy estimate as the
-          # LL's post_delta) so end_window's bootstrap next-state is consistent.
+          # LL's post_delta) so end_window's bootstrap next-state is consistent. Same
+          # HL-only jitter SAMPLE as this window's fire (no resample() here) -- this obs
+          # becomes `next_s` in HighLevelTd3.end_window (the buffer's stored next-state,
+          # read verbatim by end_window/_relabel via `self._state_vec(obs)`). HIRO
+          # relabeling (td3.py `_relabel`) never reads `hl_vel`/`_state_vec` at all -- it
+          # only re-scores which GOAL best explains the stored LL trace
+          # (`goal_state_seq`/`policy_seq`/`action_seq`), so a relabeled transition
+          # automatically inherits whatever jitter realization the window was collected
+          # under. Drawing a FRESH sample here instead would be actively wrong: it would
+          # let the critic bootstrap from a v_est the actor never actually conditioned
+          # its action on, decorrelating the stored (state, action) pair from what
+          # happened in the rollout.
           if self.hl_obs_vel:
-            obs["hl_vel"] = (achieved + noise_off)[:, 0:2]
+            obs["hl_vel"] = self.hl_vel_jitter((achieved + noise_off)[:, 0:2])
 
           if not self.freeze_ll:
             self.alg.process_env_step(obs, r_lo, dones, extras)

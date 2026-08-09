@@ -155,6 +155,32 @@ class GoalStateNoiseCfg:
 
 
 @dataclass
+class HlVelJitterCfg:
+  """HL-only base-velocity jitter (leg-odometry probe, 2026-08-05). Corrupts ONLY
+  ``obs["hl_vel"]`` (the TD3 HL's optional ``hl_obs_vel`` input) — never ``state_n``,
+  so a `delta`-mode LL is provably unaffected (see
+  ``tests/test_hl_vel_jitter_isolation.py``). A **sibling** of ``GoalStateNoiseCfg``,
+  not a field on it: that class's noise lands on ``state_n`` (LL channel, per-step,
+  cancels via ``noise_off`` only for constants); this one lands on the HL's velocity
+  obs only (per-HL-fire, every ``c`` steps) and does NOT cancel for jitter (only a
+  constant bias would). Mixing the two into one cfg would make it easy to wire a
+  jitter term into the wrong channel. Off by default (RQ2-safe). Per-axis scalar
+  fields (not a tuple) — the tyro CLI is finicky with tuple overrides (confirmed
+  2026-07-03, ``cadence_period_range``)."""
+
+  enable: bool = False
+  bias_vx: float = 0.0
+  """Fixed per-episode-INDEPENDENT vx offset — the odometry method's own systematic
+  error (measured leg-odom bias: -0.038 m/s), added every call, never resampled."""
+  bias_vy: float = 0.0
+  jitter_std_vx: float = 0.0
+  """Gaussian std (m/s) for the per-HL-window vx jitter, resampled once per HL fire
+  (measured leg-odom RMS: 0.074 m/s)."""
+  jitter_std_vy: float = 0.0
+  """Measured leg-odom vy RMS: 0.049 m/s."""
+
+
+@dataclass
 class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """Hierarchical (A1) runner config. LL = inherited PPO; HL = fields below."""
 
@@ -196,6 +222,9 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """High-level TD3 config (used when hl_algorithm == 'td3')."""
   goal_state_noise: GoalStateNoiseCfg = field(default_factory=GoalStateNoiseCfg)
   """Estimator-noise on the LL goal channel (#8b sim2real DR). Off by default."""
+  hl_vel_jitter: HlVelJitterCfg = field(default_factory=HlVelJitterCfg)
+  """HL-only leg-odometry-calibrated jitter on ``obs["hl_vel"]`` (2026-08-05 probe).
+  Independent of ``goal_state_noise`` — see ``HlVelJitterCfg``. Off by default."""
   relabeling: Literal["none", "hiro"] = "hiro"
   """HIRO off-policy correction (td3 only; ignored otherwise). **Default 'hiro'** — part of
   the final A1 (TD3) structure. Only meaningful with ``hl_algorithm='td3'``."""
