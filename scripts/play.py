@@ -270,8 +270,24 @@ def run_play(task_id: str, cfg: PlayConfig):
         print(f"[INFO]: Restored run structure from {params_yaml.name}: "
               f"{ {k: v for k, v in restored.items() if k in ('goal_components', 'hl_algorithm')} }")
 
+  # Every headless eval/probe reports a DISTRIBUTIONAL mean, so the env count is part of the
+  # measurement, not a perf knob. At 1 env a single command draw is the whole sample and the
+  # result is bimodal: the same A0 checkpoint returned jacc_legs 24.75/25.14/25.81/26.23 and
+  # 42.27 across five draws (+-26%), vs +-2.6% at 64 envs. The old `None -> scene default (1)`
+  # silently produced non-comparable numbers twice (the 2026-07-15 goal probe, then the
+  # 2026-08-09 jacc benches), so eval paths default to 64 while interactive play stays at 1.
+  _eval_mode = (cfg.eval_steps > 0 or cfg.diagnose_goals > 0 or cfg.diagnose_symmetry > 0
+                or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0)
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
+  elif _eval_mode:
+    env_cfg.scene.num_envs = 64
+    print("[INFO]: eval/probe mode without --num-envs -> defaulting to 64 "
+          "(1 env is not a usable sample; pass --num-envs explicitly to override)")
+  if _eval_mode and env_cfg.scene.num_envs < 8:
+    print(f"[WARN]: num_envs={env_cfg.scene.num_envs} for an eval/probe run. Results are "
+          "NOT comparable to the 64-env references and swing ~+-26% between repeats. "
+          "Use --num-envs 64 for any number you intend to report.")
   if cfg.video_height is not None:
     env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None:
@@ -442,6 +458,21 @@ def run_play(task_id: str, cfg: PlayConfig):
     ub_ids, _ = uenv.scene["robot"].find_joints(
       [".*shoulder.*", ".*elbow.*", ".*wrist.*", ".*torso.*"])
     ub_ids = torch.as_tensor(ub_ids, device=robot.joint_pos.device)
+    # Leg/arm-restricted smoothness+accel diagnostics (the deploy blocker is smoothness,
+    # and action_rate is arm-dominated -- see ARDIAG's g_legs/g_arms below). Same per-
+    # pattern try/except as that block's _find_group (find_joints raises if ANY pattern
+    # in the list matches zero joints).
+    def _grp(pats):
+      ids = set()
+      for p in pats:
+        try:
+          pids, _ = uenv.scene["robot"].find_joints([p])
+        except ValueError:
+          continue
+        ids.update(pids)
+      return torch.as_tensor(sorted(ids), device=robot.joint_pos.device) if ids else None
+    leg_ids = _grp([".*hip.*", ".*knee.*", ".*ankle.*"])
+    arm_ids = _grp([".*shoulder.*", ".*elbow.*", ".*wrist.*"])
     # CoT / cadence metrics (A1a M0): mechanical power, cost of transport, achieved stride period.
     try:
       contact_sensor = uenv.scene["feet_ground_contact"]
@@ -469,6 +500,8 @@ def run_play(task_id: str, cfg: PlayConfig):
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
       ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
+      # Leg-restricted action rate + whole-body/leg/arm joint-accel (deploy diagnostics).
+      act_legs_list, jacc_list, jacc_legs_list, jacc_arms_list = [], [], [], []
       achieved_vxs = []  # per-step env-mean achieved vx (ramp metric for --eval-cmd-vx holds)
       prev_actions: torch.Tensor | None = None
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
@@ -504,10 +537,25 @@ def run_play(task_id: str, cfg: PlayConfig):
             fall_flags.append(dones.float().mean().item())
           ep_lens.append(uenv.episode_length_buf.float().mean().item())
 
-          # 3. Smoothness: action rate ||a_t - a_{t-1}||.
+          # 3. Smoothness: action rate ||a_t - a_{t-1}||, whole-body + leg-restricted
+          # (same slicing as ARDIAG's g_legs -- see the cross-check note on act_legs below).
           if prev_actions is not None:
-            action_rates.append((actions - prev_actions).norm(dim=-1).mean().item())
+            d_ar = actions - prev_actions
+            action_rates.append(d_ar.norm(dim=-1).mean().item())
+            act_legs_list.append(
+              d_ar[:, leg_ids].norm(dim=-1).mean().item() if leg_ids is not None
+              else float("nan"))
           prev_actions = actions.clone()
+
+          # 3b. Joint acceleration (deploy diagnostic): whole-body + leg/arm-restricted
+          # mean |qddot|. p95 (below, post-rollout) separates contact-impulse spikes
+          # from steady-state jitter -- the mean alone conflates the two.
+          jacc = robot.joint_acc.abs()
+          jacc_list.append(jacc.mean().item())
+          jacc_legs_list.append(
+            jacc[:, leg_ids].mean().item() if leg_ids is not None else float("nan"))
+          jacc_arms_list.append(
+            jacc[:, arm_ids].mean().item() if arm_ids is not None else float("nan"))
 
           # 4. Stability: orientation deviation + height deviation.
           orient_devs.append(
@@ -551,6 +599,10 @@ def run_play(task_id: str, cfg: PlayConfig):
             gait_matches.append(((leg_phase < gait_thr) == is_contact).float().mean().item())
 
       def _m(lst): return float(torch.tensor(lst).mean())  # noqa: E731
+      def _p95(lst):  # noqa: E731
+        # NaN-poisoned lists (an empty leg/arm group) stay NaN rather than erroring out
+        # of torch.quantile.
+        return float("nan") if any(v != v for v in lst) else torch.quantile(torch.tensor(lst), 0.95).item()
 
       # Hold-eval split (stage D, 2026-07-14): steady-state errs over the last 2/3 of the
       # rollout separate the from-stand acceleration ramp from held tracking (the table-e
@@ -575,6 +627,12 @@ def run_play(task_id: str, cfg: PlayConfig):
         "fall_rate":   _m(fall_flags),
         "mean_ep_len": _m(ep_lens),
         "action_rate": _m(action_rates) if action_rates else float("nan"),
+        "act_legs":    _m(act_legs_list) if act_legs_list else float("nan"),
+        "jacc":          _m(jacc_list),
+        "jacc_legs":     _m(jacc_legs_list),
+        "jacc_arms":     _m(jacc_arms_list),
+        "jacc_legs_p95": _p95(jacc_legs_list),
+        "jacc_arms_p95": _p95(jacc_arms_list),
         "orient_dev":  _m(orient_devs),
         "height_dev":  _m(height_devs),
         "ub_pose_dev": _m(ub_pose_devs),
@@ -604,6 +662,12 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Survival  fall_rate : {_fmt('fall_rate')}")
     print(f"  Survival  ep_len    : {_fmt('mean_ep_len')}")
     print(f"  Smoothness act_rate : {_fmt('action_rate')}")
+    print(f"  Smoothness act_legs : {_fmt('act_legs')}")
+    print(f"  Accel     jacc      : {_fmt('jacc')}")
+    print(f"  Accel     jacc_legs : {_fmt('jacc_legs')}")
+    print(f"  Accel     jacc_arms : {_fmt('jacc_arms')}")
+    print(f"  Accel     jacc_legs_p95: {_fmt('jacc_legs_p95')}")
+    print(f"  Accel     jacc_arms_p95: {_fmt('jacc_arms_p95')}")
     print(f"  Stability orient_dev: {_fmt('orient_dev')}")
     print(f"  Stability height_dev: {_fmt('height_dev')}")
     print(f"  UpperBody pose_dev  : {_fmt('ub_pose_dev')}")
@@ -1215,10 +1279,19 @@ def run_play(task_id: str, cfg: PlayConfig):
       print(f"  {f'c={c} avg vs at-fire':<22} "
             + " ".join(f"{_rms(ew_lag[:, j]):>9.4f}" for j in range(3))
             + "   <- 50 Hz")
-      fw_lag = fast_win - true_fire
+      fw_lag, fw_filt = fast_win - true_fire, fast_win - true_win
       print(f"  {f'c={c} avg, PHYSICS rate':<22} "
             + " ".join(f"{_rms(fw_lag[:, j]):>9.4f}" for j in range(3))
             + "   <- what the HL consumes")
+      # Same rung scored against the WINDOW-MEAN truth instead of the truth at the fire
+      # step: the difference between this row and the one above is purely the c/2-step
+      # averaging LAG, with the estimator's own tracking error held fixed. Added
+      # 2026-08-06 because the bridge measures the two apart (vy tracking 0.055 but
+      # at-fire 0.10, i.e. lag-dominated) and the sim rung alone could not say whether
+      # sim shares that split or has a genuinely quieter lateral channel.
+      print(f"  {f'c={c} avg, PHYS filter':<22} "
+            + " ".join(f"{_rms(fw_filt[:, j]):>9.4f}" for j in range(3))
+            + "   <- tracking only, lag removed")
     print("=" * 78)
     gate = max(_rms(fw_lag[:, 0]), _rms(fw_lag[:, 1])) if est_win.numel() else float("nan")
     print(f"  per-step RMS  max(vx,vy) = {max(_rms(err[:, 0]), _rms(err[:, 1])):.4f} m/s")
@@ -1233,6 +1306,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       out[f"fastbias_{ax}"] = round((fast[:, j] - true[:, j]).mean().item(), 6)
       if est_win.numel():
         out[f"fasthl_{ax}"] = round(_rms(fw_lag[:, j]), 6)
+        out[f"fastfilt_{ax}"] = round(_rms(fw_filt[:, j]), 6)
       out[f"orc_ct1_{ax}"] = round(_rms(orc[:, 0, j] - true[:, j]), 6)
       out[f"orc_ctb_{ax}"] = round(_rms(orc[:, 1, j] - true[:, j]), 6)
       out[f"rms_{ax}"] = round(_rms(err[:, j]), 6)

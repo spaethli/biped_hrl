@@ -137,6 +137,26 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   fall_rate, action_rate, orient_dev, height_dev) + `[BENCH] {json}`, multi-seed mean±std.
   **Use `fall_rate`, NOT `ep_len`, for survival** (`episode_length_s=1e9`, no resets in play).
   A0 baseline 0.09/0.11/0.10. Strips exploration noise → judge HLs by this, not training err.
+- **`--num-envs` is part of the measurement, not a perf knob (2026-08-09).** Every eval/probe
+  reports a distributional mean, so at 1 env a single command draw *is* the sample and the
+  result goes bimodal: the same A0 checkpoint gave `jacc_legs` 24.75/25.14/25.81/26.23 **and
+  42.27** across five draws (±26%), and `err_vx` 0.053–0.097, vs ±2.6% at 64 envs. Eval paths
+  (`--eval-steps`/`--diagnose-*`/`--check-vel-increment`) therefore **default to 64** and warn
+  below 8; interactive play still gets 1. Numbers taken at different env counts are **not
+  comparable** — this silently corrupted results twice (2026-07-15 goal probe, 2026-08-09
+  jacc benches). **Measured 64-env noise floor: ±2.6% on `jacc`**, so orderings inside ~3%
+  (e.g. full_jacc 35.8 vs full_jacc_noEnergy 35.3) are NOT resolved at n=1 seed.
+- **Smoothness metrics — read all three, they disagree (2026-08-09).** `action_rate` is
+  whole-body and on *commanded actions*; `act_legs` restricts it to hip/knee/ankle (the
+  joints that keep the robot up, and it uses ARDIAG's exact `g_legs` formula, so the two
+  probes cross-check); `jacc`/`jacc_legs`/`jacc_arms` (+`_p95`) measure *realized* motion,
+  and since `τ = M(q)q̈ + C + G` they are the physically deploy-relevant quantity. **Always
+  report the p95 next to the mean**: A0's leg p95/mean is 2.39 (low sustained accel, hard
+  contact spikes on its 0.59 s stride) vs A1's ~1.17 (high sustained, softer spikes on a
+  0.35-0.43 s stride) — the mean alone hides that opposition. A0 ref: act 0.641, act_legs
+  0.593, jacc 19.8/29.5/12.2, jl_p95 70.6. **The metrics reorder candidates** — combo1 is
+  best on `action_rate` and worst of 13 on `jacc_legs_p95` (1.5× A0), so never rank a deploy
+  shortlist on `action_rate` alone.
 - **Lean / calibration-sensitivity probe** (ADR-0006, arch-agnostic): `play.py
   --checkpoint-file <pt> --num-envs 64 --eval-seeds 2 --eval-cmd-vx 0 --probe-lean 400`
   → steady-state base pitch + leg joint speed + action rate at a held zero command, per
@@ -174,6 +194,14 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   (= bin0 ÷ mean of the rest; **A0 ≈ 0.98 is the flat control** — run it, any structure there
   is a binning artifact), `ar_mean` (reproduces the bench `action_rate`, a built-in
   cross-check), and the per-group shares. Works on A0 (no `c`; defaults to 8).
+- **Training-time smoothness (W&B run filtering, 2026-08-09):** `Loss/metrics/act_rate`,
+  `act_rate_legs`, `jacc`, `jacc_legs` are logged **every step, unconditionally, independent
+  of every `ll_*_coef`**, and never enter `r_lo`. Filter runs on these, **not** on
+  `ll/action_rate_pen` — that key is `coef × value` accumulated only when its coef is
+  nonzero, so it is incomparable across coefs and reads a flat 0.0 at coef 0, which looks
+  like perfect smoothness but is no measurement. Same L2-norm convention as the bench, so a
+  converged run's curve is directly comparable to its `[BENCH]` number (early iterations sit
+  ~8× higher purely from the untrained action std).
 - **IMU velocity-increment bench** (deploy feasibility, 2026-08-01): `play.py
   --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` → per-axis
   RMS error of an IMU-only reconstruction of the within-window base-velocity increment, over

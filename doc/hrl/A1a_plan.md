@@ -28,10 +28,20 @@ reference, Cost of transport) in `CONTEXT.md`.
   cost from the goal channel's 6.25 Hz step (worth ~4%) plus a large uniform
   floor concentrated in the arms, pointing at A0's `pose`/`variable_posture`
   term as the missing mirror. **Mirroring A0's other smoothness term
-  (`joint_acc_l2`, `ll_joint_acc_coef`) was tested at 2 doses 2026-07-28 and is
-  CLOSED as negative**: it does not move the arms share, makes `ub_arm_vel`
+  (`joint_acc_l2`, `ll_joint_acc_coef`) is CLOSED as an *action-rate* lever**
+  (2026-07-28, 2 doses): it does not move the arms share, makes `ub_arm_vel`
   worse, is non-monotonic on action rate, and badly breaks standing at zero
   command (touchdowns 142 -> 346/5325). The knob stays in the code, default 0.0.
+  **Amended 2026-08-09:** that verdict was scored against the wrong quantity —
+  no joint-acceleration metric existed. With `jacc` now benched, the two
+  jacc-trained arms are the *lowest*-`jacc` of 13 (35.3/35.8 vs 41.9+) and hold
+  the best `jacc_legs_p95`. It works on what it targets; it is still not an
+  action-rate fix.
+- **Smoothness is 3 metrics, not 1 (2026-08-09).** `action_rate` (commanded,
+  whole-body), `act_legs` (commanded, legs), `jacc*` (realized motion). They
+  disagree and reorder the deploy shortlist: combo1 is best on `action_rate`
+  and worst of 13 on `jacc_legs_p95`. Definitions + A0 refs -> `hrl-infra.md`;
+  full table -> the A1a experiment journal (research KB).
 - **Deploy status lives in `A1a_deploy_plan.md`**; this doc is training/sim only.
 
 ## Thesis hook
