@@ -198,8 +198,21 @@ def main():
     time.sleep(args.stand_s)
     press('o' if args.policy == 'a0' else 'h', f'policy takeover ({args.policy})')
     time.sleep(3)
-    if not args.no_band:
-      release_band()
+    # FAIL-CLOSED (2026-08-06). release_band() already verifies focus landed and returns
+    # False when it did not -- but the return value used to be discarded, so a failed
+    # release ran the FULL sequence anyway and produced a session with the robot hanging on
+    # the harness: correct FSM transitions, CSV written, commands held, and not one word of
+    # it interpretable. That happened during the leg-odometry A/B (a click stole focus
+    # inside release_band's 0.4 s window) and cost a run of a 9-run battery. The analyzer's
+    # travel check catches it afterwards, which is the backstop; this stops us paying 83 s
+    # and a slot to learn nothing.
+    if not args.no_band and not release_band():
+      raise SystemExit(
+        '[band] ABORTING before the command sequence: the elastic band was NOT released, '
+        'so the robot is still on the harness and nothing it does is interpretable. '
+        'Keep the mujoco window mapped and do not click away while the session starts '
+        '(the release needs focus for ~0.5 s). Re-run this session; pass --no-band only '
+        'if you deliberately want a harnessed run.')
     for item in args.seq.split(','):
       k, secs = item.split(':')
       hold(k, float(secs), 'commanded')

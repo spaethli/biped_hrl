@@ -18,6 +18,7 @@
 #include <unitree/dds_wrapper/robots/go2/go2.h>  // go2::subscription::SportModeState
 
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -72,6 +73,12 @@ public:
                 env->robot->data.root_ang_vel_b.cross(hrl::kImuOffsetT);
             std::lock_guard<std::mutex> lock(est_mu_);
             dv_.setZero();
+            // Leg odometry re-primes too: lo_p_prev_ is a position from before the exit, so
+            // the first difference after a re-entry would span the whole gap and read as an
+            // enormous velocity. Dropping one tick costs nothing (the window averages ~158).
+            lo_sum_.setZero();
+            lo_n_ = 0;
+            lo_prev_valid_ = false;
             lev0_ = hrl::rz(psi, lev);
             gt_vel0_ = hrl::rz(psi, (env->robot->data.root_quat_w.conjugate()
                                      * highstate_->velocity()) - lev);
@@ -91,6 +98,36 @@ public:
         if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
             telemetry_.init(sp, goal_space_->dim());
         last_action_.clear();
+
+        // [2026-08-05] Liveness gate on the SportModeState path. The construction check in
+        // State_RLHRL.cpp refuses a real-robot CONFIG that omits the estimator keys; this
+        // one refuses on the DATA, so it also covers a real robot started without
+        // H1_2_DEPLOY_CFG (which loads the keyboard/sim deploy.yaml and therefore passes
+        // the config check). A live publisher never reports body height exactly 0.0; a dead
+        // one reports nothing but zeros, which is what all 1182 rows of the 2026-08-05
+        // hardware log show. Poll briefly first -- the subscriber legitimately has no
+        // sample yet at the instant of entry -- then latch and bail without ever starting
+        // the policy thread; the registered check bounces the FSM to Passive on the next
+        // 1 kHz tick.
+        base_state_dead_ = false;
+        if (needs_highstate_) {
+            for (int i = 0; i < 100; ++i) {  // <= 500 ms
+                if (highstate_->position().z() != 0.0f
+                    || highstate_->velocity().squaredNorm() != 0.0f) break;
+                if (i == 99) base_state_dead_ = true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        if (base_state_dead_) {
+            spdlog::critical("[HRL] REFUSING TO RUN: the goal-space state is sourced from "
+                             "rt/sportmodestate and that topic is dead (position.z and "
+                             "velocity both exactly 0 for 500 ms). On the real H1-2 it goes "
+                             "silent once this controller has command, and the policy would "
+                             "run on a zero base state -- the 2026-08-05 leg splay. Set "
+                             "hrl.base_vel_from_imu and hrl.base_height_from_fk, and check "
+                             "H1_2_DEPLOY_CFG actually points at the real-robot config.");
+            return;  // policy thread never starts; registered check -> Passive
+        }
 
 #if SAFETY_FILTER
         // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set (launch script).
@@ -193,6 +230,18 @@ private:
     // being fed the privileged signal.
     bool vel_from_imu_{false};
     bool height_from_fk_{false};
+    // hl_vel_from_leg_odom -> the HL's (vx,vy) input comes from LEG ODOMETRY (absolute)
+    // instead of s[0:2] (the IMU increment, which is 0 at every fire). Mirrors the training
+    // side exactly: HlVelJitter is wired into obs["hl_vel"] and never into state_n, because
+    // leg odometry's error (0.074/0.049 c-averaged) is ~5x the IMU increment's
+    // (0.0139/0.0288) and would DEGRADE the LL if it reached the goal delta. Absent key =
+    // false = the pre-2026-08-06 path, byte-identical.
+    bool hl_vel_from_leg_odom_{false};
+    // True when a goal component still reads its state from rt/sportmodestate. The ctor
+    // refuses outright if that is a real-robot config; enter() additionally proves the
+    // topic is alive before running (2026-08-05 fail-closed pair, see both sites).
+    bool needs_highstate_{false};
+    bool base_state_dead_{false};  // latched by enter(); a registered check -> Passive
     float nominal_h_{0.0f};        // hrl.nominal_root_height (imu-site referenced, 1.3076)
     float fk_h_nominal_{0.0f};     // leg FK evaluated at default_joint_pos -> the anchor
     std::array<int, 13> sdk_slot_; // sdk motor id (0-11 legs, 12 waist) -> articulation slot
@@ -202,10 +251,32 @@ private:
     // thread) reads it and zeroes it at each HL window start. Three floats under est_mu_.
     std::mutex est_mu_;
     Eigen::Vector3f dv_{0, 0, 0};
+    // Leg-odometry accumulator, same split as dv_: run() adds one estimate per 1 kHz tick,
+    // policy_step() takes the MEAN at each window start and zeroes it. The mean over the
+    // window is the quantity the bench scores (`fasthl_*`) and is what the HL must consume —
+    // the per-step value is 0.176 vs 0.072 c-averaged, so sampling instantaneously at the
+    // fire would ship the worse number by a factor of 2.4. Aggregation is a plain MEAN:
+    // median/trimmed were measured 3x WORSE on moving bridge data (per-tick estimates are
+    // legitimately skewed by swing/impact samples; 5% exceed 1 m/s and are signal, not
+    // corruption), and they only win on a stand, where the true answer is zero anyway.
+    Eigen::Vector3f lo_sum_{0, 0, 0};
+    long lo_n_{0};
+    // run()-thread only: last tick's foot-site positions, so the FK runs twice per tick
+    // rather than four times, and the difference is always same-foot.
+    Eigen::Vector3f lo_p_prev_[2];
+    bool lo_prev_valid_{false};
     // Policy-thread-only (never touched by run(), so no lock): the window-start lever-arm
     // term and the window-start ground-truth pelvis velocity.
     Eigen::Vector3f lev0_{0, 0, 0};
     Eigen::Vector3f gt_vel0_{0, 0, 0};
+    // The window's latched leg-odometry (vx,vy), refreshed at each fire. A window that
+    // accumulated nothing HOLDS the previous value rather than emitting 0 — emitting 0 is
+    // precisely the failure this whole path exists to remove.
+    Eigen::Vector2f hl_vel_lo_{0, 0};
+    // joint_offset (ADR-0006 Spec B) for sdk ids 0-12, pre-resolved in the ctor. run()
+    // reads the encoders straight off lowstate rather than through the articulation (which
+    // only refreshes at 50 Hz), so it has to apply the correction itself.
+    std::array<float, 13> leg_offset_{};
 
     std::thread policy_thread;
     bool policy_thread_running = false;
@@ -213,6 +284,11 @@ private:
     // [SAFETY FILTER] — mirrors State_RLBase (duplicated, not shared, to leave A0 untouched)
     int hold_counter_{0};
     int fall_acc_counter_{0};
+    // Per-joint ramp counter for the torque/joint-velocity trip (2026-08-05). One per
+    // ARTICULATION SLOT (not sdk id), because that is what indexes `action` and `joint_vel`
+    // in run(). Scoped per joint like the position clamp, unlike the whole-body hold_counter_
+    // above; the two compose by max so tilt/fall keeps its whole-body reach.
+    std::array<int, 27> trip_counter_{};
 #if SAFETY_FILTER
     SafetyLogger safety_logger_;
 #endif

@@ -58,21 +58,29 @@ public:
         // base velocity (the quantity `delta` mode actually needs), reset at every HL
         // window start; est_h/gt_h are absolute heights. On real hardware gt_* read 0
         // (rt/sportmodestate goes silent) — only a bridge run scores this pair.
-        std::fprintf(f, ",est_vx,est_vy,est_h,gt_vx,gt_vy,gt_h\n");
+        std::fprintf(f, ",est_vx,est_vy,est_h,gt_vx,gt_vy,gt_h");
+        // Leg odometry (2026-08-06), the HL's ABSOLUTE velocity. Logged UNCONDITIONALLY,
+        // like the pair above, so any bridge session scores it whether or not it is feeding
+        // the HL -- which is what makes the open-loop rung measurable without a special
+        // build. lo_* is the window-latched c-average (held constant across the window, so
+        // score it on FIRE rows: the est_vx==0 rows, whose modal gap is c). gt_a* is the
+        // matching ABSOLUTE pelvis-frame ground truth -- gt_vx/gt_vy above are within-window
+        // INCREMENTS and cannot score an absolute estimator. Both read 0 on real hardware.
+        std::fprintf(f, ",lo_vx,lo_vy,gt_avx,gt_avy\n");
         std::fclose(f);
     }
 
     bool enabled() const { return enabled_; }
 
-    // est/gt: {vx, vy, h} — see the est_*/gt_* header note in init().
+    // est/gt: {vx, vy, h}; lo: {lo_vx, lo_vy, gt_avx, gt_avy} — see the header note in init().
     void record(float t, const float* cmd, const Eigen::VectorXf& s,
                 const Eigen::VectorXf& target, float period,
                 float hip_pitch_l, float hip_pitch_r, float act_rate,
-                const float est[3], const float gt[3])
+                const float est[3], const float gt[3], const float lo[4])
     {
         if (!enabled_) return;
         std::vector<float> row;
-        row.reserve(14 + 2 * goal_dim_);
+        row.reserve(18 + 2 * goal_dim_);
         row.push_back(t);
         row.insert(row.end(), cmd, cmd + 3);
         row.insert(row.end(), s.data(), s.data() + goal_dim_);
@@ -84,6 +92,7 @@ public:
         row.push_back((float)entry_);
         row.insert(row.end(), est, est + 3);
         row.insert(row.end(), gt, gt + 3);
+        row.insert(row.end(), lo, lo + 4);
         rows_.push_back(std::move(row));
         if (rows_.size() >= FLUSH_ROWS) flush();
     }

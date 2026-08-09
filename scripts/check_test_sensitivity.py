@@ -22,6 +22,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 GS = REPO / "src/tasks/velocity/rl/hrl/goal_space.py"
 RW = REPO / "src/tasks/velocity/mdp/rewards.py"
 HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
+SN = REPO / "src/tasks/velocity/rl/hrl/state_noise.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
 YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy.yaml"
 REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy_real.yaml"
@@ -116,6 +117,50 @@ MUTATIONS = [
    "cadence_period_range: [0.35, 1.0]", "cadence_period_range: [0.35, 1.3]",
    "test_deploy_cadence_period_range_matches_training"),
 
+  # Trip thresholds sized off the STAND (36 Nm / 0.06 rad/s) instead of measured WALKING --
+  # the mistake the 2026-08-05 brief started from. Holds a hip mid-stride every step.
+  ("torque trip threshold sized off the stand, not walking (2026-08-05)", LIM,
+   "{ 265.0f,  11.0f},  //  2 LEFT_HIP_ROLL",
+   "{  50.0f,  11.0f},  //  2 LEFT_HIP_ROLL",
+   "test_trip_thresholds_clear_measured_walking"),
+
+  # The A0-only calibration that held right_hip_yaw during the A1 candidate's own gait.
+  ("hip-yaw trip back to the hardware-only (A0-dominated) bound, which the A1 candidate's "
+   "bridge gait exceeds (2026-08-05)", LIM,
+   "{ 230.0f,  10.0f},  //  0 LEFT_HIP_YAW",
+   "{  60.0f,   6.0f},  //  0 LEFT_HIP_YAW",
+   "test_trip_thresholds_clear_measured_walking"),
+
+  # The opposite error: headroom raised until the failure it guards slips through.
+  ("hip-roll trip raised above the splay peak it exists to catch (2026-08-05)", LIM,
+   "{ 265.0f,  11.0f},  //  8 RIGHT_HIP_ROLL",
+   "{ 400.0f,  20.0f},  //  8 RIGHT_HIP_ROLL",
+   "test_trip_thresholds_still_catch_the_2026_08_05_splay"),
+
+  # The 2026-08-05 hardware defect itself: the real config carried neither estimator key,
+  # so both defaulted false and the goal-space state came from the dead rt/sportmodestate.
+  ("real config back to sourcing base velocity from the dead rt/sportmodestate "
+   "(2026-08-05 leg splay)", REAL_YML,
+   "  base_vel_from_imu: true",
+   "  # base_vel_from_imu: true",
+   "test_real_config_never_sources_the_goal_state_from_sportmodestate"),
+
+  ("real config back to sourcing base height from the dead rt/sportmodestate "
+   "(2026-08-05 leg splay)", REAL_YML,
+   "  base_height_from_fk: true",
+   "  # base_height_from_fk: true",
+   "test_real_config_never_sources_the_goal_state_from_sportmodestate"),
+
+  # The 2026-08-06 half of the same defect class, one level up: `s` is well-formed but the
+  # HIGH level's absolute velocity is not. Under base_vel_from_imu the increment is 0 at
+  # every window start, which is every HL fire, so removing this key hands the HL a constant
+  # 0.000000 velocity reading (bridge A/B: 3/3 falls vs 0/3 on ground truth).
+  ("real config leaves the high level with no live absolute velocity source "
+   "(2026-08-05 est-mode bridge blocker)", REAL_YML,
+   "  hl_vel_from_leg_odom: true",
+   "  # hl_vel_from_leg_odom: true",
+   "test_real_config_gives_the_high_level_a_live_velocity_source"),
+
   ("joint_offset (ADR-0006 Spec B) truncated to 26 entries", REAL_YML,
    "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]",
    "joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0]",
@@ -152,6 +197,13 @@ MUTATIONS = [
   ("transition windows stop reporting falls (the 0.5->0 decel fall goes unseen)", DGA,
    '"fell": bool(fell_mask[m].any()),', '"fell": False,',
    "test_transition_window_catches_a_fall_on_the_deceleration"),
+
+  ("HL-only velocity jitter mutates its input view in place (2026-08-05 leg-odometry "
+   "probe) -- would silently corrupt state_n through shared storage, since hrl_runner.py "
+   "passes state_n[:, 0:2], a VIEW, not a copy", SN,
+   "    return v_est + self.bias + self.sample",
+   "    v_est += self.bias + self.sample\n    return v_est",
+   "test_hl_vel_jitter_does_not_mutate_its_input_view"),
 
   # The pre-fix code verbatim: any failing hold won (sticky-False) AND post-fall holds were
   # scored, so a robot that walked 7.1 m and then fell was reported as "band never

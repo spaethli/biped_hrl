@@ -237,6 +237,37 @@ def analyze_hrl_csv(path: str) -> dict:
   }
 
 
+def _joint_trip_report(data, has_trip: bool, meta_path) -> dict:
+  """Whole-session summary of the per-joint torque/joint-velocity trip.
+
+  Reported separately from `alpha_max` because the two triggers have different REACH:
+  tilt/fall hold all 27 joints, this holds only the joints that tripped. Collapsing them
+  into one number would make a localised trip look like a whole-body hold, and hide a
+  whole-body hold behind a localised one.
+  """
+  if not has_trip:
+    return {"available": False}
+  # Names come from the meta json, the same single source joint_clamp_report uses -- the
+  # analyzer never carries its own copy of the joint table.
+  names = {}
+  if meta_path.exists():
+    names = {j["hw_id"]: j["name"] for j in json.loads(meta_path.read_text())["joints"]}
+  jid = data["trip_jid"]
+  fired = jid >= 0
+  offenders = {}
+  for j in np.unique(jid[fired]).astype(int):
+    offenders[names.get(int(j), f"hw_id_{int(j)}")] = round(float((jid == j).mean()), 4)
+  return {
+    "available": True,
+    "alpha_trip_max": round(float(data["alpha_trip"].max()), 3),
+    "torque_rate": round(float((data["trig_torque"] != 0).mean()), 4),
+    "dq_rate": round(float((data["trig_dq"] != 0).mean()), 4),
+    "any_rate": round(float(fired.mean()), 4),
+    # Worst-offender share by joint: which joint was the largest overshoot, how often.
+    "worst_joint_share": dict(sorted(offenders.items(), key=lambda kv: -kv[1])[:5]),
+  }
+
+
 def analyze_base_csv(path: str) -> dict:
   """Shared `SafetyLogger` schema (`<base>.csv`, A0 or A1's base CSV, `cmd_*`/`ach_*`
   added 2026-07-21 WL-B0). No height column and no pre-computed act_rate/period, so:
@@ -273,10 +304,15 @@ def analyze_base_csv(path: str) -> dict:
                        key=lambda c: int(c[5:]))
   has_phase = "phase_sin" in header
   has_wall = "t_wall" in header  # added 2026-08-04; absent on every earlier capture
+  # Per-joint torque/joint-velocity trip, added 2026-08-05. Absent on every earlier capture,
+  # so it is read only when present and reported as None otherwise -- never silently as 0,
+  # which would read as "the trigger was quiet" on a file that could not have recorded it.
+  has_trip = "alpha_trip" in header
   usecols = (["t", "meas_q1", "cmd_vx", "cmd_vy", "cmd_wz", "ach_vx", "ach_vy", "ach_vz",
               "alpha", "trig_joint", "trig_tilt", "trig_fall", "entry"] + raw_q_cols
              + (["phase_sin", "phase_cos"] if has_phase else [])
-             + (["t_wall"] if has_wall else []))
+             + (["t_wall"] if has_wall else [])
+             + (["trig_torque", "trig_dq", "trip_jid", "alpha_trip"] if has_trip else []))
   data = np.genfromtxt(path, delimiter=",", names=True, usecols=usecols, dtype=float)
   # genfromtxt reorders/validates against `usecols` by name match against the header, so
   # column order in `usecols` above doesn't need to match the file's actual layout.
@@ -309,6 +345,13 @@ def analyze_base_csv(path: str) -> dict:
       "act_rate": round(float(act_rate_tick[a:b].mean()), 3),
       "alpha_max": round(float(data["alpha"][a:b].max()), 3),
       "trig_joint_frac": round(float(data["trig_joint"][a:b].mean()), 4),
+      # Separate from alpha_max on purpose: `alpha` is the whole-body tilt/fall hold and
+      # keeps the meaning every historical CSV has, while the trip drives a PER-JOINT ramp.
+      "alpha_trip_max": (round(float(data["alpha_trip"][a:b].max()), 3)
+                         if has_trip else None),
+      "trig_torque_frac": (round(float(data["trig_torque"][a:b].mean()), 4)
+                           if has_trip else None),
+      "trig_dq_frac": (round(float(data["trig_dq"][a:b].mean()), 4) if has_trip else None),
       "phase_alive": None if phase_live is None else round(float(phase_live[a:b].mean()), 3),
       "fell": fell,
     }
@@ -359,6 +402,11 @@ def analyze_base_csv(path: str) -> dict:
     "any_transition_fall": any(w["fell"] for w in transitions),
     "stand_drift": stand_drift(t, cmd, ach, bounds),
     "joint_clamp": joint_clamp_report(raw_q, Path(path).with_name(
+      Path(path).name.replace(".csv", "_meta.json"))),
+    # Per-joint torque/joint-velocity trip (2026-08-05). `available` False means the CSV
+    # predates the columns: the channel is UNSCORED, which is not the same as quiet, and the
+    # readiness pipeline must treat it as unscoreable rather than as a pass.
+    "joint_trip": _joint_trip_report(data, has_trip, Path(path).with_name(
       Path(path).name.replace(".csv", "_meta.json"))),
     # None = no qualifying hold in this session, so the check could not run (not a pass).
     "band_released": band_ok,

@@ -66,6 +66,16 @@ def limits_header() -> tuple[list[str], list[tuple[float, float]]]:
 
 
 @pytest.fixture(scope="module")
+def joint_trips() -> list[tuple[float, float]]:
+  """(tau, dq) trip thresholds parsed from the C++ header, in hardware-ID order."""
+  block = re.search(r"h1_2_joint_trips\s*=\s*\{\{(.*?)\}\};", LIMITS_H.read_text(), re.S)
+  return [
+    (float(tau), float(dq))
+    for tau, dq in re.findall(r"\{\s*([\d.]+)f\s*,\s*([\d.]+)f\s*\}", block.group(1))
+  ]
+
+
+@pytest.fixture(scope="module")
 def model_ranges() -> dict[str, tuple[float, float]]:
   model = mujoco.MjSpec.from_file(str(ROBOT_XML)).compile()
   out = {}
@@ -181,6 +191,166 @@ def test_joint_offset_absent_from_sim_configs(yaml_path):
   belongs only in deploy_real.yaml, never in the keyboard/sim deploy.yaml twins."""
   cfg = yaml.safe_load(yaml_path.read_text())
   assert "joint_offset" not in cfg
+
+
+# --- the sim bridge's base-state source (2026-08-05) --------------------------
+
+EST_YAML = DEPLOY / "config/policy/velocity_hrl/v0/params/deploy_est.yaml"
+# The three keys that switch the deploy off its sim-only privileged signals. The first two
+# (2026-08-05) source the goal-space state `s`; the third (2026-08-06) sources the HIGH
+# level's absolute velocity, which is a SEPARATE consumer -- `s` can be perfectly well-formed
+# while the HL's input is dead, which is exactly what the 2026-08-05 bridge A/B measured.
+BASE_STATE_KEYS = ("base_vel_from_imu", "base_height_from_fk", "hl_vel_from_leg_odom")
+
+
+def test_estimator_bridge_config_is_a_pure_base_state_delta():
+  """deploy_est.yaml is what deploy_readiness.py drives the A1 candidate arm with, so it has
+  to be deploy.yaml in every respect EXCEPT the base-state source. If anything else drifts
+  between them, the gate stops measuring the shipped config and nobody finds out -- the two
+  files look interchangeable and are edited months apart.
+
+  The estimator arm exists because the bridge's rt/sportmodestate is a SIM-ONLY privileged
+  signal: the real robot publishes zeros there, so a gate driven by deploy.yaml validates a
+  configuration the robot never runs."""
+  sim = yaml.safe_load(HRL_YAML.read_text())
+  est = yaml.safe_load(EST_YAML.read_text())
+  for key in BASE_STATE_KEYS:
+    assert est["hrl"].get(key) is True, f"deploy_est.yaml must set hrl.{key}: true"
+    assert sim["hrl"].get(key) in (None, False), \
+      f"deploy.yaml is the GROUND-TRUTH arm; it must not set hrl.{key}"
+  for d in (sim, est):
+    d["hrl"] = {k: v for k, v in d["hrl"].items() if k not in BASE_STATE_KEYS}
+  assert sim == est, "deploy_est.yaml drifted from deploy.yaml beyond the base-state keys"
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_real_config_gives_the_high_level_a_live_velocity_source(yaml_path):
+  """`hl_obs_vel` makes the high level read an ABSOLUTE base velocity, and on the real H1-2
+  there are only two candidate sources for it -- both dead unless leg odometry is on.
+
+  rt/sportmodestate publishes zeros once this controller has command. The IMU increment is
+  worse than it looks: `base_vel_increment(psi, w, 0, lev0)` is EXACTLY 0 at a window start
+  by construction, and the HL fires exactly at window starts, so it reads 0.000000 at every
+  single fire, at every speed. Measured on the bridge with the trip hold disabled: estimator
+  3/3 falls against ground truth 0/3, with the fire rows confirmed as the exactly-zero est_vx
+  rows (modal gap = c).
+
+  This is the same class as the 2026-08-05 splay and the same reason it needs a test rather
+  than a gate: in the bridge sportmodestate IS live, so a config missing this key behaves
+  correctly there and fatally on hardware. The C++ refuses to construct on such a config;
+  this asserts the repo cannot commit one."""
+  hrl = yaml.safe_load(yaml_path.read_text()).get("hrl")
+  if hrl is None or not hrl.get("hl_obs_vel"):
+    pytest.skip("no hl_obs_vel -- the high level reads no absolute velocity")
+  assert hrl.get("hl_vel_from_leg_odom") is True, (
+    f"hrl.hl_obs_vel is set in {yaml_path.name} but hrl.hl_vel_from_leg_odom is "
+    f"{hrl.get('hl_vel_from_leg_odom')!r}. On hardware that leaves the high level with no "
+    f"live absolute velocity source: it would read exactly 0 at every fire.")
+
+
+def test_a0_twin_of_the_estimator_config_exists():
+  """State_RLBase loads whatever filename H1_2_DEPLOY_CFG names from its OWN params dir, and
+  both FSM states are constructed at startup -- so a missing A0 twin kills the binary before
+  State_RLHRL is even built. Found the hard way while testing the T1 refusal path."""
+  assert (DEPLOY / "config/policy/velocity/v0/params/deploy_est.yaml").exists()
+
+
+# --- per-joint torque / joint-velocity trip (2026-08-05) ----------------------
+
+# Highest |tau_est| (Nm) and |dq| (rad/s) each joint GROUP reached during normal walking,
+# over the union of both sources the thresholds are sized against: 389 s of healthy hardware
+# walking (10 sessions 2026-07-20..2026-08-03, leg-active with the IMU tilt envelope under
+# 12 deg for +-1 s so stumbles and falls are out) and 103 s of non-falling bridge walking.
+# Regenerate with scripts/measure_joint_trip_thresholds.py.
+#
+# THE UNION IS THE POINT. The hardware pool is A0-dominated and A1 is measurably twitchier,
+# so a hardware-only bound let the table hold right_hip_yaw during the A1 candidate's own
+# normal bridge gait. A threshold at or below any of these numbers holds a joint mid-stride
+# during healthy walking, which is a fall cause, not a fall guard.
+WALKING_MAX_BY_GROUP = {
+  "hip_yaw": ([0, 6], 174.1, 7.55),
+  "hip_pitch": ([1, 7], 152.8, 6.93),
+  "hip_roll": ([2, 8], 201.8, 8.13),
+  "knee": ([3, 9], 295.9, 16.00),
+  "ank_pitch": ([4, 10], 95.7, 21.48),
+  "ank_roll": ([5, 11], 33.7, 20.53),
+  "waist": ([12], 58.3, 5.18),
+  "shoulder": ([13, 14, 15, 20, 21, 22], 29.4, 3.94),
+  "elbow_wrist": ([16, 17, 18, 19, 23, 24, 25, 26], 18.0, 5.75),
+}
+# The 2026-08-05 leg splay: joints that must still trip, with their peak |tau_est| / |dq|
+# over the event. RIGHT hip yaw (68.4 Nm / 6.55 rad/s) is deliberately NOT here -- clearing
+# the bridge's 174 Nm hip-yaw torque pushed that threshold to 230 Nm, which costs its
+# contribution to this event. Left hip roll is likewise absent: it peaked at 152.8 Nm /
+# 8.71 rad/s and never carried the splay. Four joints still catch it, on the first
+# anomalous sample, which is what the guard has to deliver.
+SPLAY_PEAK = {0: (68.4, 13.65), 1: (218.2, 8.47), 7: (241.7, 15.20), 8: (329.6, 12.65)}
+
+
+def test_every_joint_has_a_trip_threshold(joint_trips, limits_header):
+  names, _ = limits_header
+  assert len(joint_trips) == len(names) == 27
+
+
+@pytest.mark.parametrize("group", sorted(WALKING_MAX_BY_GROUP))
+def test_trip_thresholds_clear_measured_walking(joint_trips, limits_header, group):
+  """Sized off WALKING, never off the stand. The stand sits at 36 Nm / 0.06 rad/s, so a
+  stand-derived threshold would fire on every stride; walking reaches 296 Nm / 21.5 rad/s.
+  A threshold below the measured walking peak holds a joint mid-stride during healthy
+  walking, which is a fall cause, not a fall guard."""
+  names, _ = limits_header
+  ids, wtau, wdq = WALKING_MAX_BY_GROUP[group]
+  for jid in ids:
+    tau, dq = joint_trips[jid]
+    assert tau > wtau, f"{names[jid]}: tau trip {tau} <= measured walking max {wtau} Nm"
+    assert dq > wdq, f"{names[jid]}: dq trip {dq} <= measured walking max {wdq} rad/s"
+
+
+@pytest.mark.parametrize("jid", sorted(SPLAY_PEAK))
+def test_trip_thresholds_still_catch_the_2026_08_05_splay(joint_trips, limits_header, jid):
+  """The other half of the sizing: headroom raised far enough to silence walking must not
+  be raised so far that the failure it was built for slips through. These four hip joints
+  carried the splay; each has to be over at least one of its two thresholds."""
+  names, _ = limits_header
+  tau, dq = joint_trips[jid]
+  stau, sdq = SPLAY_PEAK[jid]
+  assert stau > tau or sdq > dq, (
+    f"{names[jid]}: splay peak ({stau} Nm, {sdq} rad/s) is under BOTH trips "
+    f"({tau} Nm, {dq} rad/s) — the trigger would not have fired on this joint")
+
+
+# --- the goal-space state source on the real robot ----------------------------
+
+# Which deployable estimator each goal component depends on. `orientation` is absent on
+# purpose: it comes from the IMU, which the real LowState does provide.
+GOAL_COMPONENT_ESTIMATOR = {"velocity": "base_vel_from_imu", "height": "base_height_from_fk"}
+
+
+@pytest.mark.parametrize("yaml_path", REAL_YAMLS)
+def test_real_config_never_sources_the_goal_state_from_sportmodestate(yaml_path):
+  """rt/sportmodestate is a SIM-ONLY privileged signal: on the real H1-2 it publishes
+  identical zeros once our own low-level controller has command (verified over all 1182
+  rows of trajectories/all_joints_2026-08-05_09-44-00.csv). State_RLHRL defaults both
+  estimator keys to false when absent, so a real config that simply omits them runs the
+  policy on velocity 0 / height 0 -- the height goal delta becomes nominal_root_height
+  (1.3076 m) against a 0.2 m scale, which splayed the robot's legs within ~1 s of entering
+  HRL mode on 2026-08-05.
+
+  No bridge gate can catch this: in the bridge SportModeState IS live, so the identical
+  config behaves correctly there. The C++ refuses to construct on such a config; this test
+  is the same rule applied to the config in the repo, so the defect cannot be committed."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  hrl = cfg.get("hrl")
+  if hrl is None:
+    pytest.skip("no hierarchy in this config -- no goal-space state to source")
+  for component in hrl.get("goal_components", []):
+    key = GOAL_COMPONENT_ESTIMATOR.get(component)
+    if key is None:
+      continue
+    assert hrl.get(key) is True, (
+      f"goal component {component!r} needs hrl.{key}: true in {yaml_path.name}; "
+      f"got {hrl.get(key)!r}. Absent means the goal state comes from the dead "
+      f"rt/sportmodestate topic on hardware.")
 
 
 # --- observation layout: the warm-start premise ------------------------------

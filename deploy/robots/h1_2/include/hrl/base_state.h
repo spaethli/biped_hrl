@@ -95,27 +95,84 @@ inline Eigen::Vector3f base_vel_increment(float psi, const Eigen::Vector3f& w_T,
 // lateral spread of the seven parallel capsules (|y| <= 0.03) is not modelled; measured
 // against mj_kinematics that costs rms 4.4 mm / max 11 mm over a walking-envelope sweep,
 // and exactly 0 at the nominal pose — which is the pose the caller anchors at.
+// One leg's ankle_roll frame (origin + orientation) in the PELVIS frame, from the 6 leg
+// encoders of that leg. The shared kinematic core: both consumers below start here and
+// differ only in which POINT of the foot they then evaluate, so there is exactly one copy
+// of the link table in this file.
+inline void leg_fk(const float q[12], int leg, Eigen::Vector3f& p, Eigen::Matrix3f& R)
+{
+    const float sy = (leg == 0) ? 1.0f : -1.0f;
+    const float* j = q + 6 * leg;
+    R = Eigen::Matrix3f(Eigen::AngleAxisf(j[0], Eigen::Vector3f::UnitZ()));
+    p = Eigen::Vector3f(0.0f, sy * 0.0875f, -0.1632f);
+    p += R * Eigen::Vector3f(0.0f, sy * 0.0755f, 0.0f);
+    R = R * Eigen::AngleAxisf(j[1], Eigen::Vector3f::UnitY());
+    R = R * Eigen::AngleAxisf(j[2], Eigen::Vector3f::UnitX());
+    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
+    R = R * Eigen::AngleAxisf(j[3], Eigen::Vector3f::UnitY());
+    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
+    R = R * Eigen::AngleAxisf(j[4], Eigen::Vector3f::UnitY());
+    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.02f);
+    R = R * Eigen::AngleAxisf(j[5], Eigen::Vector3f::UnitX());
+}
+
 inline float lowest_foot_z(const float q[12])
 {
     float lowest = 1e9f;
     for (int leg = 0; leg < 2; ++leg) {
-        const float sy = (leg == 0) ? 1.0f : -1.0f;
-        const float* j = q + 6 * leg;
-        Eigen::Matrix3f R(Eigen::AngleAxisf(j[0], Eigen::Vector3f::UnitZ()));
-        Eigen::Vector3f p(0.0f, sy * 0.0875f, -0.1632f);
-        p += R * Eigen::Vector3f(0.0f, sy * 0.0755f, 0.0f);
-        R = R * Eigen::AngleAxisf(j[1], Eigen::Vector3f::UnitY());
-        R = R * Eigen::AngleAxisf(j[2], Eigen::Vector3f::UnitX());
-        p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
-        R = R * Eigen::AngleAxisf(j[3], Eigen::Vector3f::UnitY());
-        p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
-        R = R * Eigen::AngleAxisf(j[4], Eigen::Vector3f::UnitY());
-        p += R * Eigen::Vector3f(0.0f, 0.0f, -0.02f);
-        R = R * Eigen::AngleAxisf(j[5], Eigen::Vector3f::UnitX());
+        Eigen::Vector3f p; Eigen::Matrix3f R;
+        leg_fk(q, leg, p, R);
         for (float x : {-0.08f, 0.17f})
             lowest = std::min(lowest, (p + R * Eigen::Vector3f(x, 0.0f, -0.045f)).z());
     }
     return lowest;
+}
+
+// --- leg odometry: the HL's ABSOLUTE base velocity (2026-08-06) ---------------------
+// The one quantity `delta` mode does NOT cancel. base_vel_increment above is 0 at every
+// window start BY CONSTRUCTION, and the HL fires exactly there, so an `hl_obs_vel` policy
+// running on the IMU increment reads "stationary" at every fire — measured on the bridge
+// as 3/3 falls against 0/3 on privileged truth (2026-08-05). This is the replacement, and
+// it feeds the HL ONLY: `s`, and therefore the LL's goal delta, keeps the IMU increment.
+
+// Site "left_foot"/"right_foot" pos, h1_2.xml:80,121 — in the ANKLE_ROLL frame. This is
+// the point scripts/play.py's --check-leg-odometry bench differences, so it is the point
+// whose error the 0.074/0.049 figures (and HlVelJitter's calibration) describe. It is NOT
+// the sole point lowest_foot_z evaluates: those capsule endpoints sit up to 0.13 m away in
+// x, and p_foot enters the w x p term directly, so the two are not interchangeable.
+static const Eigen::Vector3f kFootSiteA(0.04f, 0.0f, -0.04f);
+
+inline Eigen::Vector3f foot_site_b(const float q[12], int leg)
+{
+    Eigen::Vector3f p; Eigen::Matrix3f R;
+    leg_fk(q, leg, p, R);
+    return p + R * kFootSiteA;
+}
+
+// Instantaneous PELVIS-frame base linear velocity from the stance foot:
+//     v = -d(p_foot)/dt - w_P x p_foot
+// exact while the stance foot is fixed in the world. No integration anywhere, so unlike
+// the IMU increment this cannot drift and needs no window reset.
+//
+// p / p_prev: both feet's site positions now and one tick ago (the caller caches them, so
+// the FK runs twice per tick, not four times). Differencing is PER FOOT — never across the
+// stance switch, which would inject the ~0.3 m inter-foot gap as a false velocity spike.
+//
+// w_P: the PELVIS angular velocity in the pelvis frame. The gyro gives the TORSO one, so
+// the caller owes `Rz(psi)*w_gyro - psi_dot*z` (see FRAMES above). Do NOT rotate the return
+// value: leg FK is pelvis-referenced already, unlike the torso-mounted IMU.
+//
+// grav_P: projected gravity in the pelvis frame; stance = the foot further along it. No
+// contact sensing (LowState has no foot-force field) and none is wanted: a perfect contact
+// ORACLE was measured to buy ~nothing, since 86% of steps are single-support where there is
+// no attribution ambiguity, and flight is 0.13% of steps.
+inline Eigen::Vector3f leg_odom_velocity(const Eigen::Vector3f p[2],
+                                         const Eigen::Vector3f p_prev[2],
+                                         float dt, const Eigen::Vector3f& w_P,
+                                         const Eigen::Vector3f& grav_P)
+{
+    const int stance = (p[0].dot(grav_P) >= p[1].dot(grav_P)) ? 0 : 1;
+    return -(p[stance] - p_prev[stance]) / dt - w_P.cross(p[stance]);
 }
 
 } // namespace hrl

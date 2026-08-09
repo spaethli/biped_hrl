@@ -109,12 +109,84 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     // the SportModeState path, so every pre-2026-08-03 config runs byte-identically.
     vel_from_imu_ = hrl["base_vel_from_imu"] && hrl["base_vel_from_imu"].as<bool>();
     height_from_fk_ = hrl["base_height_from_fk"] && hrl["base_height_from_fk"].as<bool>();
+    hl_vel_from_leg_odom_ =
+        hrl["hl_vel_from_leg_odom"] && hrl["hl_vel_from_leg_odom"].as<bool>();
+
+    // FAIL-CLOSED base-state source check (2026-08-05). "Absent keeps the old path" is a
+    // safe default in the BRIDGE and a robot-breaking one on hardware: rt/sportmodestate
+    // publishes identical zeros the moment our own low-level controller takes command, so
+    // on the real robot the two keys above are not an option, they are the only source.
+    // With both absent, the goal-space state read velocity 0 / height 0 and the height goal
+    // delta became nominal_root_height - 0 = +1.3076 m against a 0.2 m goal scale; the
+    // keeper splayed its legs within ~1 s of entering HRL mode, twice, and needed an
+    // emergency stop. NO BRIDGE GATE CAN CATCH THIS CLASS -- in the bridge SportModeState
+    // is live, so the identical config is correct there -- which is why the check is here,
+    // at construction, and refuses to bring the binary up at all.
+    // The sim-vs-real discriminator is the command source (keyboard = bridge, joystick =
+    // robot), the same seam gait_phase_cmd already keys off. Checked per goal component,
+    // not blanket: `orientation` comes from the IMU and needs neither estimator.
+    const bool real_robot = !uses_keyboard_commands(env.get());
+    const auto has_component = [&](const char* c) {
+        return std::find(goal_components.begin(), goal_components.end(), c)
+               != goal_components.end();
+    };
+    needs_highstate_ = (has_component("velocity") && !vel_from_imu_)
+                    || (has_component("height") && !height_from_fk_);
+    if (real_robot && needs_highstate_) {
+        throw std::runtime_error(
+            "[HRL] REFUSING TO START: this is a real-robot (joystick) deploy config whose "
+            "goal space needs base velocity/height, but hrl.base_vel_from_imu / "
+            "hrl.base_height_from_fk are not both set. rt/sportmodestate reads IDENTICAL "
+            "ZEROS on the real H1-2 once this controller has command, so the goal-space "
+            "state would be velocity 0 / height 0 and the height goal delta would be "
+            "nominal_root_height (1.3076 m) against a 0.2 m scale. That splayed the robot's "
+            "legs on 2026-08-05. Set BOTH keys to true in the `hrl:` block "
+            "(deploy_real.yaml), or drop `velocity`/`height` from hrl.goal_components.");
+    }
+    // SECOND fail-closed source check, for the HIGH level (2026-08-06). The check above
+    // covers the goal-space state `s`; it cannot see this one, because on a real robot `s`
+    // can be perfectly well-formed while the HL's velocity input is still dead.
+    // The HL reads an ABSOLUTE base velocity, and on hardware there are only ever two
+    // candidates for it: rt/sportmodestate (identically zero, refused above) or the IMU
+    // increment (`base_vel_increment(psi, w, 0, lev0) = 0` at every window start, and the HL
+    // fires exactly at window starts -- so it reads 0.000000 at EVERY fire, by construction,
+    // at every speed). Measured consequence on the bridge, same binary/plant/sequence with
+    // the trip hold off: estimator 3/3 falls, privileged ground truth 0/3. On hardware that
+    // input has been reading zero all along via the dead sportmodestate.
+    // Leg odometry is the only live absolute source, so with hl_obs_vel on it is mandatory.
+    // Scoped to real-robot configs like the check above, deliberately: the bridge must stay
+    // able to run the no-leg-odom arm as the known-broken control in the A/B.
+    if (real_robot && hl_obs_vel_ && !oracle_ && !hl_vel_from_leg_odom_) {
+        throw std::runtime_error(
+            "[HRL] REFUSING TO START: hrl.hl_obs_vel is set, so the high level reads an "
+            "ABSOLUTE base velocity, but hrl.hl_vel_from_leg_odom is not set. On the real "
+            "H1-2 that leaves no live source: rt/sportmodestate publishes zeros once this "
+            "controller has command, and the IMU increment is 0 at every window start -- "
+            "which is every HL fire. The HL would read `stationary` on every single "
+            "decision, at every speed (bridge A/B: 3/3 falls vs 0/3 on ground truth). Set "
+            "hrl.hl_vel_from_leg_odom: true in the `hrl:` block (deploy_real.yaml), or "
+            "clear hrl.hl_obs_vel to run the velocity-blind HL the checkpoint was "
+            "trained with.");
+    }
     // sdk motor id -> articulation slot for the legs + waist. Everything else in this file
     // indexes by sdk id (joint_ids_map[i]); the FK and the waist encoder need the inverse.
     sdk_slot_.fill(-1);
     for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); ++i) {
         const int jid = (int)env->robot->data.joint_ids_map[i];
         if (jid >= 0 && jid < (int)sdk_slot_.size()) sdk_slot_[jid] = i;
+    }
+    // Same encoder-zero correction the articulation applies on read, pre-resolved for the
+    // legs + waist. run()'s leg odometry reads lowstate->msg_ directly (the articulation's
+    // joint_pos is only refreshed by policy_step(), at 50 Hz, and finite-differencing that
+    // staircase would re-create the exact aliasing this estimator lives in run() to avoid),
+    // so it does not get the correction for free. joint_offset is indexed by articulation
+    // SLOT, matching unitree_articulation.h's loop -- not by sdk id.
+    leg_offset_.fill(0.0f);
+    if (const auto jo = env->cfg["joint_offset"]) {
+        const auto off = jo.as<std::vector<float>>();
+        for (int k = 0; k < 13; ++k)
+            if (sdk_slot_[k] >= 0 && sdk_slot_[k] < (int)off.size())
+                leg_offset_[k] = off[sdk_slot_[k]];
     }
     // FK height at the deploy default pose. No longer an anchor for est_h (that is computed
     // directly in policy_step since 2026-08-04) -- kept as a STARTUP CROSS-CHECK, because
@@ -145,21 +217,28 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     highstate_ = std::make_shared<unitree::robot::go2::subscription::SportModeState>();
     spdlog::info("[HRL] hl_algorithm={} c={} hl_target_mode={} goal_dim={} velgoal={} "
                  "hl_obs_vel={} cadence_dim={} period_range=[{},{}] pin_period={} "
-                 "base_vel_from_imu={} base_height_from_fk={} fk_h_nominal={:.4f} "
-                 "(HighState=rt/sportmodestate)",
+                 "base_vel_from_imu={} base_height_from_fk={} hl_vel_from_leg_odom={} "
+                 "fk_h_nominal={:.4f} (HighState=rt/sportmodestate)",
                  oracle_ ? "oracle" : "learned", c_, hl_target_mode_, goal_space_->dim(),
                  velgoal_, hl_obs_vel_, cadence_dim_, period_lo_, period_hi_, pin_period_,
-                 vel_from_imu_, height_from_fk_, fk_h_nominal_);
+                 vel_from_imu_, height_from_fk_, hl_vel_from_leg_odom_, fk_h_nominal_);
     // The IMU rung reconstructs the WITHIN-WINDOW INCREMENT only, which is exactly what the
     // LL's `delta` goal needs and exactly what the HL's absolute lin-vel input does NOT get:
     // s[0..1] is 0 by construction at every window start, i.e. at every HL fire. Flag it —
     // on real hardware the SportModeState alternative already reads 0 there, so this is not
     // a regression, but in the bridge it IS a behavior change vs the privileged path.
-    if (vel_from_imu_ && hl_obs_vel_)
-        spdlog::warn("[HRL] base_vel_from_imu + hl_obs_vel: the HL's (vx,vy) input is the "
-                     "within-window increment, which is 0 at every HL fire step. The HL's "
-                     "ABSOLUTE velocity input is NOT solved by this estimator (leg odometry "
-                     "— play.py --check-leg-odometry — is the intended source).");
+    if (vel_from_imu_ && hl_obs_vel_ && !hl_vel_from_leg_odom_)
+        spdlog::warn("[HRL] base_vel_from_imu + hl_obs_vel WITHOUT hl_vel_from_leg_odom: the "
+                     "HL's (vx,vy) input is the within-window increment, which is 0 at every "
+                     "HL fire step. Measured on the bridge as 3/3 falls vs 0/3 on ground "
+                     "truth (2026-08-05). This is the known-broken control arm — intended "
+                     "only for A/B attribution. Set hrl.hl_vel_from_leg_odom for the real "
+                     "absolute source (a real-robot config is REFUSED without it).");
+    if (hl_vel_from_leg_odom_)
+        spdlog::info("[HRL] HL velocity from LEG ODOMETRY (stance-foot kinematics, "
+                     "c-averaged over each window). The LL's goal delta is untouched and "
+                     "still uses {} — the two velocity sources are deliberately split.",
+                     vel_from_imu_ ? "the IMU increment" : "rt/sportmodestate");
     if (vel_from_imu_ && hl_target_mode_ != "delta")
         spdlog::warn("[HRL] base_vel_from_imu with hl_target_mode={}: the increment "
                      "substitution is only valid in `delta` mode, where the absolute "
@@ -168,6 +247,17 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     this->registered_checks.emplace_back(
         std::make_pair(
             [&]()->bool{ return isaaclab::mdp::bad_orientation(env.get(), 1.0); },
+            FSMStringMap.right.at("Passive")
+        )
+    );
+    // Second layer of the 2026-08-05 fail-closed check, keyed off the DATA rather than the
+    // config: enter() latches this when the goal state is sourced from SportModeState and
+    // that topic is provably dead. It catches the one case the construction check above
+    // cannot see -- a real robot started WITHOUT H1_2_DEPLOY_CFG, which silently loads the
+    // keyboard/sim deploy.yaml and so looks like a bridge run to the config check.
+    this->registered_checks.emplace_back(
+        std::make_pair(
+            [&]()->bool{ return base_state_dead_; },
             FSMStringMap.right.at("Passive")
         )
     );
@@ -345,6 +435,16 @@ void State_RLHRL::policy_step()
         std::lock_guard<std::mutex> lock(est_mu_);
         if (window_start) dv_.setZero();  // reset every c steps -> drift cannot accumulate
         dv = dv_;
+        // Latch the leg-odometry mean for the window that just ended; the HL fires below
+        // and consumes it. This is the bench's `fasthl_*` quantity exactly: the estimate
+        // averaged across the window, delivered at the fire, lag included. A window that
+        // accumulated nothing keeps the previous latch -- emitting 0 here would recreate
+        // the very defect this path removes.
+        if (window_start) {
+            if (lo_n_ > 0) hl_vel_lo_ = (lo_sum_.head<2>() / (float)lo_n_);
+            lo_sum_.setZero();
+            lo_n_ = 0;
+        }
     }
     if (window_start) {
         lev0_ = rz(psi, lev);
@@ -410,9 +510,22 @@ void State_RLHRL::policy_step()
         } else {
             std::vector<float> hl_in = policy;
             hl_in.insert(hl_in.end(), command.begin(), command.end());
-            // Same (noised) estimate the LL's goal uses — training feeds the HL the
-            // identical reading (td3._state_vec order: policy, command, hl_vel).
-            if (hl_obs_vel_) { hl_in.push_back(s[0]); hl_in.push_back(s[1]); }
+            // The HL's absolute base velocity (td3._state_vec order: policy, command,
+            // hl_vel). THE SPLIT, 2026-08-06: with hl_vel_from_leg_odom this is the ONLY
+            // place leg odometry enters — `s` above keeps the IMU increment, so the LL's
+            // goal delta V*-s is bit-identical to before. That asymmetry is deliberate and
+            // load-bearing in both directions: leg odometry's error (0.074/0.049) is ~5x
+            // the increment's (0.0139/0.0288) and would DEGRADE the LL, while the increment
+            // is 0 at every fire and is useless to the HL. Training does exactly this split
+            // — HlVelJitter is wired into obs["hl_vel"] and never into state_n.
+            // Without the flag: the historical path, s[0:2], which under base_vel_from_imu
+            // is 0 at every fire. Note V* = s + scale*g is anchored on the increment either
+            // way, so the LL still only ever sees scale*g and cannot observe the swap.
+            if (hl_obs_vel_) {
+                const float vx = hl_vel_from_leg_odom_ ? hl_vel_lo_.x() : s[0];
+                const float vy = hl_vel_from_leg_odom_ ? hl_vel_lo_.y() : s[1];
+                hl_in.push_back(vx); hl_in.push_back(vy);
+            }
             const auto g_vec = hl_runner_->act({{"obs", hl_in}});
             const int gd = velgoal_ ? goal_space_->task_dim() : goal_space_->dim();
             const Eigen::VectorXf g = Eigen::Map<const Eigen::VectorXf>(g_vec.data(), gd);
@@ -457,9 +570,15 @@ void State_RLHRL::policy_step()
         const Eigen::Vector3f gt_dvel = rz(psi, v_gt_b) - gt_vel0_;
         const float est[3] = { est_vel.x(), est_vel.y(), est_h };
         const float gt[3]  = { gt_dvel.x(), gt_dvel.y(), h_gt };
+        // Leg odometry next to its OWN reference. rz(psi, v_gt_b) is the absolute
+        // pelvis-frame truth: v_gt_b is the pelvis velocity in the TORSO frame (the bridge
+        // publishes framelinvel on body `pelvis`, framequat on the imu site), so it needs
+        // the waist rotation and no lever arm — the same correction gt_dvel above carries.
+        const Eigen::Vector3f v_gt_p = rz(psi, v_gt_b);
+        const float lo[4] = { hl_vel_lo_.x(), hl_vel_lo_.y(), v_gt_p.x(), v_gt_p.y() };
         telemetry_.record(step_ * (float)env->step_dt, command.data(), s, target_, period,
                           env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar,
-                          est, gt);
+                          est, gt, lo);
     }
 }
 
@@ -493,8 +612,9 @@ void State_RLHRL::run()
     // below: msg_ is republished asynchronously by the DDS callback thread (Subscription.h),
     // so folding the two reads into one would silently change WHICH sample the fall detector
     // sees. An extra uncontended lock per 1 ms tick is the cheaper price.
-    Eigen::Vector3f est_acc_b;
+    Eigen::Vector3f est_acc_b, est_gyro_T;
     Eigen::Quaternionf est_quat;
+    float est_q[13], est_dpsi;
     {
         std::lock_guard<std::mutex> lock(lowstate->mutex_);
         est_acc_b = Eigen::Vector3f(
@@ -508,13 +628,48 @@ void State_RLHRL::run()
             lowstate->msg_.imu_state().quaternion()[2],
             lowstate->msg_.imu_state().quaternion()[3]
         );
+        // Leg encoders + waist for the leg odometry below, from the SAME sample as the IMU
+        // above — the two are combined in one cross product, so they must describe one
+        // instant of the robot (the same reason the safety filter keeps its own snapshot).
+        est_gyro_T = Eigen::Vector3f(
+            lowstate->msg_.imu_state().gyroscope()[0],
+            lowstate->msg_.imu_state().gyroscope()[1],
+            lowstate->msg_.imu_state().gyroscope()[2]
+        );
+        for (int k = 0; k < 13; ++k)
+            est_q[k] = lowstate->msg_.motor_state()[k].q() + leg_offset_[k];
+        est_dpsi = lowstate->msg_.motor_state()[12].dq();
     }
+    // [ESTIMATOR] Leg odometry — the HL's ABSOLUTE velocity, which `delta` does NOT cancel.
+    // Here for the same reason the integrator above is: the bench measured the identical
+    // reconstruction 2.4x worse when d(p_foot)/dt was taken at the 50 Hz control rate
+    // (per-step vx 0.374 -> 0.176, c-averaged 0.147 -> 0.072).
+    //
+    // FRAMES. leg_odom_velocity returns a PELVIS-frame velocity already (leg FK is
+    // pelvis-referenced), so it takes NO Rz(psi) on the way out — unlike the IMU path,
+    // whose whole lever-arm correction exists because the imu site is on torso_link. The
+    // waist enters only here, converting the TORSO-frame gyro into the pelvis angular
+    // velocity: w_P = Rz(psi)*w_T - psi_dot*z. Dropping psi_dot is worth ~0.1 m/s per rad/s
+    // of waist rate (|z x p_foot| ~ 0.1 m), so it is not optional.
     {
-        // Only dv_ crosses the thread boundary; policy_step() reads and zeroes it under the
-        // same mutex. Three floats, uncontended — nothing else here is shared.
+        Eigen::Vector3f p_now[2] = { hrl::foot_site_b(est_q, 0), hrl::foot_site_b(est_q, 1) };
+        const float psi = est_q[12];
+        Eigen::Vector3f w_P = rz(psi, est_gyro_T);
+        w_P.z() -= est_dpsi;
+        const Eigen::Vector3f grav_P =
+            rz(psi, est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W);
         std::lock_guard<std::mutex> lock(est_mu_);
+        // dv_ and the leg-odom accumulator are the only state crossing the thread boundary;
+        // policy_step() reads and zeroes both under this mutex. Uncontended.
         dv_ += (est_acc_b + (est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W) * kGravity)
                * H1_2_CONTROL_DT;
+        if (lo_prev_valid_) {
+            lo_sum_ += hrl::leg_odom_velocity(p_now, lo_p_prev_, H1_2_CONTROL_DT, w_P, grav_P);
+            lo_n_++;
+        }
+        lo_p_prev_[0] = p_now[0];
+        lo_p_prev_[1] = p_now[1];
+        lo_prev_valid_ = true;
     }
 
 #if SAFETY_FILTER
@@ -534,7 +689,10 @@ void State_RLHRL::run()
     bool joint_hold = false;  // joint violations no longer feed the hold ramp
 
     // Vertical acceleration fall detection — catches pelvis sinking while body stays upright.
+    // The measured motor torques are read from the SAME snapshot (2026-08-05): both feed the
+    // safety filter this tick, so they must describe one instant of the robot.
     Eigen::Vector3f lin_acc_b;
+    std::array<float, 27> tau_est{};
     {
         std::lock_guard<std::mutex> lock(lowstate->mutex_);
         lin_acc_b = Eigen::Vector3f(
@@ -542,6 +700,8 @@ void State_RLHRL::run()
             lowstate->msg_.imu_state().accelerometer()[1],
             lowstate->msg_.imu_state().accelerometer()[2]
         );
+        for (int jid = 0; jid < 27; ++jid)
+            tau_est[jid] = lowstate->msg_.motor_state()[jid].tau_est();
     }
     float a_world_z = (env->robot->data.root_quat_w * lin_acc_b).z() - 9.81f;
     if (a_world_z < H1_2_FALL_ACC_THRESH) fall_acc_counter_ = std::min(fall_acc_counter_ + 1, H1_2_FALL_ACC_WINDOW);
@@ -556,12 +716,64 @@ void State_RLHRL::run()
     else             hold_counter_ = std::max(hold_counter_ - 1, 0);
     float alpha = static_cast<float>(hold_counter_) / H1_2_RAMP_CYCLES;
 
+    // Per-joint torque / joint-velocity trip (2026-08-05). Scoped and ramped exactly like
+    // the position clamp above -- per joint, not whole body -- so a joint that is genuinely
+    // running away is pulled back to its measured position while the rest keep tracking the
+    // policy. Thresholds and their derivation live in h1_2_limits.h.
+    //
+    // The 50 ms ramp doubles as the debounce: a single-sample sensor spike buys alpha 0.02
+    // for one tick, which is nothing, while a real trip reaches a full hold in 50 ms. On the
+    // 2026-08-05 splay that is alpha=1 by t+50 ms, with hip roll still at ~4 deg -- it
+    // reached -67 deg by t+240 ms unrestrained. So no separate debounce counter is needed.
+    //
+    // This is why it exists at all: the 2026-08-05 splay never tripped tilt (peak 22.8 deg
+    // against the 25 deg limit) and never tripped the vertical-acceleration fall detector.
+    // The filter as it stood had no channel that could see the failure.
+    // trip_ratio/trip_jid are logged ALWAYS, not only while tripping (2026-08-05, second
+    // pass). Booleans alone made the channel unmeasurable: a clean session says "did not
+    // fire" and nothing about whether it cleared by 3x or by 2%. That mattered immediately
+    // -- thresholds derived from 389 s of hardware walking (which is A0-dominated) turned
+    // out to sit UNDER this A1 candidate's own bridge gait on three joints, and the boolean
+    // columns could not have shown that coming. With the ratio logged, max(trip_ratio) over
+    // a clean run IS the headroom, per joint, directly.
+    bool trig_torque = false, trig_dq = false;
+    int trip_jid = -1;
+    float trip_ratio = 0.0f;
+    for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
+        const int jid = (int)env->robot->data.joint_ids_map[i];
+        const float at = std::abs(tau_est[jid]), ad = std::abs(env->robot->data.joint_vel[i]);
+        const bool ht = at > h1_2_joint_trips[jid].tau;
+        const bool hd = ad > h1_2_joint_trips[jid].dq;
+        trig_torque = trig_torque || ht;
+        trig_dq = trig_dq || hd;
+        // Compare joints by overshoot RATIO, so a 15 Nm wrist and a 385 Nm knee stay
+        // commensurable in the logged attribution.
+        const float r = std::max(at / h1_2_joint_trips[jid].tau,
+                                 ad / h1_2_joint_trips[jid].dq);
+        if (r > trip_ratio) { trip_ratio = r; trip_jid = jid; }
+        trip_counter_[i] = (ht || hd) ? std::min(trip_counter_[i] + 1, H1_2_RAMP_CYCLES)
+                                      : std::max(trip_counter_[i] - 1, 0);
+    }
+    if (trig_torque || trig_dq)
+        spdlog::warn("[Safety] Trip: {} at {:.2f}x threshold ({} joints ramping)",
+                     h1_2_joint_names[trip_jid], trip_ratio,
+                     std::count_if(trip_counter_.begin(), trip_counter_.end(),
+                                   [](int c){ return c > 0; }));
+
     bool any_clamp = false;
+    float alpha_trip_max = 0.0f;
     for (int i = 0; i < (int)env->robot->data.joint_ids_map.size(); i++) {
         int jid = (int)env->robot->data.joint_ids_map[i];
         float q_meas = env->robot->data.joint_pos[i];
+        // Whole-body tilt/fall hold and this joint's own trip hold compose by max: whichever
+        // says "hold harder" wins. Tilt/fall keeps its existing whole-body reach untouched.
+        // H1_2_TRIP_HOLD 0 keeps the ramp COMPUTED (so alpha_trip is still logged and the
+        // channel stays measurable) but never lets it reach the command. See h1_2_limits.h.
+        const float alpha_trip = static_cast<float>(trip_counter_[i]) / H1_2_RAMP_CYCLES;
+        alpha_trip_max = std::max(alpha_trip_max, alpha_trip);
+        const float a_i = H1_2_TRIP_HOLD ? std::max(alpha, alpha_trip) : alpha;
         // alpha=0: pure policy output  |  alpha=1: hold at current measured position
-        float q_cmd = (1.0f - alpha) * action[i] + alpha * q_meas;
+        float q_cmd = (1.0f - a_i) * action[i] + a_i * q_meas;
         // per-joint safety clamp (commands past the mechanical stop are pointless and
         // trip the real firmware; measured grazes are the plant's business, not ours)
         const float lo = h1_2_joint_limits[jid].min, hi = h1_2_joint_limits[jid].max;
@@ -584,7 +796,8 @@ void State_RLHRL::run()
                               env->robot->data.joint_pos.data(),
                               env->robot->data.joint_vel.data(),
                               quat, acc, alpha, joint_hold, tilt_safety, fall_detected,
-                              cmd, ach_vel, isaaclab::g_gait_phase_obs);
+                              cmd, ach_vel, isaaclab::g_gait_phase_obs,
+                              trig_torque, trig_dq, trip_jid, alpha_trip_max, trip_ratio);
     }
 #else
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {

@@ -76,10 +76,16 @@ public:
         meta << "  \"joints\": [\n";
         for (int i = 0; i < n_; i++) {
             int jid = (int)joint_ids_map[i];
+            // tau_trip/dq_trip ride along per joint (2026-08-05) so the analyzer can score
+            // the trip channel without re-deriving the table: tau_est is NOT a CSV column
+            // (27 more at 500 Hz), so unlike the position clamp the trip cannot be
+            // reconstructed from the row alone -- the thresholds have to travel with it.
             meta << "    {\"slot\": " << i << ", \"hw_id\": " << jid
                  << ", \"name\": \"" << h1_2_joint_names[jid] << "\""
                  << ", \"min\": " << h1_2_joint_limits[jid].min
-                 << ", \"max\": " << h1_2_joint_limits[jid].max << "}"
+                 << ", \"max\": " << h1_2_joint_limits[jid].max
+                 << ", \"tau_trip\": " << h1_2_joint_trips[jid].tau
+                 << ", \"dq_trip\": " << h1_2_joint_trips[jid].dq << "}"
                  << (i < n_ - 1 ? "," : "") << "\n";
         }
         meta << "  ]\n}\n";
@@ -118,7 +124,18 @@ public:
         // indicator for both FSM types. Older CSVs mean the opposite ("a MEASURED joint
         // left range -> whole-body hold engaged"), so trig_joint=1 with alpha>0 in an A0
         // capture dated before 2026-07-23 is the OLD semantics — do not mix the two eras.
-        buf_ << ",alpha,trig_joint,trig_tilt,trig_fall,entry\n";
+        // trig_torque / trig_dq (2026-08-05): at least one joint over its |tau_est| or |dq|
+        // trip threshold this tick (h1_2_limits.h). Unlike trig_tilt/trig_fall these drive a
+        // PER-JOINT ramped hold, like trig_joint's clamp -- so `alpha` (whole-body tilt/fall)
+        // stays exactly what it always meant and `alpha_trip` carries the new channel: the
+        // max per-joint trip ramp this tick. trip_jid/trip_ratio name the closest joint to
+        // its threshold and how close, logged on EVERY tick rather than only while tripping:
+        // tau_est is not a column, so without the ratio a clean session cannot tell you
+        // whether it cleared by 3x or by 2%. max(trip_ratio) over a clean run is the
+        // headroom. Per-joint thresholds are in <base>_meta.json.
+        // Columns absent from any CSV written before 2026-08-05.
+        buf_ << ",alpha,trig_joint,trig_tilt,trig_fall";
+        buf_ << ",trig_torque,trig_dq,trip_jid,trip_ratio,alpha_trip,entry\n";
         // Truncate/create the file and write the header now (first entry only).
         std::ofstream(base_ + ".csv", std::ios::trunc) << buf_.str();
         buf_.str("");
@@ -130,14 +147,19 @@ public:
                 const float* meas_q, const float* meas_dq,
                 const float quat[4], const float acc[3],
                 float alpha, bool trig_joint, bool trig_tilt, bool trig_fall,
-                const float cmd[3], const float ach_vel[3], const float phase[2])
+                const float cmd[3], const float ach_vel[3], const float phase[2],
+                bool trig_torque = false, bool trig_dq = false, int trip_jid = -1,
+                float alpha_trip = 0.0f, float trip_ratio = 0.0f)
     {
         if (base_.empty()) return;
         long this_tick = tick_++;
         // alpha > 0 covers the hold ramp-down tail (up to H1_2_RAMP_CYCLES ticks after
         // trig_joint/trig_tilt/trig_fall all clear) -- without it, decimation could drop
         // rows from that tail and undercount engaged_ticks/engaged_time_s downstream.
-        bool trig = trig_joint || trig_tilt || trig_fall || alpha > 0.0f;
+        // alpha_trip does the same job for the per-joint trip ramp; without it the decimator
+        // would sample the trip channel at 500 Hz and could miss a short trip entirely.
+        bool trig = trig_joint || trig_tilt || trig_fall || alpha > 0.0f
+                    || trig_torque || trig_dq || alpha_trip > 0.0f;
         if (!trig && (this_tick % log_every_) != 0) return;  // decimated quiet tick, skip
         // `t` needs its OWN precision, not the buffer's 4 SIGNIFICANT digits (set in
         // init()): 4 sig digits quantises time to 0.01 s once t passes 10 s, which made
@@ -161,7 +183,10 @@ public:
         buf_ << ',' << ach_vel[0] << ',' << ach_vel[1] << ',' << ach_vel[2];
         buf_ << ',' << phase[0] << ',' << phase[1];
         buf_ << ',' << alpha << ',' << (trig_joint?1:0) << ',' << (trig_tilt?1:0)
-             << ',' << (trig_fall?1:0) << ',' << g_safety_logger_entry << '\n';
+             << ',' << (trig_fall?1:0);
+        buf_ << ',' << (trig_torque?1:0) << ',' << (trig_dq?1:0) << ',' << trip_jid
+             << ',' << trip_ratio << ',' << alpha_trip;
+        buf_ << ',' << g_safety_logger_entry << '\n';
         // Periodic flush as crash insurance (~5 s at the quiet-tick 500 Hz logged rate; more
         // often during a safety-trigger burst, since those log every tick). Infrequent
         // blocking write.

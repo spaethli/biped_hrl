@@ -188,8 +188,30 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   NOT the pelvis whose velocity the goal space uses — `h1_2.xml:138-145`), and the residual is
   dominated by **sampling rate**, so the deploy integrator belongs in `State_RLHRL::run()` (1 kHz),
   never in `policy_step()` (50 Hz). Numbers + verdict → the A1a deploy journal (research KB), 2026-08-01.
+- ⚠ **The `delta` cancellation covers the LL ONLY, and the gap is now MEASURED (2026-08-05).**
+  Under `base_vel_from_imu` the increment resets at every window start, so the HL's `(vx,vy)`
+  input is **exactly 0.000000 at every fire step** (`base_vel_increment(psi,w,0,lev0) = 0` by
+  construction; fire steps are identifiable in telemetry as the exactly-zero `est_vx` rows,
+  modal gap = `c`). An HL trained on absolute velocity therefore reads "stationary" every
+  time it fires. Bridge A/B on the shipped plant, same binary/plant/sequence: **estimator
+  3/3 falls, ground truth 0/3.** The estimator itself is NOT at fault — it tracks height to
+  ~5-13 mm and velocity to ~0.02-0.06 m/s up to the fall. Consequence: a `delta` hierarchy
+  with `hl_obs_vel=True` needs a real absolute-velocity source (leg odometry) before deploy;
+  the IMU increment alone is enough for the LL and not for the HL. Numbers → the A1a deploy
+  journal (research KB), 2026-08-05.
 - **Leg-odometry velocity bench** (the HL's ABSOLUTE velocity, which `delta` does NOT cancel):
   `play.py --check-leg-odometry 480 --num-envs 64 --eval-seeds 2` → `[LEGODOM] {json}`.
+  **RESOLVED ON THE DEPLOY SIDE 2026-08-06** — `hrl.hl_vel_from_leg_odom` (C++,
+  `hrl/base_state.h::leg_odom_velocity`): differenced per tick in `run()` (~991 Hz),
+  c-averaged, latched at each fire, wired to the **HL only** so the LL's goal delta keeps
+  the IMU increment. Bridge A/B (n=3, one binary, true falls `gt_h<0.9`): gt 0/3,
+  IMU increment 3/3, **leg odometry 1/3**; open loop passive 0.047/0.053, closed loop
+  0.083/0.121. ⚠ Fisher p=0.40 at n=3, and `arm4d` predates `HlVelJitter` ⇒ "estimator
+  scored, policy pending". The bench point is the foot **SITE** `(0.04,0,-0.04)` in
+  ankle_roll, NOT the sole `lowest_foot_z` uses — 0.13 m apart in x, and `p_foot` enters
+  `w x p`. New rung `fastfilt_*` = the same estimate scored against the WINDOW-MEAN truth,
+  i.e. tracking error with the c-averaging lag removed; the pair (`fasthl_*` vs
+  `fastfilt_*`) is what separates "the estimator is wrong" from "the average is stale".
   `v_pelvis_b = -d(p_foot_b)/dt - w_b x p_foot_b` from the stance foot (gravity-projected
   lower foot; `LowState` has no foot force sensor), scored vs truth with phase/speed splits,
   a physics-rate rung and contact-ORACLE reference rungs. Ruled out by it: `tau_est` load

@@ -92,7 +92,7 @@ goal decode, reward-term direction/gating, the warm-start column map, deploy/tra
 config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
 change to those. New tests must be proven able to fail:
 `python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
-it is caught (74 tests, 32/32 mutations). A test that restates the logic it guards cannot
+it is caught (96 tests, 37/37 mutations). A test that restates the logic it guards cannot
 fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
 
 **Deploy readiness (2026-08-04): one command, one verdict.**
@@ -100,7 +100,10 @@ fail when that logic breaks — the harness catches that too. Details → `hrl-i
 python scripts/deploy_readiness.py <TaskID> --checkpoint-file <pt> --tag <name>
 ```
 `provenance → sim → bridge (candidate + A0 control) → analyze`, ~15-25 min, exit
-**0 GO / 3 CAVEAT / 1 NO-GO / 2 INFRA**. Fail-closed: never GO from a stage it could not
+**0 GO / 3 CAVEAT / 1 NO-GO / 2 INFRA**. Pass `--scene` (it SETS `/opt`'s plant and gates on
+the read-back) and note `--bridge-cfg` defaults to **`deploy_est.yaml`**, the deployable
+estimator — what the robot runs; `deploy.yaml` is the privileged ground-truth arm, kept for
+attribution. Fail-closed: never GO from a stage it could not
 score. Use it instead of hand-driven bridge sessions. **Always check what is deployed
 first** — `scripts/deploy_provenance.py --check --checkpoint-file <pt>` md5-identifies the
 deployed ONNX against every run export and names the source run (`run_path` metadata is

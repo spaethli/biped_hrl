@@ -126,6 +126,23 @@ match. The waist is held at 300/3 too (option B); the torso+arm hold only trains
 desired_kl=0.01 (stalls at 0.005).
 _Avoid_: "arm gains" (ambiguous with the old soft RL-arm gains); "safety gains".
 
+**Base-velocity increment**:
+The *change* in pelvis linear velocity since the start of the current HL window, `s_i - s_t0`.
+Not a velocity: it is re-zeroed every `c` steps and is exactly 0 at each window start. It is
+what a `delta`-mode _Goal_ makes sufficient for the low level, because `V* - s_i = scale*g -
+(s_i - s_t0)` cancels the absolute term. Deployable from the IMU alone.
+_Avoid_: "the velocity estimate", "base velocity" (the increment is not one, and reading it
+as one is exactly the 2026-08-05 defect: the high level, which needs the *absolute* value,
+read 0 at every fire).
+
+**Leg odometry**:
+The *instantaneous absolute* pelvis velocity computed from stance-foot kinematics and the
+gyro, `v = -d(p_foot)/dt - w x p_foot`. Drift-free because nothing is integrated. The high
+level's velocity source, since it is the one quantity a `delta` _Goal_ does not cancel.
+_Avoid_: "odometry" unqualified (the word normally implies an integrated *position*, which
+this deliberately is not); "the estimator" (ambiguous with the IMU _Base-velocity increment_
+and the leg-FK height, which are different signals feeding different consumers).
+
 **Suicide attractor**:
 The failure where an always-negative reward makes early termination optimal (stop
 accruing negative reward). The reason A1 uses `fell_over = time_out` (a truncation that

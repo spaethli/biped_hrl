@@ -124,6 +124,68 @@ int main()
                                   "resting IMU");
     }
 
+    // 6. Foot SITE forward kinematics vs MuJoCo (2026-08-06). Distinct from test 1: that
+    //    one pins the SOLE (capsule endpoints, the height path), this pins the `left_foot`/
+    //    `right_foot` SITE, which is the point scripts/play.py's --check-leg-odometry
+    //    differences and therefore the point the 0.074/0.049 error figures describe. The two
+    //    are up to 0.13 m apart in x and p_foot enters the w x p term directly, so using the
+    //    sole point here would be a silent 0.1 m lever error, not a rounding difference.
+    //    Fixtures: mj_kinematics site_xpos on h1_2.xml, expressed in the pelvis frame.
+    {
+        static const float kSite[8][2][3] = {
+            {{+0.001260f, +0.163000f, -0.997361f}, {+0.001260f, -0.163000f, -0.997361f}},
+            {{-0.475635f, +0.301502f, -0.850963f}, {-0.496008f, +0.012327f, -0.808603f}},
+            {{-0.150765f, +0.221402f, -0.962448f}, {-0.541017f, -0.359846f, -0.801868f}},
+            {{-0.362818f, +0.251841f, -0.763497f}, {+0.348761f, -0.416827f, -0.911872f}},
+            {{+0.655829f, +0.313777f, -0.678727f}, {-0.594137f, -0.151271f, -0.632406f}},
+            {{-0.579661f, +0.145416f, -0.697400f}, {+0.339637f, -0.096974f, -0.936929f}},
+            {{-0.117574f, +0.272914f, -1.003200f}, {+0.524973f, -0.028544f, -0.832017f}},
+            {{-0.511503f, +0.011070f, -0.677956f}, {+0.011444f, -0.281192f, -0.864026f}},
+        };
+        float worst_site = 0.0f;
+        for (int i = 0; i < 8; ++i)
+            for (int leg = 0; leg < 2; ++leg) {
+                const Eigen::Vector3f got = hrl::foot_site_b(kFkQ[i], leg);
+                const Eigen::Vector3f want(kSite[i][leg][0], kSite[i][leg][1], kSite[i][leg][2]);
+                worst_site = std::max(worst_site, (got - want).cwiseAbs().maxCoeff());
+            }
+        // Exact, unlike the sole (whose 12 mm slack is the unmodelled lateral capsule
+        // spread): a site is a single point, so the FK either reproduces it or is wrong.
+        check(worst_site < 1e-5f, "foot SITE FK matches mj_kinematics exactly over the "
+                                  "walking envelope (worst " + std::to_string(worst_site) + " m)");
+    }
+
+    // 7. Leg odometry. Three properties, each one a failure that has a name.
+    {
+        const float dt = 0.001f;
+        const Eigen::Vector3f up_grav(0.0f, 0.0f, -1.0f);  // upright: depth = -p.z
+
+        // (a) stance = the foot further ALONG gravity, i.e. the LOWER one. Getting this
+        //     backwards silently estimates from the swing foot, which is not world-fixed.
+        Eigen::Vector3f p[2]  = {{0.0f, 0.15f, -0.90f}, {0.0f, -0.15f, -0.98f}};  // right lower
+        Eigen::Vector3f pp[2] = {p[0], p[1]};
+        pp[1].x() -= 0.001f;   // right foot moved +1 mm in x over dt -> v = -1 m/s
+        Eigen::Vector3f v = hrl::leg_odom_velocity(p, pp, dt, Eigen::Vector3f::Zero(), up_grav);
+        check(std::fabs(v.x() + 1.0f) < 1e-4f,
+              "leg odometry differences the LOWER (stance) foot, not the swing foot");
+
+        // (b) the difference is PER FOOT. Both feet stationary but 0.30 m apart, stance
+        //     flipping between ticks: a cross-foot difference would report 0.30/dt = 300 m/s
+        //     as a real velocity, once per step, and poison the whole window mean.
+        Eigen::Vector3f s0[2] = {{0.15f, 0.15f, -0.95f}, {-0.15f, -0.15f, -0.95f}};
+        v = hrl::leg_odom_velocity(s0, s0, dt, Eigen::Vector3f::Zero(), up_grav);
+        check(v.norm() < 1e-5f, "stationary feet 0.30 m apart give exactly 0 (the difference "
+                                "never crosses the stance switch)");
+
+        // (c) the gyro term. Feet fixed, body rotating at 1 rad/s about z: the pelvis must
+        //     report -w x p. Dropping this term is the difference between a body-frame
+        //     velocity and a foot-frame one.
+        Eigen::Vector3f r[2] = {{0.10f, 0.0f, -1.0f}, {0.10f, 0.0f, -0.9f}};
+        v = hrl::leg_odom_velocity(r, r, dt, Eigen::Vector3f(0.0f, 0.0f, 1.0f), up_grav);
+        check((v - Eigen::Vector3f(0.0f, -0.10f, 0.0f)).norm() < 1e-5f,
+              "leg odometry applies -w x p_foot (pure yaw rate over a 0.10 m lever)");
+    }
+
     std::printf("%s (%d)\n", fails ? "FAILURES" : "ALL PASS", fails);
     return fails ? 1 : 0;
 }

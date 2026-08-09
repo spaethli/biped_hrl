@@ -77,8 +77,43 @@ the only A1 candidate that passes the live bridge (2026-07-22, all directions in
 clearance** (action_rate splits cleanly: A0 0.57-0.75 vs A1 0.92-1.28, no overlap).
 `arm5` (ankle-roll) fails catastrophically with a now-understood mechanism (bilateral
 ankle-roll+hip-roll saturation decaying a lateral command to zero). Headless replica
-sweep confirms arm4d 6/6 clean, matching live. **Open**: full live G2 battery on arm4d
-has not been run yet (only the smoothness spot-check above). → the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`).
+sweep confirms arm4d 6/6 clean, matching live. ⚠ **DEPLOY BLOCKER, measured 2026-08-05:
+`arm4d` is NOT deployable on the IMU-increment estimator.** The bridge now runs the
+candidate on the deployable estimator by default (`--bridge-cfg deploy_est.yaml`), which is
+what the robot runs; on it the candidate falls **3/3** against **0/3** on privileged
+ground truth. Cause is the HL, not the estimator: `delta` cancels absolute velocity for the
+LL only, so the HL's `(vx,vy)` input reads exactly 0 at every fire. Needs an absolute
+source (leg odometry) — owned by the linear-velocity-estimation workline. → `hrl-infra.md`. → the deploy journal in the research KB (`raw/engineering-journal/a1a-deploy-journal.md`).
+
+**RESOLVED 2026-08-06 — leg odometry shipped for the HL (`hrl.hl_vel_from_leg_odom`).**
+`v = -d(p_foot)/dt - w_P x p_foot` on the gravity-projected lower foot, differenced per tick
+in `run()` (~991 Hz) and averaged over each HL window. It feeds **only** the HL: `s` and the
+LL's goal delta keep the IMU increment, because leg odometry's error is ~5x the increment's
+and would degrade the LL. Since `V* = s + scale*g`, the LL sees `scale*g` either way and
+cannot observe the swap. Absent key = false = prior behaviour; a real-robot config with
+`hl_obs_vel` and no leg odometry now **refuses to construct** (verified live on the bridge).
+
+Three-arm A/B, one binary, n=3, reference sequence `0:8,3:30,0:6,5:30,0:6`, trip hold off.
+**True falls, `gt_h < 0.9`** — ⚠ *not* the readiness `falls` gate, which is trigger-based and
+flags recoveries; and never `s6`, which is the FK estimate and reads ~1.38 for a robot lying
+down (lowest-foot FK assumes a grounded foot):
+
+| arm | true falls | notes |
+|---|---|---|
+| ground truth `deploy.yaml` | **0/3** | reproduces 2026-08-05 |
+| IMU increment (control) | **3/3** | reproduces 2026-08-05; falls at 10.9–13.6 s |
+| **leg odometry** | **1/3** | fall at 4.7 s |
+
+Open-loop, both rungs: **passive vx 0.047 / vy 0.053** (inside the pre-registered ≤0.094 /
+≤0.063), **closed-loop vx 0.083 / vy 0.121** — 1.8x/2.3x the passive, matching the IMU
+estimator's documented ~2x inflation. Never quote the passive number as the accuracy.
+
+⚠ **Underpowered:** 1/3 vs 3/3 at n=3 is Fisher two-sided **p = 0.40**. Directionally clear
+and mechanism-consistent, not proven. ⚠ **Scope:** `arm4d` was NOT trained with
+`HlVelJitter` (it learned on noiseless instantaneous velocity), so partial recovery is the
+pre-registered expectation. **Verdict: leg odometry is a viable deploy-time HL velocity
+source — estimator scored, policy pending.** Re-run arm (iii) on the jitter-trained
+checkpoint when it lands. Full detail → the deploy journal (research KB), 2026-08-06.
 
 **Both tracks share:** the `gait_phase_cmd` fix (2026-07-21, "Defect 0") — the
 prior finding that the deploy gait clock was permanently dead under keyboard control,
@@ -252,6 +287,22 @@ Useful flags: `--stages a,b,c` (subset) · `--no-stage-policy` (validate what is
 | 10 | **bridge (A0 control)** | identical binary, config and sequence with the A0 policy. Fingerprint-cached on A0 ONNX + `h1_2_ctrl` + deploy YAML + scene + sequence. | *(new — encodes the attribution method)* | `python scripts/bridge_session.py --policy a0 --seq "<same seq>" --tag <name>_a0` |
 | 11 | **analyze** | scores both CSVs: falls, safety-filter engagement, **transition windows**, band-release, `trig_joint` rate+magnitude, cmd-0 drift, measured loop rate, bridge estimator error. | **G2.1-G2.4 bars + W3 telemetry** | `python scripts/deploy_gate_analyzer.py <base>_hrl.csv` and `<base>.csv` |
 
+### Summarising a BATCH of runs
+
+`deploy_gate_analyzer.py` scores one CSV; `scripts/summarize_runs.py` scores a batch and
+is what any A/B or matrix should be read through, instead of a fresh grep each time:
+
+```bash
+python scripts/summarize_runs.py t3_ --group 't3_(\w+_\d+s)_r'   # fall counts per cell
+python scripts/summarize_runs.py nh_ --events                     # trigger ordering
+```
+
+`--events` gives the first-fire time of each channel and the trip-vs-fall lead, which is
+the check that showed the per-joint hold PRECEDED the fall in 5 of 6 captures. Ordering
+discriminates "consequence" from "precedes"; it never proves causation on its own — pair it
+with a control run that has the mechanism disabled. A capture without the trip columns
+prints `n/a`, never `0`.
+
 ### Reading the verdict
 
 - **GO (0)** — every blocking gate passed. Cleared for the next tier, not for hardware on
@@ -272,6 +323,29 @@ identical sequence alongside), `trig_joint` rate and magnitude past the stop, wh
 `act_rate`, stride period, cmd-0 drift, measured loop rate.
 **Surfaced as UNKNOWN:** what leg action rate is actually unsafe; what `trig_joint` rate is
 acceptable. Do not invent thresholds for these.
+
+### Safety filter: what fires, and the one channel that is OFF (2026-08-05)
+
+| trigger | reach | state |
+|---|---|---|
+| `trig_tilt` / `trig_fall` | whole body, ramped hold | ON |
+| `trig_joint` | per joint, command clamp, no hold | ON |
+| `trig_torque` / `trig_dq` | per joint | **detect + log only** (`H1_2_TRIP_HOLD 0`) |
+
+Per-joint |tau_est| / |dq| trip thresholds live in `h1_2_limits.h`, sized at 1.3x the
+measured walking maximum per joint group over hardware ∪ bridge walking; regenerate with
+`scripts/measure_joint_trip_thresholds.py`. **Never size them off the stand** (36 Nm /
+0.06 rad/s, which every stride beats by 5-350x). The hold is OFF because enabling it made
+things worse: the trip preceded the fall in 5 of 6 bridge falls and the shipped-plant 30 s
+cell went 0/2 -> 2/4. Re-enable only after a battery shows the thresholds never firing
+during normal walking. Commissioned because the 2026-08-05 splay fired **nothing** — tilt
+peaked at 22.8 deg against a 25 deg limit.
+
+**Fail-closed base-state validation (2026-08-05).** `State_RLHRL` refuses to construct on a
+real-robot config whose goal space needs velocity/height without
+`base_vel_from_imu`/`base_height_from_fk`, and refuses to run if rt/sportmodestate is
+provably dead. This is a startup check rather than a gate on purpose: the bridge publishes
+that topic with valid values, so **no gate at any fidelity can catch this class**.
 
 ### `bridge_replica.py` — RETIRED as a gate (2026-08-05)
 
@@ -351,12 +425,15 @@ exactly the failure class the transition gate was added for, and the old 4-comma
 binary, config and sequence ⇒ the fault is in **the HRL path or the policy**, not the shared
 layer (articulation, `joint_offset`, safety filter).
 
-**Caveats, on the record.** n=1. The keeper's "bridge-passed" status was earned on the
-retired training-proximate plant, never on the shipped one, so this is a first measurement
-rather than a regression. Whether it is the longer hold, the plant, or run-to-run variance
-is **not yet separated** — the cheap next step is repeat runs at 15 s vs 30 s holds on both
-plants. **Until that is done, `arm4d` should not be treated as a validated hardware
-candidate on the shipped plant.**
+**Separated 2026-08-05 — and it did not reproduce.** The 2x2 ({15 s, 30 s} hold x
+{shipped, retired} plant, >=2 repeats/cell, 8 runs) found **0/8 decel falls**, including
+**2/2 clean in this fall's own cell** (shipped, 30 s), and no transition fall anywhere.
+Two retired-plant runs produced single-instant `trig_fall` trips that the robot walked out
+of (alpha 0.2 / 0.08, sessions finished) — not this event, which was alpha 0.58->1.0 and
+down for ~170 s. **Verdict: not separable at this n; run-to-run variance leads.** Bounds:
+per-run rate <=0.31 pooled; to see it once at 95% confidence needs n=5/cell at a 50% true
+rate, 11 at 25%. Plant effect on the transients p=0.43 (Fisher). Full table → the deploy
+journal (research KB), 2026-08-05.
 
 ## Phase G1: mjlab candidate battery (per candidate, ~30 min)
 
