@@ -50,7 +50,10 @@ this project's own work, built on top of that scaffold.
   for judging policies deterministically (tracking error, fall rate, cost of transport,
   action smoothness) instead of relying on training-time reward curves, plus an HRL
   goal-achievability probe (`--diagnose-goals`) that decomposes tracking error into
-  high-level goal-setting error vs low-level goal-reaching error.
+  high-level goal-setting error vs low-level goal-reaching error. `scripts/plot_radar.py`
+  turns a batch of `[BENCH]` captures into a normalized comparison chart, and
+  `scripts/summarize_runs.py` does the same for batches of bridge/readiness CSVs
+  (`deploy_gate_analyzer.py` scores one; this scores many and orders their triggers).
 - Design docs and architecture decisions under [`doc/hrl/`](doc/hrl) and
   [`docs/adr/`](docs/adr), kept to current status and how the working solution is
   implemented (the full experimental narrative — what was tried, what failed, why —

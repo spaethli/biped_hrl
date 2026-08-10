@@ -146,9 +146,30 @@ Ingest finds new material by date: it processes journal entries dated after the 
 `Ingest` entry for the engineering journal in the wiki's `log.md`. So the dated heading
 in §4 is load-bearing — without it your entry is invisible to the compile step.
 
-## 7. Report
+## 7. Keep the report inbox current
+
+`wiki/thesis/report-inbox.md` is not a fourth destination — it's a derived index over
+(1) the repo and (2) the journal that mirrors `raw/latex/main.tex`'s own section
+headers, so Liam can find what's new without re-reading either. Whenever this session
+routed a fact that changes what's ready to go into the thesis — a solved/closed
+milestone, a new architecture result, a formula that no longer matches the current
+code, a hardware finding, a paper that grounds one of the above — check whether the
+inbox needs a line:
+
+- **Match, don't duplicate.** One line: the claim, its ✅/⏳ marker (✅ = already
+  compiled into a wiki page, ⏳ = journal-only, pending Ingest) and a link to the
+  canonical home from §2/§4 — never restate the finding itself.
+- **File it under the `main.tex` section it belongs to**, not a new structure of your
+  own — a paste-ready location is the entire point of the page.
+- **Retire, don't accumulate** (same discipline as §3): if this session's fact turns an
+  existing ⏳ line ✅ (an Ingest happened) or overturns one, fix that line in place
+  rather than adding a new one under it.
+- Same KB-unavailable rule as the journal (§0): if the vault isn't checked out, skip
+  this step and say so in your report rather than recreating it in the repo.
+
+## 8. Report
 
 End with a short table: what was written where, split by destination (repo / journal /
-memory), plus anything that had two plausible homes and which one you chose. State
-whether an Ingest was run or is pending. Do not commit — leave changes in the working
-tree for review.
+memory / report inbox), plus anything that had two plausible homes and which one you
+chose. State whether an Ingest was run or is pending. Do not commit — leave changes in
+the working tree for review.

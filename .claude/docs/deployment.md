@@ -234,7 +234,10 @@ pass `--onnx-dir` to score the **deployed** file rather than a fresh temp export
 the shipped scene where the real bridge fell on the 0.5→0 decel. Out of the default chain;
 keep for headless plant/latency A/B only — it screens, it cannot clear);
 `scripts/deploy_gate_analyzer.py` (per-segment metrics from the `<base>_hrl.csv` telemetry
-that State_RLHRL writes when `H1_2_SAFETY_LOG` is set). Full gate plan:
+that State_RLHRL writes when `H1_2_SAFETY_LOG` is set); `scripts/summarize_runs.py`
+(2026-08-10) is its batch counterpart — one table + trigger ordering over every capture
+matching a `--tag` substring, with per-cell fall counts via `--group`, replacing the
+one-off scripts a multi-run question used to cost. Full gate plan:
 `doc/hrl/A1a_deploy_plan.md`. **Two bugs fixed in `bridge_replica.py` (2026-07-17):** a
 variable name collision (`c` = HL decision period, shadowed every tick by the
 swing-clearance instrument's per-contact loop variable also named `c`) crashed any

@@ -132,6 +132,11 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
 (refills in ~40 iters).
 
 ## Tools
+- **Radar comparison chart** (2026-08-10): `scripts/plot_radar.py <baseline.log> <run2.log>
+  ...` (each a `play.py` stdout capture, or bare JSON, with exactly one `[BENCH]` line) →
+  one figure, every run normalized to the baseline's `[BENCH]` metrics (baseline traces the
+  regular polygon at radius 1.0, outward = better on every scored axis). `stride_period_s`
+  is plotted but deliberately unscored (descriptive only, no better/worse judgement).
 - **Benchmark** (canonical comparator): `play.py --checkpoint-file <pt> --num-envs 64
   --eval-steps 600 --eval-seeds 2` → deterministic multi-metric scorecard (err_vx/vy/yaw,
   fall_rate, action_rate, orient_dev, height_dev) + `[BENCH] {json}`, multi-seed mean±std.
