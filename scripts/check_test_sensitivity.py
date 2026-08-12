@@ -23,6 +23,7 @@ GS = REPO / "src/tasks/velocity/rl/hrl/goal_space.py"
 RW = REPO / "src/tasks/velocity/mdp/rewards.py"
 HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
 SN = REPO / "src/tasks/velocity/rl/hrl/state_noise.py"
+LO = REPO / "src/tasks/velocity/rl/hrl/leg_odom.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
 YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy.yaml"
 REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy_real.yaml"
@@ -245,6 +246,63 @@ MUTATIONS = [
    "               '5:12,q:8,0:10')",
    "DEFAULT_SEQ = '0:8,3:5,0:6,5:5,0:6,w:5,0:8'",
    "test_band_thresholds_are_reachable_by_the_default_sequence"),
+
+  # --- WL-F simulated leg odometry (2026-08-09). The estimator is a transcription of the
+  # deployed C++; a silently different one teaches the policy to compensate for an error the
+  # robot does not have, and sim would look fine throughout. These are the ways it can go
+  # subtly wrong without crashing.
+  ("stance foot chosen as the one HIGHER along gravity (swing leg differenced)", LO,
+   "  stance = (along[:, 0] < along[:, 1]).long()",
+   "  stance = (along[:, 0] >= along[:, 1]).long()",
+   "test_stance_selection_is_the_foot_further_along_gravity"),
+
+  ("the w x p term dropped (on hardware it carries most of the estimate)", LO,
+   "  return -(ps - ps_prev) / dt - torch.cross(w_P, ps, dim=-1)",
+   "  return -(ps - ps_prev) / dt",
+   "test_omega_cross_p_term_is_present"),
+
+  ("leg FK y-mirror lost — the right leg built as a second left leg", LO,
+   '  sy = 1.0 if leg == 0 else -1.0',
+   "  sy = 1.0",
+   "test_matches_cpp_leg_odom_velocity_on_golden_vectors"),
+
+  ("hip roll/pitch rotation order swapped in the FK chain", LO,
+   "  R = R @ _rot(1, j[:, 1])\n  R = R @ _rot(0, j[:, 2])",
+   "  R = R @ _rot(0, j[:, 2])\n  R = R @ _rot(1, j[:, 1])",
+   "test_matches_cpp_leg_odom_velocity_on_golden_vectors"),
+
+  ("foot site offset dropped (the sole point substituted for the site point)", LO,
+   "  return p + R @ _vec(FOOT_SITE_A, q)",
+   "  return p",
+   "test_matches_cpp_leg_odom_velocity_on_golden_vectors"),
+
+  ("reset keeps the previous foot positions (episode boundary differenced as velocity)", LO,
+   "    self.valid[env_ids] = False",
+   "    self.valid[env_ids] = True",
+   "test_reset_drops_the_cross_episode_difference"),
+
+  # obs["hl_vel"] must be latched at the fire and held, like hl_vel_lo_ (State_RLHRL.cpp:444).
+  # Refreshing it mid-window decorrelates the TD3 buffer's next_s from the value the actor
+  # actually conditioned its action on -- the same reasoning that forbids a fresh jitter draw.
+  ("obs['hl_vel'] recomputed mid-window instead of holding the latched value", HR,
+   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   "      return uenv.leg_odom.fire().clone()",
+   "test_leg_odom_value_is_held_across_the_window_and_only_moves_on_a_fire"),
+
+  ("obs['hl_vel'] hands out the accumulator's own storage (aliasing)", HR,
+   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   "      return uenv.leg_odom.fire() if fire else uenv.leg_odom.value",
+   "test_leg_odom_output_does_not_alias_the_accumulator"),
+
+  # Anchored on the RETURN line too: `if self.hl_vel_source == "leg_odom":` also appears in
+  # __init__ (the config guards), and this harness replaces only the first occurrence — so
+  # the bare condition would mutate the guard, which no CPU test exercises, and read green.
+  ("the leg-odom source silently falls back to the goal state", HR,
+   '    if self.hl_vel_source == "leg_odom":\n'
+   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   "    if False:\n"
+   "      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()",
+   "test_leg_odom_source_never_reads_or_writes_the_goal_state"),
 ]
 
 

@@ -16,6 +16,7 @@ per-model group selection (which groups feed the LL vs HL) lives in ``rl_cfg.py`
 from __future__ import annotations
 
 from mjlab.envs import ManagerBasedRlEnvCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 
 import src.tasks.velocity.mdp as mdp
@@ -27,6 +28,7 @@ from src.tasks.velocity.rl.hrl.goal_space import (
   DEFAULT_GOAL_COMPONENTS,
   goal_dim as compute_goal_dim,
 )
+from src.tasks.velocity.rl.hrl.leg_odom import leg_odometry
 
 
 def _restructure_obs_groups(cfg: ManagerBasedRlEnvCfg, goal_dim: int) -> None:
@@ -81,6 +83,14 @@ def unitree_h1_2_flat_a1_env_cfg(
   # to avoid gaming the always-negative reward — if switching back to l2, also set this
   # to True. Never mix (CLAUDE.md gotcha). exp+terminal validated 2026-07-09.
   cfg.terminations["fell_over"].time_out = False
+  # WL-F (2026-08-09): simulated leg odometry, differenced at the PHYSICS rate. Registered
+  # here because ``per_substep`` is the only hook mjlab exposes inside the decimation loop,
+  # and 50 Hz differencing is a measured 2.4x worse. Runs unconditionally: it draws no
+  # randomness and feeds nothing (the runner only reads ``env.leg_odom`` when
+  # ``hl_vel_source='leg_odom'``), so runs that don't use it are unperturbed, while the
+  # ``leg_odom_err`` metric stays available on every arm — including the HlVelJitter
+  # comparator, which is what makes the two arms scorable against each other.
+  cfg.metrics["leg_odom_err"] = MetricsTermCfg(func=leg_odometry, per_substep=True)
     # Upweight velocity tracking in the reward the HL optimizes (A1 only; A0 untouched).
   # With weight 1.0, tracking (~+0.6/ep) is swamped by the penalty terms (joint_pos_limits
   # ~-3.6, action_rate ~-3.4), so the learned HL's dominant gradient is "reduce penalties"

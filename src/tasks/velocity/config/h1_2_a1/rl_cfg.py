@@ -225,6 +225,32 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   hl_vel_jitter: HlVelJitterCfg = field(default_factory=HlVelJitterCfg)
   """HL-only leg-odometry-calibrated jitter on ``obs["hl_vel"]`` (2026-08-05 probe).
   Independent of ``goal_state_noise`` — see ``HlVelJitterCfg``. Off by default."""
+  hl_vel_residual: HlVelJitterCfg = field(default_factory=HlVelJitterCfg)
+  """Residual noise layered ON TOP of the simulated leg-odometry estimator (WL-F task 4).
+  Only applies with ``hl_vel_source='leg_odom'``; off by default.
+
+  Reuses ``HlVelJitterCfg`` but is NOT the same knob. ``hl_vel_jitter`` *replaces* the error
+  model and is the exogenous comparator arm (mutually exclusive with ``leg_odom``); this one
+  *adds* to a real, policy-coupled error, covering what sim does not reproduce — encoder
+  noise, contact geometry, and differencing at 200 Hz where the robot gets ~991 Hz. Size it
+  in quadrature against the hardware reference (``lo_vx`` std 0.316, ``lo_vy`` 0.173, bias
+  -0.084) minus what the sim estimator already produces (``hl/vel_err_std_v*`` /
+  ``hl/vel_err_bias_v*`` in the training log)."""
+  hl_vel_source: Literal["state", "leg_odom"] = "state"
+  """Where ``obs["hl_vel"]`` comes from (WL-F, 2026-08-09). ``state`` (**default**, keeps
+  every historical comparator reproducible): ground-truth base velocity, optionally
+  corrupted by the exogenous ``hl_vel_jitter``. ``leg_odom``: the SIMULATED LEG-ODOMETRY
+  ESTIMATOR (``rl/hrl/leg_odom.py``), computed from sim state at the physics rate and
+  c-averaged per HL window exactly as the deployed C++ does.
+
+  Why the option exists: on hardware the HL's velocity error is **not** exogenous noise.
+  Leg odometry is computed from the legs, so its error is a function of the policy's own
+  leg motion, and the loop closes (2026-08-09, 424 fires at zero command:
+  ``corr(|lo_vx|_t, |tgt0|_t) = +0.703``, ``corr(|tgt0|_t, |lo_vx|_t+1) = +0.609``,
+  escalating). Under jitter, thrashing the feet is free in sim. Mutually exclusive with
+  ``hl_vel_jitter`` — they are the two arms of that comparison, not a stack. Requires
+  ``hl_obs_vel=True``. Does not change any network shape, so pre-2026-08-09 checkpoints
+  restore as ``state`` with no shim."""
   relabeling: Literal["none", "hiro"] = "hiro"
   """HIRO off-policy correction (td3 only; ignored otherwise). **Default 'hiro'** — part of
   the final A1 (TD3) structure. Only meaningful with ``hl_algorithm='td3'``."""

@@ -19,6 +19,7 @@ Key wiring (HIRO delta encoding):
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -257,6 +258,50 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.state_noise = GoalStateNoise(
       train_cfg.get("goal_state_noise"), self.goal_space, env.num_envs, device
     )
+    # HL-only leg-odometry-calibrated jitter on obs["hl_vel"] (#8b probe, 2026-08-05).
+    # Independent of state_noise above -- see HlVelJitter's docstring for why the two
+    # must never share a code path (a jitter leak into state_n would corrupt the LL's
+    # goal delta, the one channel measured accurate on the bridge).
+    self.hl_vel_jitter = HlVelJitter(train_cfg.get("hl_vel_jitter"), env.num_envs, device)
+    if self.hl_vel_jitter.enable and not self.hl_obs_vel:
+      raise ValueError("hl_vel_jitter requires hl_obs_vel=True (obs['hl_vel'] is never "
+                        "read otherwise, so the jitter would be a silent no-op).")
+    # WL-F (2026-08-09): where obs["hl_vel"] comes from. 'state' (default) keeps the
+    # historical path -- ground truth + the optional exogenous HlVelJitter. 'leg_odom'
+    # replaces it with the SIMULATED ESTIMATOR (rl/hrl/leg_odom.py, a transcription of the
+    # deployed hrl::leg_odom_velocity verified to 6e-7 m/s), whose error is a function of
+    # the policy's own leg motion -- the property i.i.d. jitter structurally cannot have.
+    # WL-F task 4: RESIDUAL noise layered ON TOP of the simulated estimator, sized to close
+    # the gap to the hardware numbers. Deliberately a separate cfg from `hl_vel_jitter` even
+    # though it reuses the class: `hl_vel_jitter` REPLACES the error model (the exogenous
+    # comparator arm, mutually exclusive with leg_odom), this one ADDS to a real one
+    # (encoder noise, contact geometry, and the 200 Hz-vs-991 Hz differencing gap, none of
+    # which sim reproduces). Ignored unless hl_vel_source='leg_odom'.
+    self.hl_vel_residual = HlVelJitter(train_cfg.get("hl_vel_residual"), env.num_envs, device)
+    self.hl_vel_source: str = train_cfg.get("hl_vel_source", "state")
+    if self.hl_vel_source not in ("state", "leg_odom"):
+      raise ValueError(f"hl_vel_source must be 'state' or 'leg_odom', got {self.hl_vel_source!r}")
+    if self.hl_vel_source == "leg_odom":
+      if not self.hl_obs_vel:
+        raise ValueError("hl_vel_source='leg_odom' requires hl_obs_vel=True (obs['hl_vel'] "
+                         "is never read otherwise, so the estimator would be a silent no-op).")
+      if self.hl_vel_jitter.enable:
+        raise ValueError("hl_vel_source='leg_odom' and hl_vel_jitter are the two ARMS of the "
+                         "WL-F comparison, not composable: enabling both stacks exogenous "
+                         "noise on the endogenous estimator and makes neither measurable.")
+      if self.hl_vel_residual.enable and not any(
+        (self.hl_vel_residual.jitter_std != 0).tolist() + (self.hl_vel_residual.bias != 0).tolist()
+      ):
+        raise ValueError("hl_vel_residual is enabled but every magnitude is 0 — a silent "
+                         "no-op that would still be recorded in agent.yaml as 'residual on'.")
+      if not hasattr(env.unwrapped, "leg_odom"):
+        raise ValueError("hl_vel_source='leg_odom' needs the env's per-substep leg-odometry "
+                         "metrics term (config/h1_2_a1/env_cfgs.py). Missing here, which "
+                         "means the estimator would silently read zeros forever.")
+    elif self.hl_vel_residual.enable:
+      raise ValueError("hl_vel_residual only applies on top of the simulated estimator; with "
+                       f"hl_vel_source={self.hl_vel_source!r} it is a silent no-op. Use "
+                       "hl_vel_jitter for the exogenous arm.")
 
     # Initialise the goal buffer BEFORE the base builds models, so the env's `goal`
     # observation group resolves to the right dimension at construction time.
@@ -495,6 +540,56 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
     return policy
 
+  def _hl_vel(self, uenv, v_est: torch.Tensor, fire: bool) -> torch.Tensor:
+    """The value written to ``obs["hl_vel"]`` this step (WL-F).
+
+    ``state``    — the historical path: the LL's own (noisy) estimate, plus the exogenous
+    ``HlVelJitter`` if enabled. ``v_est`` is ``state_n`` at the fire and
+    ``achieved + noise_off`` after the step.
+
+    ``leg_odom`` — the simulated estimator. At the fire it CLOSES the window that just
+    ended and latches the c-average; for the rest of the window that latched value is held,
+    which is both what the C++ does (``hl_vel_lo_`` is written only at the fire,
+    ``State_RLHRL.cpp:444``) and what ``HlVelJitter``'s one-sample-per-window convention
+    does — so the TD3 buffer's ``next_s`` stays the value the actor actually conditioned on.
+    ``v_est`` is ignored: the estimator reads the robot's legs, not the goal state.
+
+    Returns a fresh tensor in both branches. The ``state`` branch must not mutate its
+    input (a VIEW of ``state_n``); the ``leg_odom`` branch must not hand out the
+    accumulator's own storage. ``tests/test_hl_vel_jitter_isolation.py`` guards both.
+    """
+    if self.hl_vel_source == "leg_odom":
+      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()
+      return self.hl_vel_residual(v)
+    return self.hl_vel_jitter(v_est[:, 0:2])
+
+  def _vel_err_log(self, s: torch.Tensor) -> dict:
+    """WL-F readout from the running sums in ``vel_err_stats``:
+    ``(sum_x, sum_y, sum_xx, sum_yy, sum_xy, n, sum_dx, sum_dy, sum_dxx, sum_dyy)`` where
+    x = per-window mean leg action rate, y = ``|v_est - v_true|`` at the next fire, and
+    dx/dy are that error's SIGNED per-axis components.
+
+    The signed per-axis bias and std are what task 4 sizes the residual noise from: the
+    hardware reference is per-axis (``lo_vx`` std 0.316, ``lo_vy`` 0.173, bias -0.084) and
+    the norm ``hl/vel_err`` cannot be compared against it.
+    """
+    n = s[5].item()
+    if n < 2:
+      return {}
+    sx, sy, sxx, syy, sxy, _, sdx, sdy, sdxx, sdyy = (v.item() for v in s)
+    cov = sxy / n - (sx / n) * (sy / n)
+    var_x, var_y = sxx / n - (sx / n) ** 2, syy / n - (sy / n) ** 2
+    denom = math.sqrt(max(var_x, 0.0) * max(var_y, 0.0))
+    mdx, mdy = sdx / n, sdy / n
+    return {
+      "hl/vel_err": sy / n,
+      "hl/vel_err_ar_corr": cov / denom if denom > 1e-12 else float("nan"),
+      "hl/vel_err_bias_vx": mdx,
+      "hl/vel_err_bias_vy": mdy,
+      "hl/vel_err_std_vx": math.sqrt(max(sdxx / n - mdx * mdx, 0.0)),
+      "hl/vel_err_std_vy": math.sqrt(max(sdyy / n - mdy * mdy, 0.0)),
+    }
+
   def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
     # Training always derives the goal scale live (it tracks the twist curriculum), so a
     # resumed run must not inherit the frozen value load() pinned for inference.
@@ -531,6 +626,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # reward (windows align with rollouts: num_steps_per_env % c == 0 is enforced).
     win_energy = torch.zeros(self.env.num_envs, device=self.device)
     win_dist = torch.zeros_like(win_energy)
+    # WL-F: per-window leg action rate, and the running (sum_x, sum_y, sum_xx, sum_yy,
+    # sum_xy, n) needed to correlate it with the per-fire estimator error without keeping
+    # every sample. Reset per iteration so the logged correlation is that iteration's.
+    win_ar_legs = torch.zeros_like(win_energy)
     for it in range(start_it, total_it):
       start = time.time()
       intrinsic_sum = 0.0
@@ -541,6 +640,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       pitchref_sum = pushoff_sum = rollover_sum = 0.0
       symmetry_sum = mirror_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
+      # Deploy diagnostics (2026-08-07): coef-independent, logged unconditionally every
+      # step -> `metrics/act_rate*`/`metrics/jacc*` below (see the per-step block).
+      diag_act_rate_sum = diag_act_rate_legs_sum = diag_jacc_sum = diag_jacc_legs_sum = 0.0
+      vel_err_stats = torch.zeros(10, device=self.device)  # WL-F, see _vel_err_log
       with torch.inference_mode():
         uenv = self.env.unwrapped
         for k in range(self.cfg["num_steps_per_env"]):
@@ -559,8 +662,24 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             # state_n (not `state`) so the two DR mechanisms compose the way deploy will:
             # the real HL never sees ground truth either.
             self.hl_vel_jitter.resample()
+            self.hl_vel_residual.resample()  # WL-F task 4; no-op unless leg_odom + enabled
             if self.hl_obs_vel:
-              obs["hl_vel"] = self.hl_vel_jitter(state_n[:, 0:2])
+              obs["hl_vel"] = self._hl_vel(uenv, state_n, fire=True)
+              # WL-F task 3: pair this window's estimator error with the leg action rate
+              # that PRODUCED it (the window that just closed). Under leg_odom the error is
+              # a function of that motion; under HlVelJitter it is an independent draw, and
+              # this is the number that says so. Diagnostic only.
+              if k > 0:
+                _d = obs["hl_vel"] - state[:, 0:2]  # signed per-axis error
+                _err = _d.norm(dim=-1)
+                _ar = win_ar_legs / self.c
+                vel_err_stats += torch.stack([
+                  _ar.sum(), _err.sum(), (_ar * _ar).sum(), (_err * _err).sum(),
+                  (_ar * _err).sum(), torch.full_like(_ar[0], _ar.numel()),
+                  _d[:, 0].sum(), _d[:, 1].sum(),
+                  _d[:, 0].square().sum(), _d[:, 1].square().sum(),
+                ])
+                win_ar_legs.zero_()
             self._target = self.hl.act(uenv, obs, state)
             # Faithful delta DR (#8b): the LL-obs target base uses the noisy estimate so a
             # constant bias cancels in V*-s, matching deploy (V* = v_est(t0) + g, obs = V*-v_est).
@@ -665,6 +784,24 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             ja_pen = self.ll_joint_acc_coef * joint_acc_l2(uenv)
             r_lo = r_lo - ja_pen
             joint_acc_sum += -ja_pen.mean().item()
+          # Deploy diagnostics (2026-08-07): coef-independent leg-restricted smoothness +
+          # joint-accel metrics, unlike action_rate_pen/joint_acc_pen above (coef*value,
+          # silently 0 when their coef is 0 -- useless for cross-run W&B comparison).
+          # Measurement only: NEVER folded into r_lo. Action delta reuses the reward's
+          # formula but takes the L2 NORM (the benchmark's convention), not the reward's
+          # clamped squared-sum.
+          d_diag = uenv.action_manager.action - uenv.action_manager.prev_action
+          diag_act_rate_sum += d_diag.norm(dim=-1).mean().item()
+          jacc = uenv.scene["robot"].data.joint_acc
+          diag_jacc_sum += jacc.abs().mean().item()
+          if self._diag_leg_joint_ids is not None:
+            ar_legs = d_diag[:, self._diag_leg_joint_ids].norm(dim=-1)
+            diag_act_rate_legs_sum += ar_legs.mean().item()
+            diag_jacc_legs_sum += jacc[:, self._diag_leg_joint_ids].abs().mean().item()
+            win_ar_legs += ar_legs  # WL-F: per-window leg motion, paired at the next fire
+          else:
+            diag_act_rate_legs_sum += float("nan")
+            diag_jacc_legs_sum += float("nan")
           # WL-D: mirror A0's joint_pos_limits (soft-limit crossing penalty) - the
           # largest measured A1-vs-A0 episode-reward gap (~515x, WL-D reward-gap audit).
           if self.ll_joint_limits_coef != 0.0:
@@ -785,7 +922,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # its action on, decorrelating the stored (state, action) pair from what
           # happened in the rollout.
           if self.hl_obs_vel:
-            obs["hl_vel"] = self.hl_vel_jitter((achieved + noise_off)[:, 0:2])
+            obs["hl_vel"] = self._hl_vel(uenv, achieved + noise_off, fire=False)
 
           if not self.freeze_ll:
             self.alg.process_env_step(obs, r_lo, dones, extras)
@@ -859,7 +996,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/symmetry_rew": symmetry_sum / n_steps,
         "ll/mirror_rew": mirror_sum / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
+        # Deploy diagnostics (2026-08-07): coef-independent, so runs are filterable in
+        # W&B early regardless of ll_action_rate_coef/ll_joint_acc_coef (see per-step block).
+        "metrics/act_rate": diag_act_rate_sum / n_steps,
+        "metrics/act_rate_legs": diag_act_rate_legs_sum / n_steps,
+        "metrics/jacc": diag_jacc_sum / n_steps,
+        "metrics/jacc_legs": diag_jacc_legs_sum / n_steps,
         "hl/cot_pen": cot_pen_sum / (n_steps // self.c),  # per-window mean (0 when off)
+        # WL-F: is the HL's velocity error endogenous? `corr` is the whole claim -- clearly
+        # positive under hl_vel_source='leg_odom', ~0 under the HlVelJitter comparator.
+        **self._vel_err_log(vel_err_stats),
         **{f"hl/{k}": v for k, v in hl_losses.items()},
       }
       if self.hl_cadence:
