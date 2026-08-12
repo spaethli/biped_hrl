@@ -157,6 +157,32 @@ analysis and the proposed change first.
   nominal (oracle path). Fixes the posture sag (tracking-rewarded HL had no reason to
   command upright). HL action = `task_dim(+1)`, not `goal_dim(+1)`; pre-change checkpoints
   restore as `False` (play.py absence-shim). See the A1 findings ledger (research KB).
+- **The HL's velocity error must be ENDOGENOUS (WL-F, 2026-08-09).** `hl_vel_source=leg_odom`
+  feeds `obs["hl_vel"]` from a simulated leg-odometry estimator (`rl/hrl/leg_odom.py`, a
+  transcription of the deployed `hrl::leg_odom_velocity`, parity 6.3e-7 m/s) instead of
+  ground-truth + `HlVelJitter`. Leg odometry is computed *from the legs*, so its error is a
+  function of the policy's own motion — measured `corr(leg action rate, |v_est−v_true|)`
+  **+0.213 (29/31 iters)** vs **+0.0006 (0/31)** for jitter, at the *same* error magnitude.
+  Jitter was the right size and the wrong shape. Two rules: **difference at the physics rate,
+  never the control rate** (50 Hz is a measured 2.4x worse — hence the `per_substep` metrics
+  term), and the estimator feeds `obs["hl_vel"]` ONLY, never `state_n`. Default is `state`, so
+  historical comparators stay reproducible; `hl_vel_jitter` (exogenous arm) and
+  `hl_vel_residual` (magnitude top-up) are mutually exclusive and the runner enforces it.
+  Details → `hrl-infra.md`.
+  ⛔ **SHELVED 2026-08-10 — the mechanism is proven, the training benefit is NOT. Do not adopt
+  `hl_vel_source=leg_odom` as a default.** Both retrained arms failed the policy bar (`g_legs`
+  0.9206 residual / 0.8779 bare vs the 0.8363 jitter keeper; `err_vx` 0.1295 / 0.1466 vs 0.1219)
+  and the bare arm is **NO-GO on `deploy_readiness.py`** (bridge fall at cmd 0, A0 control arm
+  clean ⇒ the policy, not the rig). **Root cause, and the rule that generalizes: the HL consumes
+  a `c=8`-averaged estimate, and that averaging cancels the policy coupling.** Measured on the
+  keeper across cmd 0→1.0: raw per-step error spans **7.62x** (0.0703→0.5359) while the
+  HL-consumed error is nearly **flat** (0.0506→0.0782, 1.55x). So standing is an *equal*-error
+  state, not a low-error one, there is no estimate-quality gradient to learn from, and a
+  correctly-shaped, correctly-sized error model still exerts almost none. **Before investing in
+  a better HL velocity estimator (e.g. a Kalman filter), check what the consumer does to it —
+  score the `c=8`-averaged physics-rate rung, never the per-step RMS; the two disagree in
+  direction.** Verdicts → the research KB, `data/2026-08-09-wl-f-endogenous-estimator/`
+  (`task5b_bare_verdict.md`, `task6_nearzero_probe.md`).
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
@@ -187,6 +213,10 @@ analysis and the proposed change first.
 - **Shared HRL machinery** (co-train loop, goal space, warm-start, reward decomp,
   benchmark/probe tools, checkpoint/ONNX, gotchas) → `.claude/docs/hrl-infra.md`
   (A2/A3 reuse this — read before starting a new architecture).
+- **H1-2 frames, IMU convention, contact frame, FK/Jacobians → `doc/hrl/h1_2_kinematics.md`**;
+  base-velocity EKF design + the 6-arm offline comparison (WL-G) → `doc/hrl/h1_2_ekf_design.md`,
+  tool `scripts/replay_base_estimators.py --selftest`. **The IMU sits on `torso_link`, not the
+  pelvis** — leg FK is pelvis-referenced, so `p^I = Rz(-psi)·p^P − r_imu`.
 - **A1 design (as-built) + current status + open ablations → `doc/hrl/A1_HIRO.md`**;
   A1 findings ledger (what was tried/ruled out, M1→M5 + probes) → the A1 findings ledger (research KB);
   goal-achievability probe → the goal-achievability probe writeup (research KB).

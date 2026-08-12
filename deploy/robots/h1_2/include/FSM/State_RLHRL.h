@@ -132,8 +132,15 @@ public:
 #if SAFETY_FILTER
         // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set (launch script).
         if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
+            // with_estimator=true: A1 is the only FSM that takes a lowstate snapshot at the
+            // DDS rate (run()'s leg odometry), so it is the only one with an EstSample to
+            // log. A0 keeps the original column set.
             safety_logger_.init(sp, env->robot->data.joint_ids_map,
-                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT);
+                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT,
+                                /*with_estimator=*/true,
+                                env->cfg["joint_offset"]
+                                  ? env->cfg["joint_offset"].as<std::vector<float>>()
+                                  : std::vector<float>{});
 #endif
 
         policy_thread_running = true;
@@ -265,6 +272,13 @@ private:
     // rather than four times, and the difference is always same-foot.
     Eigen::Vector3f lo_p_prev_[2];
     bool lo_prev_valid_{false};
+#if SAFETY_FILTER
+    // run()-thread only: the snapshot the estimator block above just read, held so the
+    // flight recorder (same tick, same function) can log it. No lock: both writer and
+    // reader are run(), unlike dv_/lo_sum_ which cross to the policy thread. Guarded
+    // because EstSample lives in safety_logger.h, which is itself SAFETY_FILTER-only.
+    EstSample est_sample_{};
+#endif
     // Policy-thread-only (never touched by run(), so no lock): the window-start lever-arm
     // term and the window-start ground-truth pelvis velocity.
     Eigen::Vector3f lev0_{0, 0, 0};

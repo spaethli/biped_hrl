@@ -143,6 +143,19 @@ _Avoid_: "odometry" unqualified (the word normally implies an integrated *positi
 this deliberately is not); "the estimator" (ambiguous with the IMU _Base-velocity increment_
 and the leg-FK height, which are different signals feeding different consumers).
 
+**Stance point**:
+The single point _Leg odometry_ assumes is fixed in the world while a foot is stance
+(`kFootSiteA`, x = +0.04 in the ankle_roll frame). **Which point is chosen does not matter**,
+and that is the settled answer, not an open question: a planted foot is rigid, so every point
+attached to it is equally stationary. Measured end-to-end 2026-08-11 — moving the reference
+to the ankle joint, the heel or the toe changes the `c`-averaged estimate by 0.04-0.21 m/s in
+no consistent direction, and the heel (the geometrically "correct" pivot for this robot's
+toe-up stance) is *worse* on both sessions. The spread tracks |p_foot| through the `w x p`
+term, i.e. it rescales gyro error rather than fixing a modelling defect.
+_Avoid_: "contact point" (unqualified, ambiguous with *which foot* is in contact — a separate
+and already-settled question); "foot rollover" (that names the shelved WL-D arm-6 reward, a
+policy *behaviour*, and is a different subject entirely).
+
 **Suicide attractor**:
 The failure where an always-negative reward makes early termination optimal (stop
 accruing negative reward). The reason A1 uses `fell_over = time_out` (a truncation that

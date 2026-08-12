@@ -90,6 +90,32 @@ void State_RLBase::run()
             lowstate->msg_.imu_state().accelerometer()[1],
             lowstate->msg_.imu_state().accelerometer()[2]
         );
+#ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
+        // [ESTIMATOR] A0's EstSample (2026-08-12). A0 is the ONLY policy that stands
+        // genuinely still, which makes it the only regime where the true base velocity is
+        // known exactly (v == 0) -- i.e. the only ground truth available for scoring a
+        // velocity estimator offline. Until now A0 logged no estimator block at all, so the
+        // one session with real truth was the one that could not be replayed.
+        //
+        // Costs nothing extra: this is the lock the fall detector already holds, at the same
+        // DDS rate, so it is 3 more reads inside an existing critical section. A0 does not
+        // USE any of this (it has no leg odometry and no HL); it is logged so the offline
+        // comparison in doc/hrl/h1_2_ekf_design.md can be scored against a known zero.
+        for (int k = 0; k < 3; ++k) {
+            est_sample_.acc[k] = lowstate->msg_.imu_state().accelerometer()[k];
+            est_sample_.gyro[k] = lowstate->msg_.imu_state().gyroscope()[k];
+        }
+        for (int k = 0; k < 4; ++k)
+            est_sample_.quat[k] = lowstate->msg_.imu_state().quaternion()[k];
+        for (int k = 0; k < 13; ++k) {
+            // Same encoder-zero convention as A1 (leg_offset applied on read); the offset
+            // vector itself travels in the meta json, so a replay cannot guess it wrong.
+            const float off = (k < (int)joint_offset.size()) ? joint_offset[k] : 0.0f;
+            est_sample_.q[k] = lowstate->msg_.motor_state()[k].q() + off;
+            est_sample_.dq[k] = lowstate->msg_.motor_state()[k].dq();
+        }
+        est_sample_.dpsi = est_sample_.dq[12];
+#endif
     }
     // Rotate to world frame and remove gravity: 0 = standing still, -9.81 = free-fall
     float a_world_z = (env->robot->data.root_quat_w * lin_acc_b).z() - 9.81f;
@@ -180,7 +206,8 @@ void State_RLBase::run()
                               env->robot->data.joint_pos.data(),
                               env->robot->data.joint_vel.data(),
                               quat, acc, alpha, joint_hold, tilt_safety, fall_detected,
-                              cmd, ach_vel, isaaclab::g_gait_phase_obs);
+                              cmd, ach_vel, isaaclab::g_gait_phase_obs,
+                              false, false, -1, 0.0f, 0.0f, &est_sample_);
     }
 #endif
 #else

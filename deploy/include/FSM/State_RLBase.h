@@ -36,8 +36,16 @@ public:
 #ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
         // Opt-in flight recorder: enabled only if H1_2_SAFETY_LOG is set.
         if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
+            // with_estimator=true since 2026-08-12: A0 is the only policy that stands
+            // still, so it is the only source of a known-zero velocity reference for the
+            // offline estimator comparison. Inside __has_include("safety_logger.h"), which
+            // only h1_2 provides, so g1/a2/go2/r1 are unaffected.
             safety_logger_.init(sp, env->robot->data.joint_ids_map,
-                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT);
+                                H1_2_TILT_LIMIT, H1_2_FALL_ACC_THRESH, H1_2_CONTROL_DT,
+                                /*with_estimator=*/true,
+                                env->cfg["joint_offset"]
+                                  ? env->cfg["joint_offset"].as<std::vector<float>>()
+                                  : std::vector<float>{});
 #endif
 
         // Start policy thread
@@ -86,6 +94,10 @@ private:
     int fall_acc_counter_{0};
 #ifdef STATE_RLBASE_HAS_SAFETY_LOGGER
     SafetyLogger safety_logger_;
+    // DDS-rate sensor snapshot, filled in run() inside the fall detector's existing lock
+    // (2026-08-12). A0 does not consume it; it exists so the only genuinely-still regime on
+    // this robot can be replayed offline against a known v == 0.
+    EstSample est_sample_{};
 #endif
 };
 

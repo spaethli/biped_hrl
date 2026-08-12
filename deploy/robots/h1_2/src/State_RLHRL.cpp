@@ -614,7 +614,7 @@ void State_RLHRL::run()
     // sees. An extra uncontended lock per 1 ms tick is the cheaper price.
     Eigen::Vector3f est_acc_b, est_gyro_T;
     Eigen::Quaternionf est_quat;
-    float est_q[13], est_dpsi;
+    float est_q[13], est_dq[13], est_dpsi;
     {
         std::lock_guard<std::mutex> lock(lowstate->mutex_);
         est_acc_b = Eigen::Vector3f(
@@ -636,9 +636,14 @@ void State_RLHRL::run()
             lowstate->msg_.imu_state().gyroscope()[1],
             lowstate->msg_.imu_state().gyroscope()[2]
         );
-        for (int k = 0; k < 13; ++k)
+        for (int k = 0; k < 13; ++k) {
             est_q[k] = lowstate->msg_.motor_state()[k].q() + leg_offset_[k];
-        est_dpsi = lowstate->msg_.motor_state()[12].dq();
+            // No offset on dq: leg_offset_ is a constant encoder-zero correction, so it
+            // drops out of the derivative. Logged only (2026-08-11) -- nothing in run()
+            // consumes it; it exists so the offline Jacobian arm can run at the DDS rate.
+            est_dq[k] = lowstate->msg_.motor_state()[k].dq();
+        }
+        est_dpsi = est_dq[12];
     }
     // [ESTIMATOR] Leg odometry — the HL's ABSOLUTE velocity, which `delta` does NOT cancel.
     // Here for the same reason the integrator above is: the bench measured the identical
@@ -671,6 +676,23 @@ void State_RLHRL::run()
         lo_p_prev_[1] = p_now[1];
         lo_prev_valid_ = true;
     }
+    // [ESTIMATOR] Hand the snapshot to the flight recorder (2026-08-10). Every other sensor
+    // column on that row comes from env->robot->data, which policy_step() refreshes at 50 Hz,
+    // so without this an offline replay of THIS estimator is impossible from its own log --
+    // measured 2026-08-10 on the 2026-08-07_11-17-20 session (meas_q/quat 56.5 Hz effective;
+    // the gyro was never a column at all, and reconstructing it from 56.5 Hz attitude left
+    // the w x p term carrying half the estimate's magnitude). Costs no lock and no extra
+    // read: these are the values just taken above, under a lock already released.
+#if SAFETY_FILTER
+    for (int k = 0; k < 3; ++k) {
+        est_sample_.acc[k] = est_acc_b[k];
+        est_sample_.gyro[k] = est_gyro_T[k];
+    }
+    est_sample_.quat[0] = est_quat.w(); est_sample_.quat[1] = est_quat.x();
+    est_sample_.quat[2] = est_quat.y(); est_sample_.quat[3] = est_quat.z();
+    for (int k = 0; k < 13; ++k) { est_sample_.q[k] = est_q[k]; est_sample_.dq[k] = est_dq[k]; }
+    est_sample_.dpsi = est_dpsi;
+#endif
 
 #if SAFETY_FILTER
     // IMU tilt check — uses snapshot already captured by pre_run(), no extra lock needed
@@ -797,7 +819,8 @@ void State_RLHRL::run()
                               env->robot->data.joint_vel.data(),
                               quat, acc, alpha, joint_hold, tilt_safety, fall_detected,
                               cmd, ach_vel, isaaclab::g_gait_phase_obs,
-                              trig_torque, trig_dq, trip_jid, alpha_trip_max, trip_ratio);
+                              trig_torque, trig_dq, trip_jid, alpha_trip_max, trip_ratio,
+                              &est_sample_);
     }
 #else
     for(int i(0); i < (int)env->robot->data.joint_ids_map.size(); i++) {

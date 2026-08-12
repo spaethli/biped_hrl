@@ -71,6 +71,70 @@ default** → `state_n==state`, path byte-identical (RQ2-safe). Config `GoalStat
 (`config/h1_2_a1/rl_cfg.py`), flags `--agent.goal-state-noise.*`. **Meaningful in `absolute` only**
 — a constant bias cancels in the `delta` difference map. Launcher: `train_h1_2_noise.sh`.
 
+### HL velocity channel: simulated leg odometry (`rl/hrl/leg_odom.py`, WL-F 2026-08-09)
+What feeds `obs["hl_vel"]` (the TD3 HL's `hl_obs_vel` input), selected by **`hl_vel_source`**:
+* **`state`** (default) — ground truth, plus the optional exogenous **`HlVelJitter`**. Keeps every
+  pre-2026-08-09 comparator reproducible.
+* **`leg_odom`** — a batched-torch transcription of the DEPLOYED estimator
+  `hrl::leg_odom_velocity` (`deploy/.../hrl/base_state.h`), `v = -d(p_stance)/dt - w_P × p_stance`,
+  c-averaged per HL window exactly as `State_RLHRL.cpp:444` does. **Parity verified to 6.3e-7 m/s**
+  against the unmodified shipped header (`tests/test_leg_odom_parity.py` pins C++-printed golden
+  vectors, so the test cannot drift into restating the code).
+
+**Why it exists:** leg odometry is computed *from the legs*, so its error is a function of the
+policy's own leg motion. On hardware that loop closes and escalates. `HlVelJitter` is i.i.d. and
+policy-independent, so in sim thrashing the feet is free. Measured, same base policy, 31 iters:
+`corr(leg action rate, |v_est−v_true|)` = **+0.213 mean / 29-of-31 iters positive** under
+`leg_odom` vs **+0.0006 / 0-of-31** under jitter — at the **same** error magnitude (0.083 vs
+0.085). A structural difference, invisible to any magnitude-only metric.
+
+**Load-bearing details for A2/A3:**
+* **Difference at the PHYSICS rate, never the control rate** (the deploy bench measured the same
+  reconstruction 2.4x worse at 50 Hz). Wired as a `per_substep` metrics term — the only hook mjlab
+  gives inside the decimation loop. Sim gets 200 Hz vs the robot's ~991 Hz.
+* Inside that loop **only qpos/qvel are current**; `xquat`/`cvel` are one substep stale. So it reads
+  the free joint directly. MuJoCo stores a free joint's angular velocity in the **body** frame and
+  the root body is the pelvis ⇒ `qvel[3:6]` *is* `w_P`, no rotation.
+* Feeds `obs["hl_vel"]` **only** — never `state_n` or the LL goal delta
+  (`tests/test_hl_vel_jitter_isolation.py` guards both the leak and the aliasing paths).
+* Latched at the fire and **held** for the window, matching `hl_vel_lo_`; a mid-window recompute
+  would decorrelate the TD3 buffer's `next_s` from what the actor conditioned on.
+* **`hl_vel_residual`** (task 4) layers the missing magnitude on top (encoder noise, contact
+  geometry, the 200-vs-991 Hz gap), sized in quadrature against hardware: std 0.3065/0.1563, bias
+  −0.0550/+0.0485. Distinct from `hl_vel_jitter` and mutually exclusive with it — jitter *replaces*
+  the error model, residual *adds* to a real one; the runner raises on either misuse.
+* **Eval deliberately stays on ground truth** (same precedent as `HlVelJitter`), which is what keeps
+  the `g_legs`/`err_vx` anchors comparable across arms.
+
+### Base-velocity estimator comparison (WL-G, 2026-08-11; A2 will reuse this)
+
+`scripts/replay_base_estimators.py` replays six estimator arms offline on ONE flight-recorder
+session, so robot/policy/session/encoder-offset are all removed as confounds: A deployed leg
+odometry, B complementary filter, C position-only EKF (Bloesch core), D C + Rotella flat-foot
+orientation, E Jacobian leg odometry, F C + vendor attitude. `--selftest` checks the measurement
+Jacobians against finite differences (1e-6 / 4e-11) and the filter against synthetic truth.
+Design + all frames: `doc/hrl/h1_2_ekf_design.md`; kinematics, IMU convention and the contact
+frame `(0.04, 0, -0.045)`: `doc/hrl/h1_2_kinematics.md`.
+
+Three seams that bite any consumer of the flight recorder, not just this tool:
+
+* **`EstSample` is the only DDS-rate block** (`safety_logger.h`): `est_acc/quat/gyro/q[13]/dq[13]`
+  at ~500 Hz and full float precision. Everything else on the row is the 50 Hz articulation cache.
+  Enabled for A1 **and A0** (2026-08-12) — A0 is the only policy that stands genuinely still, so
+  it is the only source of exact ground truth (v = 0).
+* **Sessions hold several FSM entries.** Re-entry appends to the same CSV with only the `entry`
+  column separating runs; replaying a file whole differences across the seams. Split on `entry`.
+* **Never score across mixed regimes, and `cmd == 0` is not proof the robot is still.** The tool
+  segments by command *and* verifies stillness from the encoders (moving max of `max|dq_legs|`,
+  0.3 rad/s), then reports what it dropped. Both guards were bought the hard way: a pooled
+  standing+walking metric produced a completely spurious winner (error cancellation), and a 5 s
+  set-down transient inside a `cmd == 0` stretch carried a whole session's apparent noise
+  (incumbent std vx 0.141 pooled vs 0.013 on the still part).
+
+Verdict (2026-08-12, 3 sessions): **ship B, the complementary filter.** C fails the pre-registered
+bar; the EKF arms cut noise ~2x but add bias, and leg odometry is already good on a still robot.
+Numbers and the reasoning: `doc/hrl/h1_2_ekf_design.md` status block.
+
 ### Obs groups / dims (A1; 92 = ang_vel 3 + proj_grav 3 + command 3 + phase 2 + joint_pos 27 + joint_vel 27 + last_action 27)
 | Network | Obs | Dim |
 |---|---|---|
