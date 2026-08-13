@@ -239,6 +239,62 @@ the A1 findings ledger (research KB). The **training-side** counterpart of this 
 To remove the dependency entirely instead: switch the LL to observe the **absolute `V*`** instead
 of the delta (`doc/hrl/A1_HIRO.md` reserve variant) → no runtime velocity estimate needed.
 
+## Estimator bench: run it, switch arms, score it (WL-G, 2026-08-13)
+
+All seven base-velocity arms run every control tick and are logged; exactly one feeds
+`obs["hl_vel"]`. Design and verdicts: `doc/hrl/h1_2_ekf_design.md` (§13 = the deploy spec).
+Decision record: `docs/adr/0007`.
+
+**Pick the arm.** `hrl.base_estimator` in the HRL deploy yaml. **Required — a missing or
+unknown value aborts at startup, by design**, so there is no silent default to inherit.
+
+```yaml
+base_estimator: legodom   # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
+```
+
+`legodom` is the shipped incumbent and reproduces pre-bench behaviour exactly; the other six
+still run and are still logged, they just do not reach the policy. A0 needs no key (its obs
+has no base linear velocity, so every arm is passive there).
+
+**Run a session.** Bridge, no hardware needed:
+
+```bash
+python scripts/bridge_session.py --policy hrl --tag <name> --seq "0:45"
+```
+
+Add `--no-band` to skip the elastic-band release (needs `python-xlib`). The band only
+matters for judging *policy behaviour* — loop timing and estimator logging are unaffected.
+On hardware, any normal session logs all seven arms; A0 is the only policy that stands
+genuinely still, so it is the only source of an exact `v = 0` truth.
+
+**Score it.** Offline, all arms on byte-identical data:
+
+```bash
+python scripts/replay_base_estimators.py logs/deploy_safety/<session>.csv
+```
+
+It splits by regime and prints per-arm std/drift plus world-frame displacement. Two things
+it does for you because both were learned the hard way: it never scores across mixed
+regimes, and it verifies the robot was actually **still** from the encoders rather than
+trusting `cmd == 0` (a 5 s set-down transient once carried a whole session's apparent
+noise). `--selftest` checks the Jacobians and the filter with no session needed.
+
+**Loop budget.** `run()` reports bucketed timings once on exit; grep the controller log:
+
+```bash
+grep "\[T5\]" logs/deploy_safety/<session>_ctrl.log
+```
+
+Measured 2026-08-13: 993 Hz, work p99 ≤75 µs against a 800 µs gate with all seven arms live.
+
+**Tests before any session** (parity gate C++ vs Python, isolation, routing):
+
+```bash
+python -m pytest tests/test_estimator_parity.py -q
+cd deploy/robots/h1_2 && g++ -std=c++17 -O2 -Iinclude -I../../include \
+    -I/usr/include/eigen3 test/base_state_estimator_test.cpp -o /tmp/bse && /tmp/bse
+```
+
 ## Stage-D bridge validation battery (designed 2026-07-14, grilled; run before any H1-2 session)
 
 > **RUN THIS VIA `scripts/deploy_readiness.py` (2026-08-04).** One command chains

@@ -745,6 +745,10 @@ Ports the offline arms to C++ so all seven run on hardware simultaneously. Decis
 were settled in a grilling session; each row is a real fork with an alternative that was
 rejected, not a default.
 
+**Operating manual** (which arm feeds the policy, how to run a session, how to score it):
+`.claude/docs/deployment.md` § "Estimator bench". This section is the *spec* — what was
+decided and what is tested — not the runbook.
+
 ### 13.1 Scope
 
 **In:** C++ ports of arms B-F faithful to the Python arms as scored (arm A already ships);
