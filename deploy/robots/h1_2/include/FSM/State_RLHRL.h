@@ -176,6 +176,7 @@ public:
 #if SAFETY_FILTER
         safety_logger_.flush(); // write any buffered rows to disk
 #endif
+        report_loop_budget();
     }
 
 private:
@@ -282,6 +283,52 @@ private:
     // arm C here at all, since it is known to diverge on real data (docs/adr/0007).
     hrl::EstimatorBank est_bank_;
     int est_arm_{0};   // index into kEstArmNames; 0 = legodom, the shipped path
+
+    // [T5] Loop-budget instrumentation (doc/hrl/h1_2_ekf_design.md §13.5). Bucketed counters
+    // ONLY -- never a per-tick print. A printf in this loop is not a neutral observer: the
+    // "10 ms loop tail" retracted on 2026-08-04 was created by the logging that measured it.
+    // Two clock reads and an increment per tick, reported once from exit().
+    static constexpr int kBudgetBuckets = 41;     // 25 us each to 1 ms, last = overrun
+    unsigned long work_hist_[kBudgetBuckets] = {0};
+    unsigned long period_hist_[kBudgetBuckets] = {0};
+    unsigned long est_hist_[kBudgetBuckets] = {0};
+    unsigned long tick_count_{0}, overrun_count_{0};
+    double work_max_us_{0.0}, est_max_us_{0.0};
+    std::chrono::steady_clock::time_point last_tick_{};
+    bool have_last_tick_{false};
+
+    static void bucket(unsigned long* h, double us)
+    {
+        int i = (int)(us / 25.0);
+        if (i < 0) i = 0;
+        if (i >= kBudgetBuckets) i = kBudgetBuckets - 1;
+        h[i]++;
+    }
+    static double pct(const unsigned long* h, unsigned long n, double q)
+    {
+        if (!n) return 0.0;
+        unsigned long want = (unsigned long)(q * n), acc = 0;
+        for (int i = 0; i < kBudgetBuckets; ++i) {
+            acc += h[i];
+            if (acc >= want) return (i + 1) * 25.0;   // upper edge of the bucket
+        }
+        return kBudgetBuckets * 25.0;
+    }
+    void report_loop_budget()
+    {
+        if (!tick_count_) return;
+        spdlog::info("[T5] run() ticks={} | work p50<={:.0f}us p99<={:.0f}us max={:.1f}us "
+                     "| estimator p50<={:.0f}us p99<={:.0f}us max={:.1f}us "
+                     "| period p50<={:.0f}us p99<={:.0f}us | overruns(>800us)={} ({:.3f}%)",
+                     tick_count_,
+                     pct(work_hist_, tick_count_, 0.50), pct(work_hist_, tick_count_, 0.99),
+                     work_max_us_,
+                     pct(est_hist_, tick_count_, 0.50), pct(est_hist_, tick_count_, 0.99),
+                     est_max_us_,
+                     pct(period_hist_, tick_count_, 0.50), pct(period_hist_, tick_count_, 0.99),
+                     overrun_count_,
+                     100.0 * (double)overrun_count_ / (double)tick_count_);
+    }
 #if SAFETY_FILTER
     // run()-thread only: the snapshot the estimator block above just read, held so the
     // flight recorder (same tick, same function) can log it. No lock: both writer and

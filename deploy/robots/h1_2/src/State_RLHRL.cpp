@@ -614,6 +614,14 @@ void State_RLHRL::policy_step()
 
 void State_RLHRL::run()
 {
+    // [T5] tick start. Bucketed at the end; nothing is printed from inside this loop.
+    const auto t_tick0 = std::chrono::steady_clock::now();
+    if (have_last_tick_)
+        bucket(period_hist_,
+               std::chrono::duration<double, std::micro>(t_tick0 - last_tick_).count());
+    last_tick_ = t_tick0;
+    have_last_tick_ = true;
+
     auto action = env->action_manager->processed_actions();
 
     // Split deploy (ADR-0005): joints listed in hold_joint_ids track default_joint_pos
@@ -720,6 +728,7 @@ void State_RLHRL::run()
     // dv_/lo_sum_/lo_p_prev_. Arm A is passed in rather than recomputed so the shipped
     // guarded path stays the single source for index 0.
     float v_arm[7][2] = {{0}};
+    const auto t_est0 = std::chrono::steady_clock::now();
     {
         Eigen::Vector3d out[7];
         est_bank_.step(est_q, est_dq, est_acc_b, est_gyro_T, g_T,
@@ -736,6 +745,12 @@ void State_RLHRL::run()
             lo_sum_ += out[est_arm_].cast<float>();
             lo_n_++;
         }
+    }
+    {
+        const double est_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - t_est0).count();
+        bucket(est_hist_, est_us);
+        if (est_us > est_max_us_) est_max_us_ = est_us;
     }
 
     // [ESTIMATOR] Hand the snapshot to the flight recorder (2026-08-10). Every other sensor
@@ -897,4 +912,15 @@ void State_RLHRL::run()
         lowcmd->msg_.motor_cmd()[jid].q() = q_cmd - offset;
     }
 #endif
+
+    // [T5] tick end. Single exit path (verified: run() has no early returns), so one
+    // measurement covers the whole tick. Counters only -- the report is emitted from exit().
+    {
+        const double work_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - t_tick0).count();
+        bucket(work_hist_, work_us);
+        if (work_us > work_max_us_) work_max_us_ = work_us;
+        if (work_us > 800.0) overrun_count_++;
+        tick_count_++;
+    }
 }

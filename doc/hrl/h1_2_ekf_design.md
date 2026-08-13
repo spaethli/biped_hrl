@@ -841,6 +841,29 @@ Three things the implementation forced, none of them anticipated by the spec:
    therefore primes both sides explicitly from `estimator_parity_v0.txt`, which is what
    isolates a porting error from a convention difference. That C amplifies it at all is one
    more independent symptom of the arm that already failed §12's bar.
+**T5 PASSES on a live bridge session** (`2026-08-13_10-36-02_t5_loopbudget`, 47 649 ticks over
+48 s = **993 Hz**, so `run()` sustains its 1 kHz period with all seven arms live):
+
+| quantity | p50 | p99 | max |
+|---|---|---|---|
+| `run()` work | ≤50 µs | **≤75 µs** (gate: <800 µs) | 1960 µs |
+| estimator block | ≤50 µs | ≤50 µs | 851 µs |
+| tick period | ≤1000 µs | ≤1025 µs | — |
+
+Overruns >800 µs: **14 of 47 649 (0.029%)**. Those outliers are scheduling, not compute — the
+estimator's work is fixed-size and branch-light, and its own p99 is ≤50 µs, so a single 851 µs
+sample is preemption (the recorder's ~5 s flush is the likeliest source). **The decimation
+fallback is not needed.** Instrumentation is bucketed counters reported once from `exit()`,
+never a per-tick print: the "10 ms loop tail" retracted on 2026-08-04 was *created* by the
+logging that measured it.
+
+All seven arms ran live and logged 100% finite, and the selected arm was `legodom`, i.e. the
+shipped behaviour is unchanged while the other six ride along passively. Their bridge std vx
+ordering (F 0.034 < B 0.040 < C+grav 0.044 < D 0.051 < C 0.054 < E 0.064 < **A 0.198**)
+reproduces the shape of the offline result — the incumbent much the noisiest, every filtered
+arm well under it — but **do not read the bridge ranking as a hardware result**: the bridge
+understates estimator error 3-6x, and this run had the elastic band attached.
+
 3. **Cost, measured: ~20 µs/tick amortized for all seven arms, on the target CPU.** The
    controller runs on the dev machine and talks to the robot over DDS, so the desktop Ryzen
    IS the deployment processor — this is not an extrapolation. Breakdown: predict 9 µs every
@@ -852,8 +875,8 @@ Three things the implementation forced, none of them anticipated by the spec:
 Deviation from §13.4: the arms live in a **new** `hrl/base_estimators.h` rather than growing
 `base_state.h`, so the shipped leg-odometry path is not even in the same file as the new code.
 
-Not yet done: T5 (on-robot timing), T6 (isolation assertion), T7 (mutation sensitivity for the
-new tests), and a hardware build.
+Not yet done: a real-robot session (the bridge covers the loop, not the robot's own DDS traffic).
+
 
 ### 13.6 Vocabulary (proposed for `CONTEXT.md`)
 
