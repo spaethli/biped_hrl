@@ -32,6 +32,9 @@ Usage:
   # correlate HL goal behaviour with the LL/safety trace from the same session
   python scripts/plot_deploy_logs.py logs/deploy_safety/RUN.csv --combined
 
+  # estimator bench (WL-G): all seven arms of one session, selected arm drawn heavy
+  python scripts/plot_deploy_logs.py logs/deploy_safety/RUN.csv --views arms
+
 Multi-run overlay simplifies each view to its single comparison-relevant series per run
 (e.g. measured joint position, not raw+measured) so N runs don't multiply into 2N lines
 per subplot. Sessions can run to ~440k rows; series above a row-count threshold are
@@ -369,8 +372,121 @@ def view_safety(runs, run_labels, out_dir, fmt, labels, downsample, **_):
   save_fig(fig, out_dir, "safety", fmt)
 
 
+# Column order for the estimator bench's est_v_* columns, mirroring kEstArmNames in
+# deploy/robots/h1_2/include/safety_logger.h. Duplicated here rather than parsed, same
+# precedent as JOINT_NAMES above. That order is a one-way door on the C++ side; keep them
+# in step or every logged session is silently reinterpreted.
+EST_ARM_NAMES = ["legodom", "compl", "ekf", "ekf_grav", "ekf_rot", "jacobian", "ekf_att"]
+
+# A pelvis moving faster than this is not a measurement, it is a diverging filter. Used
+# only to classify samples as invalid for the legend annotation and to keep the y-axis off
+# them -- the data itself is never dropped or reset (docs/adr/0007).
+EST_SPEED_SANE = 3.0  # m/s
+
+
+def _arm_series(df: pd.DataFrame, arm: str) -> tuple[np.ndarray, np.ndarray] | None:
+  cx, cy = f"est_v_{arm}_x", f"est_v_{arm}_y"
+  if cx not in df or cy not in df:
+    return None
+  return df[cx].to_numpy(dtype=float), df[cy].to_numpy(dtype=float)
+
+
+def _arm_invalid_frac(vx: np.ndarray, vy: np.ndarray) -> float:
+  """Fraction of samples that are non-finite or faster than a pelvis can move."""
+  finite = np.isfinite(vx) & np.isfinite(vy)
+  speed = np.hypot(np.where(finite, vx, 0.0), np.where(finite, vy, 0.0))
+  return float(1.0 - (finite & (speed < EST_SPEED_SANE)).mean())
+
+
+def view_arms(runs, run_labels, out_dir, fmt, labels, downsample, **_):
+  """The seven base-velocity estimator arms (WL-G bench) on shared axes.
+
+  Single run: all seven arms, with the SELECTED one (meta `base_estimator`) drawn heavy --
+  it is the only one that reached obs["hl_vel"], the other six are passive. Multi-run:
+  only each run's selected arm, following this tool's overlay convention (one
+  comparison-relevant series per run) -- seven arms x N runs is unreadable.
+
+  Zero-command spans are shaded: that is where the true pelvis speed is known to be near
+  zero, so it is the only part of the trace that can be read as error without a reference.
+  """
+  multi = len(runs) > 1
+  fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
+  finite_vals = []  # for the y-limit, divergent arms excluded
+
+  for run, rlabel in zip(runs, run_labels):
+    df, t = run.df, run.df["t"].to_numpy()
+    selected = (run.meta or {}).get("base_estimator")
+    if selected not in EST_ARM_NAMES:
+      if multi:
+        print(f"[PLOT] WARNING: {run.path.name}: meta has no usable `base_estimator` "
+              "(pre-2026-08-13 session) -- falling back to all seven arms for this run")
+      selected = None
+    arms = [selected] if (multi and selected) else EST_ARM_NAMES
+
+    # Shade where the joystick asked for nothing. Single run only: overlapping bands from
+    # several runs read as noise rather than context.
+    if not multi and {"cmd_vx", "cmd_vy", "cmd_wz"} <= set(df):
+      zero = ((df["cmd_vx"].abs() < 0.02) & (df["cmd_vy"].abs() < 0.02)
+              & (df["cmd_wz"].abs() < 0.02)).to_numpy()
+      for ax in axes:
+        ax.fill_between(t, 0, 1, where=zero, transform=ax.get_xaxis_transform(),
+                        color="0.85", alpha=0.5, linewidth=0, zorder=0)
+      axes[0].fill_between([], [], color="0.85", alpha=0.5, label="cmd = 0")
+
+    for arm in arms:
+      s = _arm_series(df, arm)
+      if s is None:
+        continue
+      vx, vy = s
+      bad = _arm_invalid_frac(vx, vy)
+      speed = np.hypot(np.where(np.isfinite(vx), vx, np.nan),
+                       np.where(np.isfinite(vy), vy, np.nan))
+      heavy = (arm == selected)
+      tag = f"{rlabel} {arm}" if multi else arm
+      if heavy and not multi:
+        tag += " (selected)"
+      if bad > 0.001:
+        tag += f"  [{100 * bad:.1f}% invalid]"
+      style = dict(linewidth=1.6 if heavy else 0.9, alpha=1.0 if heavy else 0.75,
+                   zorder=3 if heavy else 2)
+      for ax, y in zip(axes, (vx, vy, speed)):
+        tt, yy = envelope_downsample(t, y, downsample)
+        ax.plot(tt, yy, label=tag if ax is axes[0] else None, **style)
+      if bad < 0.02:  # a diverging arm must not set the scale for the others
+        both = np.concatenate([vx, vy])
+        finite_vals.append(float(np.percentile(np.abs(both[np.isfinite(both)]), 99.5)))
+
+    # Commanded vx/vy for context, from the base log's own columns.
+    if not multi:
+      for ax, col in zip(axes[:2], ("cmd_vx", "cmd_vy")):
+        if col in df:
+          tt, yy = envelope_downsample(t, df[col].to_numpy(), downsample)
+          ax.plot(tt, yy, "k--", linewidth=1.0, alpha=0.7, zorder=4,
+                  label=col if ax is axes[0] else None)
+
+  if finite_vals:
+    # MEDIAN of the per-arm p99.5, not the pooled tail: the shipped `legodom` arm is ~100x
+    # rougher than the filtered ones (p99 2.9 vs 0.8 m/s on the 2026-08-13 hardware block)
+    # and pooling lets it alone set the scale, flattening the four arms actually being
+    # compared into one line. The noisy arm clips instead -- its magnitude is still legible
+    # on the speed panel and its invalid % is in the legend.
+    lim = float(np.median(finite_vals)) * 2.0
+    if lim > 0:
+      axes[0].set_ylim(-lim, lim); axes[1].set_ylim(-lim, lim); axes[2].set_ylim(0, lim)
+
+  for ax, ylabel, title in zip(axes, ("m/s", "m/s", "m/s"),
+                               ("vx (pelvis frame)", "vy (pelvis frame)", "speed |v|")):
+    ax.set_ylabel(labels.ylabel or ylabel)
+    ax.set_title(title, fontsize=9)
+  axes[-1].set_xlabel(labels.xlabel or "t (s)")
+  legend_if_any(axes[0], fontsize=7, ncol=2)
+  fig.suptitle(labels.title or "Base-velocity estimator arms"
+               + ("" if len(finite_vals) else " (all arms diverged?)"))
+  save_fig(fig, out_dir, "arms", fmt)
+
+
 FLIGHT_BASE_VIEWS = {"joints": view_joints, "velocity": view_velocity,
-                     "imu": view_imu, "safety": view_safety}
+                     "imu": view_imu, "safety": view_safety, "arms": view_arms}
 
 
 # ============================================================= flight_hrl : views ====
@@ -583,7 +699,7 @@ def main() -> None:
   ap.add_argument("--joints", help="comma-separated joint names or group names "
                                     f"({','.join(JOINT_GROUPS)}); default: all "
                                     "(joints/joint-trajectory views only)")
-  ap.add_argument("--format", choices=["png", "pdf", "svg"], default="png")
+  ap.add_argument("--format", choices=["png", "pdf", "svg"], default="pdf")
   ap.add_argument("--out", help="output directory (default: <base>_plots/ next to the "
                                  "first input CSV)")
   ap.add_argument("--title"); ap.add_argument("--xlabel"); ap.add_argument("--ylabel")

@@ -104,10 +104,21 @@ public:
     // offsets move the foot site 16.3 mm in x, so a replay that assumes the wrong one is
     // silently in the wrong coordinates. Same failure class as the 2026-08-05
     // `deploy_est.yaml` default: recoverable only if the convention travels with the data.
+    // `base_estimator` names the arm that feeds obs["hl_vel"] -- "none" when no arm is
+    // selected (A0, which runs the bank purely passively). It is recorded because the
+    // selection is otherwise UNRECOVERABLE from the log: all seven arms are written every
+    // tick, and the only trace of which one was consumed is `lo_vx` in the sibling
+    // _hrl.csv, a c=8 window mean. Matching that back to an arm was measured on the
+    // 2026-08-13 hardware block and separates the candidates by only 1.1-1.3x -- the
+    // recorder runs at ~726 Hz while the bank steps at ~1 kHz, so window-mean subsampling
+    // noise (~0.03 m/s) swamps the between-arm difference. Seven sessions were left
+    // unattributable. Same failure class as `joint_offset` above: recoverable only if the
+    // convention travels with the data.
     void init(const std::string& base_path, const std::vector<float>& joint_ids_map,
               float tilt_limit, float fall_acc_thresh, float control_dt,
               bool with_estimator = false,
-              const std::vector<float>& joint_offset = {})
+              const std::vector<float>& joint_offset = {},
+              const std::string& base_estimator = "none")
     {
         base_ = base_path;
         if (base_.empty()) return;
@@ -135,6 +146,7 @@ public:
         meta << "  \"tilt_limit\": " << tilt_limit << ",\n";
         meta << "  \"fall_acc_thresh\": " << fall_acc_thresh << ",\n";
         meta << "  \"with_estimator\": " << (with_est_ ? "true" : "false") << ",\n";
+        meta << "  \"base_estimator\": \"" << base_estimator << "\",\n";
         meta << "  \"joint_offset\": [";
         for (size_t i = 0; i < joint_offset.size(); i++)
             meta << (i ? "," : "") << joint_offset[i];

@@ -1,10 +1,10 @@
 {
-  "staged_at": "2026-08-07T11:57:11+02:00",
-  "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-08-01_15-15-56_a1a_cot0p2_cad0p5_energy0p05_novelobs_s42/model_10000.pt",
-  "source_run": "2026-08-01_15-15-56_a1a_cot0p2_cad0p5_energy0p05_novelobs_s42",
+  "staged_at": "2026-08-12T09:10:17+02:00",
+  "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-08-05_05-52-23_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42/model_10000.pt",
+  "source_run": "2026-08-05_05-52-23_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42",
   "md5": {
-    "high_level.onnx": "01a4e55d6b8eb2c8a0cb843e21bb2209",
-    "low_level.onnx": "a97e047a3821d7ddd6f779aa48757e11"
+    "high_level.onnx": "ddae86dfee9bad0c2fb82ee3e74a8435",
+    "low_level.onnx": "d1ff2184d902181cc5fb863ab037ea30"
   },
   "staged_by": "scripts/deploy_provenance.py",
   "checkpoint_verified_numerically": false

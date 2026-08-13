@@ -156,6 +156,23 @@ Q_p,L, Q_p,R, Q_z,L, Q_z,R, Q_bf, Q_bω}`.
 parameters and nothing on disk documents them. Get them from a ≥10 min stationary log (Allan
 variance) *before* tuning anything else, or every subsequent comparison is a tuning artifact.
 
+**Status 2026-08-13 — `Q_f, Q_ω` ARE grounded; `Q_bf, Q_bω` still are not.**
+The static log is `~/ramlab_ws/trajectories/all_joints_2026-08-12_08-27-18_10min_hang.csv`
+(655 s, 50 Hz, IMU + q/dq/tau; joints still at max `|dq|` 0.055 rad/s, `|a|` = 9.9036). Its
+white-noise densities are already in both implementations (`acc` 0.0145, `gyro` 0.0016 — see
+`replay_base_estimators.py` for the per-axis breakdown), and an independent Allan refit on
+2026-08-13 reproduced them within a few percent per axis.
+
+Two caveats now have a measured mechanism. (1) The robot was **hanging and swinging**: a coherent
+0.44 Hz pendulum mode carries 9-22% of gyro power. It does not affect the white-noise floor, which
+is fitted at short τ, but it does contaminate the long-τ end — and it means *encoder stillness is
+not inertial stillness*, since every joint reads still while the whole body swings. (2) At 655 s
+the largest resolvable τ is 72.8 s and the Allan minimum already sits at 55-73 s, so the τ^(+1/2)
+branch that `Q_bf`/`Q_bω` come from never appears. **`ba`/`bw` (1e-4 / 1e-5) remain assumptions
+and this log cannot ground them** — that needs a 1-2 h log, feet on the ground. Bias instability
+reads ~2.2e-4 rad/s (gyro) and ~1.7e-3 m/s² (acc), upper bounds only. Detail → the deploy journal
+(research KB).
+
 `Q_p,i` and `Q_z,i` are **not** IMU properties — they encode "how much may a contacting foot move",
 and §7 makes them a function of contact confidence rather than constants.
 
@@ -564,6 +581,9 @@ quaternion reproduces exactly the handicap that made the 2026-08-10 gate-2 study
 
 **Also record once:** a ≥10 min stationary IMU log (robot powered, motionless, no policy) for Allan
 variance. `Q_f, Q_ω, Q_bf, Q_bω` come from it and are **frozen before any scoring**.
+⚠️ **Feet on the ground, not on the gantry, and 1-2 h not 10 min** — the 2026-08-12 attempt failed
+on both counts (§ the status note above). A hanging robot swings at ~0.44 Hz while every encoder
+reads still, so *encoder stillness is not inertial stillness*: gate the window on the IMU too.
 
 Meanwhile, dry-run the replay pipeline on existing logs — FK parity, contact detection, tuning ranges —
 but **score no arms** until P0 lands.

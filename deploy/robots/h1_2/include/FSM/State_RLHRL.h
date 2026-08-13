@@ -142,7 +142,11 @@ public:
                                 /*with_estimator=*/true,
                                 env->cfg["joint_offset"]
                                   ? env->cfg["joint_offset"].as<std::vector<float>>()
-                                  : std::vector<float>{});
+                                  : std::vector<float>{},
+                                // est_arm_ is parsed fail-closed in the constructor, so it
+                                // is already valid here; enter() cannot be reached with an
+                                // unknown arm name.
+                                kEstArmNames[est_arm_]);
 #endif
 
         policy_thread_running = true;

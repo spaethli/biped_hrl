@@ -38,7 +38,7 @@ hrl:
   # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
   # (docs/adr/0007); the other six arms run passively and are logged only.
   # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
-  base_estimator: legodom
+  base_estimator: ekf_rot
   c: 8
   hl_target_mode: delta
   goal_components: [velocity, orientation, height]
