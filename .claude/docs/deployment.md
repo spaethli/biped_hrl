@@ -278,6 +278,23 @@ it does for you because both were learned the hard way: it never scores across m
 regimes, and it verifies the robot was actually **still** from the encoders rather than
 trusting `cmd == 0` (a 5 s set-down transient once carried a whole session's apparent
 noise). `--selftest` checks the Jacobians and the filter with no session needed.
+⚠️ Encoder stillness is not *inertial* stillness: on the gantry every joint reads still
+while the body swings at ~0.44 Hz. Gate on the IMU too before claiming the base is at rest.
+
+**Plot it.** `--views arms` draws all seven on shared axes (zero-command spans shaded,
+selected arm heavy, per-arm invalid % in the legend):
+
+```bash
+python scripts/plot_deploy_logs.py logs/deploy_safety/<session>.csv --views arms
+```
+
+**Confirm which arm actually ran** — `base_estimator` is recorded in the meta json (since
+2026-08-13; sessions before that are **unattributable**, the c=8 `lo_vx` trace separates
+candidates by only 1.1-2.0x):
+
+```bash
+jq -r .base_estimator logs/deploy_safety/<session>_meta.json
+```
 
 **Loop budget.** `run()` reports bucketed timings once on exit; grep the controller log:
 
