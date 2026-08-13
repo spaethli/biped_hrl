@@ -115,6 +115,22 @@ void State_RLBase::run()
             est_sample_.dq[k] = lowstate->msg_.motor_state()[k].dq();
         }
         est_sample_.dpsi = est_sample_.dq[12];
+        // All seven arms, passive. Arm A is differenced inside the bank (A0 keeps no
+        // leg-odometry accumulator of its own), so nullptr is correct here.
+        {
+            const Eigen::Vector3f acc_b(est_sample_.acc[0], est_sample_.acc[1], est_sample_.acc[2]);
+            const Eigen::Vector3f gyro_b(est_sample_.gyro[0], est_sample_.gyro[1], est_sample_.gyro[2]);
+            const Eigen::Quaternionf qw(est_sample_.quat[0], est_sample_.quat[1],
+                                        est_sample_.quat[2], est_sample_.quat[3]);
+            const Eigen::Vector3f g_T = qw.conjugate() * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+            Eigen::Vector3d out[7];
+            est_bank_.step(est_sample_.q, est_sample_.dq, acc_b, gyro_b, g_T,
+                           qw.toRotationMatrix(), nullptr, H1_2_CONTROL_DT, out);
+            for (int a = 0; a < 7; ++a) {
+                est_sample_.v_arm[a][0] = (float)out[a].x();
+                est_sample_.v_arm[a][1] = (float)out[a].y();
+            }
+        }
 #endif
     }
     // Rotate to world frame and remove gravity: 0 = standing still, -9.81 = free-fall

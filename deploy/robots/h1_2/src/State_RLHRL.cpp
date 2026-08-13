@@ -112,6 +112,36 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     hl_vel_from_leg_odom_ =
         hrl["hl_vel_from_leg_odom"] && hrl["hl_vel_from_leg_odom"].as<bool>();
 
+#if SAFETY_FILTER
+    // FAIL-CLOSED estimator selection (docs/adr/0007). There is deliberately NO default: a
+    // missing key must abort, not silently pick a signal. Same class as the 2026-08-05
+    // dead-signal splay, where absent keys routed the goal state to a dead topic and no
+    // bridge gate could catch it. Every HRL deploy config carries the key; one that does not
+    // will refuse to start, which is the intent.
+    // (Outside SAFETY_FILTER the bench is compiled out entirely -- a passive arm's only
+    // consumer is the flight recorder -- so est_arm_ stays 0, the shipped leg odometry.)
+    if (!hrl["base_estimator"]) {
+        std::string valid;
+        for (int a = 0; a < 7; ++a) valid += std::string(a ? " | " : "") + kEstArmNames[a];
+        throw std::runtime_error(
+            "[HRL] deploy yaml has no `hrl.base_estimator` key. It selects which base-velocity "
+            "estimator feeds obs[\"hl_vel\"] and has no default on purpose (docs/adr/0007). "
+            "Set one of: " + valid);
+    }
+    const std::string arm_name = hrl["base_estimator"].as<std::string>();
+    est_arm_ = -1;
+    for (int a = 0; a < 7; ++a)
+        if (arm_name == kEstArmNames[a]) est_arm_ = a;
+    if (est_arm_ < 0) {
+        std::string valid;
+        for (int a = 0; a < 7; ++a) valid += std::string(a ? " | " : "") + kEstArmNames[a];
+        throw std::runtime_error("[HRL] unknown hrl.base_estimator '" + arm_name
+                                 + "'. Valid: " + valid);
+    }
+    spdlog::info("[HRL] base_estimator = {} (arm {}); the other six run passively and are "
+                 "logged only", arm_name, est_arm_);
+#endif
+
     // FAIL-CLOSED base-state source check (2026-08-05). "Absent keeps the old path" is a
     // safe default in the BRIDGE and a robot-breaking one on hardware: rt/sportmodestate
     // publishes identical zeros the moment our own low-level controller takes command, so
@@ -656,26 +686,58 @@ void State_RLHRL::run()
     // waist enters only here, converting the TORSO-frame gyro into the pelvis angular
     // velocity: w_P = Rz(psi)*w_T - psi_dot*z. Dropping psi_dot is worth ~0.1 m/s per rad/s
     // of waist rate (|z x p_foot| ~ 0.1 m), so it is not optional.
+    const float psi = est_q[12];
+    Eigen::Vector3f w_P = rz(psi, est_gyro_T);
+    w_P.z() -= est_dpsi;
+    const Eigen::Vector3f g_T = est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W;
+    const Eigen::Vector3f grav_P = rz(psi, g_T);
+
+    // Arm A (legodom), the SHIPPED path: unchanged, still inside the lock, still guarded by
+    // lo_prev_valid_ so it never differences across a stance switch or an FSM re-entry.
+    Eigen::Vector3f v_a(0, 0, 0);
+    bool a_ok = false;
     {
         Eigen::Vector3f p_now[2] = { hrl::foot_site_b(est_q, 0), hrl::foot_site_b(est_q, 1) };
-        const float psi = est_q[12];
-        Eigen::Vector3f w_P = rz(psi, est_gyro_T);
-        w_P.z() -= est_dpsi;
-        const Eigen::Vector3f grav_P =
-            rz(psi, est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W);
         std::lock_guard<std::mutex> lock(est_mu_);
         // dv_ and the leg-odom accumulator are the only state crossing the thread boundary;
         // policy_step() reads and zeroes both under this mutex. Uncontended.
-        dv_ += (est_acc_b + (est_quat.conjugate() * env->robot->data.GRAVITY_VEC_W) * kGravity)
-               * H1_2_CONTROL_DT;
+        dv_ += (est_acc_b + g_T * kGravity) * H1_2_CONTROL_DT;
         if (lo_prev_valid_) {
-            lo_sum_ += hrl::leg_odom_velocity(p_now, lo_p_prev_, H1_2_CONTROL_DT, w_P, grav_P);
-            lo_n_++;
+            v_a = hrl::leg_odom_velocity(p_now, lo_p_prev_, H1_2_CONTROL_DT, w_P, grav_P);
+            a_ok = true;
+            if (est_arm_ == 0) {          // selected: byte-identical to the pre-bench build
+                lo_sum_ += v_a;
+                lo_n_++;
+            }
         }
         lo_p_prev_[0] = p_now[0];
         lo_p_prev_[1] = p_now[1];
         lo_prev_valid_ = true;
     }
+
+    // [ESTIMATOR BENCH] arms B-F, via the shared bank (hrl/base_estimators.h). Outside the
+    // lock: the bank touches only this thread's own state and est_sample_, never
+    // dv_/lo_sum_/lo_p_prev_. Arm A is passed in rather than recomputed so the shipped
+    // guarded path stays the single source for index 0.
+    float v_arm[7][2] = {{0}};
+    {
+        Eigen::Vector3d out[7];
+        est_bank_.step(est_q, est_dq, est_acc_b, est_gyro_T, g_T,
+                       est_quat.toRotationMatrix(), a_ok ? &v_a : nullptr,
+                       H1_2_CONTROL_DT, out);
+        for (int a = 0; a < 7; ++a) {
+            v_arm[a][0] = (float)out[a].x();
+            v_arm[a][1] = (float)out[a].y();
+        }
+        // A passive arm reaches the log and nothing else. Only the SELECTED arm moves
+        // lo_sum_, and arm 0 already did so above under its own validity guard.
+        if (est_arm_ != 0) {
+            std::lock_guard<std::mutex> lock(est_mu_);
+            lo_sum_ += out[est_arm_].cast<float>();
+            lo_n_++;
+        }
+    }
+
     // [ESTIMATOR] Hand the snapshot to the flight recorder (2026-08-10). Every other sensor
     // column on that row comes from env->robot->data, which policy_step() refreshes at 50 Hz,
     // so without this an offline replay of THIS estimator is impossible from its own log --
@@ -692,6 +754,10 @@ void State_RLHRL::run()
     est_sample_.quat[2] = est_quat.y(); est_sample_.quat[3] = est_quat.z();
     for (int k = 0; k < 13; ++k) { est_sample_.q[k] = est_q[k]; est_sample_.dq[k] = est_dq[k]; }
     est_sample_.dpsi = est_dpsi;
+    for (int a = 0; a < 7; ++a) {
+        est_sample_.v_arm[a][0] = v_arm[a][0];
+        est_sample_.v_arm[a][1] = v_arm[a][1];
+    }
 #endif
 
 #if SAFETY_FILTER

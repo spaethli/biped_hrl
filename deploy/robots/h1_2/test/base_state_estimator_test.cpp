@@ -15,10 +15,17 @@
 //   /tmp/base_state_estimator_test           # must end "ALL PASS (0)"
 // (join the g++ line; it is split here only to keep it inside the comment block)
 #include "hrl/base_state.h"
+#include "hrl/base_estimators.h"
 
 #include <cmath>
+#include <fstream>
+#include <vector>
 #include <cstdio>
 #include <string>
+#include <sstream>
+#include <array>
+#include <algorithm>
+#include <cstdlib>
 
 static int fails = 0;
 static void check(bool ok, const std::string& what)
@@ -63,7 +70,218 @@ static const float kIncOut[6][3] = {
     {-1.113718f, +0.212047f, -0.481982f},
 };
 
-int main()
+
+// --- T2: estimator-arm parity against the Python harness ----------------------------
+// The robot runs the arms from hrl/base_estimators.h; every published number about them
+// came from scripts/replay_base_estimators.py. Both are pinned to one golden fixture so a
+// hardware disagreement can be attributed. Bar is stated on the c=8 WINDOW average because
+// that is what the HL consumes -- never an individual tick.
+//
+// Both sides are primed from the SAME initial condition (bank.prime()). Online the bank
+// warm-starts one tick later, which contracting arms forget and the divergent position-only
+// arm does not; that is a property of the arm, not of the port, and is documented in
+// tests/test_estimator_parity.py.
+static void parity_gate(const std::string& dir)
+{
+    const char* kArms[7] = {"legodom","compl","ekf","ekf_grav","ekf_rot","jacobian","ekf_att"};
+    auto load = [](const std::string& p, int cols) {
+        std::vector<std::vector<double>> rows;
+        std::ifstream f(p);
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            // Token-at-a-time via strtod, NOT `is >> double`: operator>> sets failbit on
+            // "nan", and once the stream fails EVERY remaining column on that row silently
+            // reads as 0 -- including the valid ones. Arm A is legitimately NaN on its first
+            // sample (no previous foot position), so this bug zeroed whole rows and made
+            // even the stateless arms look like porting errors.
+            std::istringstream is(line);
+            std::vector<double> r(cols, std::nan(""));
+            std::string tok;
+            for (int i = 0; i < cols && (is >> tok); ++i) r[i] = std::strtod(tok.c_str(), nullptr);
+            rows.push_back(r);
+        }
+        return rows;
+    };
+    auto in = load(dir + "/estimator_parity_input.txt", 37);
+    auto want = load(dir + "/estimator_parity_expected.txt", 14);
+    if (in.empty() || in.size() != want.size()) {
+        check(false, "parity fixture missing or ragged (" + dir + ") -- run tests/ generator");
+        return;
+    }
+
+    auto v0rows = load(dir + "/estimator_parity_v0.txt", 3);
+    if (v0rows.empty()) { check(false, "parity v0 fixture missing"); return; }
+    const Eigen::Vector3d v0(v0rows[0][0], v0rows[0][1], v0rows[0][2]);
+
+    hrl::EstimatorBank bank;
+    const int n = (int)in.size();
+    std::vector<std::array<double,14>> got(n);
+    for (int k = 0; k < n; ++k) {
+        float q[13], dq[13];
+        for (int i = 0; i < 13; ++i) { q[i] = (float)in[k][11+i]; dq[i] = (float)in[k][24+i]; }
+        Eigen::Vector3f acc((float)in[k][1], (float)in[k][2], (float)in[k][3]);
+        Eigen::Vector3f gyro((float)in[k][4], (float)in[k][5], (float)in[k][6]);
+        Eigen::Quaternionf qw((float)in[k][7], (float)in[k][8], (float)in[k][9], (float)in[k][10]);
+        qw.normalize();
+        const Eigen::Vector3f g_T = qw.conjugate() * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+        const float dt = k ? (float)(in[k][0] - in[k-1][0]) : 0.0f;
+        if (k == 0)   // identical initial condition to the harness, before the first step
+            bank.prime(v0, q[12], gyro.cast<double>(),
+                       qw.toRotationMatrix().cast<double>());
+        Eigen::Vector3d o[7];
+        bank.step(q, dq, acc, gyro, g_T, qw.toRotationMatrix(), nullptr, dt, o);
+        for (int a = 0; a < 7; ++a) { got[k][2*a] = o[a].x(); got[k][2*a+1] = o[a].y(); }
+    }
+
+    const int W = 160;               // c=8 policy steps at the ~500 Hz DDS rate
+    const int nw = n / W;
+    for (int a = 0; a < 7; ++a) {
+        double worst = 0.0;
+        for (int w = 0; w < nw; ++w)
+            for (int ax = 0; ax < 2; ++ax) {
+                double sg = 0, sw = 0;
+                int cnt = 0;
+                for (int k = w*W; k < (w+1)*W; ++k) {
+                    if (!std::isfinite(got[k][2*a+ax]) || !std::isfinite(want[k][2*a+ax])) continue;
+                    sg += got[k][2*a+ax]; sw += want[k][2*a+ax]; ++cnt;
+                }
+                if (cnt > W/2) worst = std::max(worst, std::fabs(sg/cnt - sw/cnt));
+            }
+        char msg[160];
+        std::snprintf(msg, sizeof msg, "arm %-9s c=8 window vs Python: %.2e m/s (bar 1e-4)",
+                      kArms[a], worst);
+        check(worst < 1e-4, msg);
+    }
+}
+
+// --- T6: passive-arm isolation (docs/adr/0007) --------------------------------------
+// The bench runs the KNOWN-DIVERGENT position-only arm inside the ~1 kHz control loop. That
+// is only defensible if a passive arm reaches the flight recorder and nothing else, so the
+// invariant is asserted, not asserted-by-comment. Two halves:
+//
+//   (a) no cross-arm coupling: an arm's output inside the bank must be bit-identical to the
+//       same filter driven alone on the same inputs, even while a sibling is diverging.
+//       Anything shared (a static, a scratch buffer) would show up here.
+//   (b) NaN containment: a filter driven to NaN stays NaN and cannot reach a sibling.
+//
+// The half this cannot reach is "a passive arm never touches lowcmd" -- that lives in
+// State_RLHRL.cpp's routing, and tests/test_deploy_parity.py pins it at source level.
+static void isolation_gate(const std::string& dir)
+{
+    auto load = [](const std::string& p, int cols) {
+        std::vector<std::vector<double>> rows;
+        std::ifstream f(p);
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.empty() || line[0] == '#') continue;
+            std::istringstream is(line);
+            std::vector<double> r(cols, std::nan(""));
+            std::string tok;
+            for (int i = 0; i < cols && (is >> tok); ++i) r[i] = std::strtod(tok.c_str(), nullptr);
+            rows.push_back(r);
+        }
+        return rows;
+    };
+    auto in = load(dir + "/estimator_parity_input.txt", 37);
+    if (in.empty()) { check(false, "isolation: fixture missing"); return; }
+
+    auto v0rows = load(dir + "/estimator_parity_v0.txt", 3);
+    if (v0rows.empty()) { check(false, "isolation: v0 fixture missing"); return; }
+    const Eigen::Vector3d v0(v0rows[0][0], v0rows[0][1], v0rows[0][2]);
+
+    hrl::EstimatorBank bank;
+    hrl::BaseEkf<true> lone_rot;          // arm D, driven alone with identical inputs
+    hrl::EkfNoise ns;
+    hrl::MeasCfg mc;
+    double worst_d = 0.0;
+    bool c_went_bad = false;
+    // Mirror the bank's own sequencing exactly -- same initial condition, and the kinematic
+    // update gated on a CHANGED sample. Without both, the reference diverges for reasons that
+    // have nothing to do with coupling (measured: 2e-2 m/s from the warm start alone).
+    double prev_key[19] = {0};
+    bool key_valid = false;
+
+    for (size_t k = 0; k < in.size(); ++k) {
+        float q[13], dq[13];
+        double q_d[13];
+        for (int i = 0; i < 13; ++i) {
+            q[i] = (float)in[k][11 + i]; dq[i] = (float)in[k][24 + i]; q_d[i] = q[i];
+        }
+        Eigen::Vector3f acc((float)in[k][1], (float)in[k][2], (float)in[k][3]);
+        Eigen::Vector3f gyro((float)in[k][4], (float)in[k][5], (float)in[k][6]);
+        Eigen::Quaternionf qw((float)in[k][7], (float)in[k][8], (float)in[k][9], (float)in[k][10]);
+        qw.normalize();
+        const Eigen::Vector3f g_T = qw.conjugate() * Eigen::Vector3f(0.0f, 0.0f, -1.0f);
+        const Eigen::Matrix3d Rw = qw.toRotationMatrix().cast<double>();
+        const float dt = k ? (float)(in[k][0] - in[k - 1][0]) : 0.0f;
+
+        // POISON: from tick 200 on, the bank's inputs are unchanged but we drive the LONE
+        // reference and the bank identically, so any divergence between bank-D and lone-D is
+        // coupling. Meanwhile arm C is separately driven to NaN below (half b).
+        double key[19];
+        for (int i = 0; i < 3; ++i) { key[i] = acc[i]; key[3 + i] = gyro[i]; }
+        for (int i = 0; i < 13; ++i) key[6 + i] = q_d[i];
+        bool fresh = !key_valid;
+        for (int i = 0; i < 19 && !fresh; ++i) fresh = (key[i] != prev_key[i]);
+        for (int i = 0; i < 19; ++i) prev_key[i] = key[i];
+        key_valid = true;
+
+        if (k == 0) {
+            bank.prime(v0, q_d[12], gyro.cast<double>(), Rw);
+            lone_rot.reset(&Rw);
+            lone_rot.warm_start(v0, q_d[12], gyro.cast<double>());
+        }
+        Eigen::Vector3d o[7];
+        bank.step(q, dq, acc, gyro, g_T, qw.toRotationMatrix(), nullptr, dt, o);
+
+        // lone arm D, same sequence the bank uses
+        Eigen::Vector3d p_I[2]; Eigen::Matrix3d R_I[2];
+        hrl::feet_in_imu(q_d, q_d[12], hrl::kContactA, p_I, R_I);
+        double alpha[2];
+        hrl::contact_alpha(p_I, g_T.cast<double>(), alpha);
+        lone_rot.predict(acc.cast<double>(), gyro.cast<double>(), dt, alpha, ns);
+        if (fresh) {
+            Eigen::Matrix<double, 3, 7> Jv[2], Jw[2];
+            hrl::foot_jacobians_imu(q_d, q_d[12], hrl::kContactA, Jv, Jw);
+            Eigen::Matrix<double, 12, 12> R12;
+            hrl::build_R<true>(Jv, Jw, alpha, mc, R12);
+            lone_rot.update_feet(p_I, R_I, alpha, R12);
+        }
+        const Eigen::Vector3d v_lone = lone_rot.velocity_pelvis(q_d[12], gyro.cast<double>());
+
+        if (k > 0) {
+            worst_d = std::max(worst_d, (o[4].head<2>() - v_lone.head<2>()).cwiseAbs().maxCoeff());
+        }
+        if (!std::isfinite(o[2].x())) c_went_bad = true;
+    }
+    char msg[200];
+    std::snprintf(msg, sizeof msg,
+                  "isolation: bank arm ekf_rot == the same filter driven ALONE (worst %.2e m/s)",
+                  worst_d);
+    check(worst_d < 1e-9, msg);
+    check(!c_went_bad, "isolation: no arm went non-finite on clean data (a NaN here would be a bug, "
+                       "not divergence)");
+
+    // (b) NaN containment at class level: two filters, one poisoned, no shared state.
+    {
+        hrl::BaseEkf<false> poisoned, clean;
+        const Eigen::Vector3d nan3(std::nan(""), std::nan(""), std::nan(""));
+        const Eigen::Vector3d good(0.0, 0.0, 9.81), zero(0.0, 0.0, 0.0);
+        double alpha[2] = {1.0, 0.0};
+        poisoned.predict(nan3, zero, 0.001, alpha, ns);
+        for (int i = 0; i < 50; ++i) {
+            poisoned.predict(good, zero, 0.001, alpha, ns);
+            clean.predict(good, zero, 0.001, alpha, ns);
+        }
+        check(!poisoned.finite(), "isolation: a NaN-poisoned filter reports finite()==false "
+                                  "(so the log records divergence rather than hiding it)");
+        check(clean.finite(), "isolation: a sibling filter is UNAFFECTED by the poisoned one "
+                              "(no shared state between arms)");
+    }
+}
+
+int main(int argc, char** argv)
 {
     // 1. Leg FK vs MuJoCo. The nominal pose must be EXACT (it is the pose the deploy
     //    anchors at, so any error there biases every height the policy ever sees); the
@@ -185,6 +403,9 @@ int main()
         check((v - Eigen::Vector3f(0.0f, -0.10f, 0.0f)).norm() < 1e-5f,
               "leg odometry applies -w x p_foot (pure yaw rate over a 0.10 m lever)");
     }
+
+    parity_gate(argc > 1 ? argv[1] : "../../../tests/fixtures");
+    isolation_gate(argc > 1 ? argv[1] : "../../../tests/fixtures");
 
     std::printf("%s (%d)\n", fails ? "FAILURES" : "ALL PASS", fails);
     return fails ? 1 : 0;

@@ -25,6 +25,8 @@ HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
 SN = REPO / "src/tasks/velocity/rl/hrl/state_noise.py"
 LO = REPO / "src/tasks/velocity/rl/hrl/leg_odom.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
+HRLC = REPO / "deploy/robots/h1_2/src/State_RLHRL.cpp"
+RBE = REPO / "scripts/replay_base_estimators.py"
 YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy.yaml"
 REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deploy_real.yaml"
 DGA = REPO / "scripts/deploy_gate_analyzer.py"
@@ -271,8 +273,27 @@ MUTATIONS = [
    "  R = R @ _rot(0, j[:, 2])\n  R = R @ _rot(1, j[:, 1])",
    "test_matches_cpp_leg_odom_velocity_on_golden_vectors"),
 
+  # --- estimator bench (WL-G, docs/adr/0007) ------------------------------------------
+  # The isolation invariant is what makes it defensible to run the known-divergent
+  # position-only arm inside the 1 kHz loop, so a passive arm reaching the policy must fail.
+  ("a PASSIVE estimator arm is routed into obs['hl_vel'] instead of the selected one", HRLC,
+   "            lo_sum_ += out[est_arm_].cast<float>();",
+   "            lo_sum_ += out[2].cast<float>();",
+   "test_only_the_selected_arm_can_reach_the_hl_velocity"),
+
+  ("arm A's accumulation loses its selection guard (double-counts when another arm runs)", HRLC,
+   "            if (est_arm_ == 0) {          // selected: byte-identical to the pre-bench build",
+   "            if (true) {",
+   "test_only_the_selected_arm_can_reach_the_hl_velocity"),
+
+  # The golden fixture is the only thing tying the C++ arms to every published number.
+  ("the complementary filter's time constant drifts from the scored value", RBE,
+   "def arm_b_complementary(s: Session, pre: dict, v_legodom: np.ndarray, tau: float = 0.20):",
+   "def arm_b_complementary(s: Session, pre: dict, v_legodom: np.ndarray, tau: float = 0.25):",
+   "test_python_arm_matches_golden_on_the_c8_window"),
+
   ("foot site offset dropped (the sole point substituted for the site point)", LO,
-   "  return p + R @ _vec(FOOT_SITE_A, q)",
+   "  return p + R @ _vec(offset, q)",
    "  return p",
    "test_matches_cpp_leg_odom_velocity_on_golden_vectors"),
 
@@ -285,13 +306,13 @@ MUTATIONS = [
   # Refreshing it mid-window decorrelates the TD3 buffer's next_s from the value the actor
   # actually conditioned its action on -- the same reasoning that forbids a fresh jitter draw.
   ("obs['hl_vel'] recomputed mid-window instead of holding the latched value", HR,
-   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
-   "      return uenv.leg_odom.fire().clone()",
+   '      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   "      v = uenv.leg_odom.fire().clone()",
    "test_leg_odom_value_is_held_across_the_window_and_only_moves_on_a_fire"),
 
   ("obs['hl_vel'] hands out the accumulator's own storage (aliasing)", HR,
-   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
-   "      return uenv.leg_odom.fire() if fire else uenv.leg_odom.value",
+   '      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   "      v = uenv.leg_odom.fire() if fire else uenv.leg_odom.value",
    "test_leg_odom_output_does_not_alias_the_accumulator"),
 
   # Anchored on the RETURN line too: `if self.hl_vel_source == "leg_odom":` also appears in
@@ -299,9 +320,9 @@ MUTATIONS = [
   # the bare condition would mutate the guard, which no CPU test exercises, and read green.
   ("the leg-odom source silently falls back to the goal state", HR,
    '    if self.hl_vel_source == "leg_odom":\n'
-   '      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
+   '      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()',
    "    if False:\n"
-   "      return (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()",
+   "      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()",
    "test_leg_odom_source_never_reads_or_writes_the_goal_state"),
 ]
 

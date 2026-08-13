@@ -143,6 +143,27 @@ _Avoid_: "odometry" unqualified (the word normally implies an integrated *positi
 this deliberately is not); "the estimator" (ambiguous with the IMU _Base-velocity increment_
 and the leg-FK height, which are different signals feeding different consumers).
 
+**Fused base velocity**:
+A pelvis-velocity estimate that combines the IMU with leg kinematics through a filter, as
+opposed to _Leg odometry_, which is instantaneous and unfiltered. Covers the complementary
+filter and every EKF variant alike. The distinction is load-bearing because the two classes
+fail in opposite directions: _Leg odometry_ is noisy but unbiased, a fused estimate trades
+that noise for bias (see _Contact-transition loss_).
+_Avoid_: "the estimator" (already flagged as ambiguous under _Leg odometry_); "EKF" (a
+complementary filter is fused and is not an EKF); "filtered odometry" (the fusion adds the
+IMU, it does not merely smooth the leg signal).
+
+**Contact-transition loss**:
+The roughly fixed displacement a _Fused base velocity_ loses per step, because the
+stationary-foot measurement keeps being applied across touchdown and lift-off, when the foot
+is not yet or no longer stationary. Measured 9-17 mm per step and independent of walking
+speed, so it scales with steps per metre rather than with distance. A *filter* artifact:
+_Leg odometry_, which applies no such measurement, does not show it.
+_Avoid_: "foot rollover" (that names the shelved WL-D arm-6 reward, a policy behaviour);
+"stance-point error" (which point is chosen is settled and irrelevant — see _Stance point_;
+this is about the transition, not the point); "slip" (a robot/ground phenomenon, whereas this
+is generated inside the estimator).
+
 **Stance point**:
 The single point _Leg odometry_ assumes is fixed in the world while a foot is stance
 (`kFootSiteA`, x = +0.04 in the ankle_roll frame). **Which point is chosen does not matter**,

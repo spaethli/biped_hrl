@@ -738,3 +738,146 @@ demonstrated FK parity at 2.2e-16.
 | offsets | ignored — an A2 problem if it persists for a working A1 |
 | support | slack overhead harness, no load ⇒ tape measure is valid truth |
 | if negative | ship B for A1, carry C forward as A2 groundwork |
+
+## 13. On-robot deployment spec (agreed 2026-08-13)
+
+Ports the offline arms to C++ so all seven run on hardware simultaneously. Decisions below
+were settled in a grilling session; each row is a real fork with an alternative that was
+rejected, not a default.
+
+### 13.1 Scope
+
+**In:** C++ ports of arms B-F faithful to the Python arms as scored (arm A already ships);
+per-arm logging; a fail-closed config selector; a window-parity test; a loop-budget gate.
+
+**Out, deliberately:** the ~9-17 mm/step contact-transition loss (§13.6), contact-detector
+hysteresis, and **any change to the shipped leg odometry**. Shipping the arms exactly as
+scored is what keeps hardware numbers comparable to the four tape-measured legs; fixing the
+estimator first would deploy an arm no offline data covers. Re-evaluate the loss against the
+hardware data and spec it separately.
+
+### 13.2 Decisions
+
+| branch | decision | rejected alternative |
+|---|---|---|
+| architecture | **all 7 arms compute every tick, all logged, one config-selected arm feeds `obs["hl_vel"]`** | one arm per session (9+ sessions, each arm on different data with its own encoder offset) |
+| arms | **all 7.** C/C+grav/D/F are ONE filter class with three booleans (`use_ori`, `use_att`, `use_grav`), so "all 7" is 1 EKF + B + E, not 4 EKFs | B/D/F subset |
+| prediction | **every `run()` tick, fixed `dt = 1 ms`**, exactly as arm A | real dt; gated |
+| **update** | **only when `acc/gyro/q` change** (~500 Hz), using the same change-detect key the Python harness dedupes on | every tick — would count each measurement twice, shrink `P` ~2x too fast, over-trust the stationary-foot assumption and make the C++ arms *more* zero-biased than the scored ones |
+| parity bar | **c=8 window average within 1e-4 m/s; session mean within 1e-5 m/s** | per-sample 1e-6 (tests a code path the robot never runs) |
+| config | **required `base_estimator:` key; missing or unknown aborts at startup**, no default | silent default to `legodom` — the exact pattern behind the dead-signal splay |
+| logging | **`vx, vy` per arm per logged tick** (14 floats, ~+7% file) | +`vz` as a divergence canary |
+| divergence | **isolate only, log raw.** Each arm owns its state; NaN/divergence is preserved as evidence, never reset | reset-and-count |
+| init | **mirror the Python warm start**: `R0` = vendor quaternion, `v0` = leg odometry, `P_vv = (0.25 m/s)^2`, foot anchors at current FK | cold start |
+| budget | **measure, then gate**: `p99(run tick) < 800 us`. Over budget ⇒ decimate PASSIVE arms only, log `N` | fixed decimation; separate thread |
+
+### 13.3 Data flow
+
+```
+run() @ ~1 kHz
+  ├─ predict(acc, gyro, dt=1ms)          every tick, all arms
+  ├─ if (acc|gyro|q changed):            ~500 Hz
+  │     update_feet(), update_gravity()  each measurement counted ONCE
+  ├─ EstSample.v_arm[7][2]  ──────────►  flight recorder (all arms)
+  └─ selected arm ──► lo_sum_/lo_n_ ──►  policy_step() drains at HL fire ──► obs["hl_vel"]
+```
+
+**Invariant:** a passive arm reaches the LOG and nothing else. No shared state between arms,
+no path from a passive arm to `lowcmd`, the safety filter, or the selected estimate. This is
+what makes it safe to run the known-divergent arm C on the robot.
+
+`obs["hl_vel"]` remains the ONLY consumer; the estimate never enters `state_n` (project rule).
+A0 needs no key: its obs carries no base linear velocity, so on A0 every arm is passive.
+
+### 13.4 Changes, by file
+
+| file | change |
+|---|---|
+| `deploy/robots/h1_2/include/hrl/base_state.h` | add `BaseEkf` (fixed-size Eigen, 27-state error), `complementary_velocity()` (arm B), `jacobian_velocity()` + `leg_jacobian()` (arm E). Header-only, `hrl::` namespace, reusing existing `leg_fk`/`foot_site_b` |
+| `deploy/robots/h1_2/include/safety_logger.h` | `EstSample += float v_arm[7][2]`; header + writer emission |
+| `deploy/robots/h1_2/src/State_RLHRL.cpp` | instantiate 7 arms; predict/update per §13.3; fill `EstSample`; route the selected arm into `lo_sum_`/`lo_n_` |
+| `deploy/robots/h1_2/src/State_RLBase.cpp` | same arms, passive, logging only |
+| `deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/*.yaml` | add `base_estimator: legodom` to every HRL deploy config |
+| `deploy/robots/h1_2/test/base_state_estimator_test.cpp` | extend: EKF math against golden vectors |
+| `tests/test_estimator_parity.py` | NEW: window parity, C++ vs Python, on a real session |
+
+Robot-local only. **Never** edit `deploy/include/isaaclab/`.
+
+### 13.5 Test plan (defined before implementation)
+
+| # | test | success criterion |
+|---|---|---|
+| T1 | EKF Jacobians vs finite differences, in C++ | max abs diff < 1e-5 |
+| T2 | **Window parity** on a real session, all 7 arms | c=8 mean within **1e-4 m/s**; session mean within **1e-5 m/s** |
+| T3 | Arm A unchanged | byte-identical `hl_vel_lo_` to pre-change build on the same log |
+| T4 | Config fail-closed | missing key ⇒ abort with a named error; unknown value ⇒ abort listing valid names |
+| T5 | Loop budget | `p99(run tick) < 800 us` on hardware, estimator block reported separately |
+| T6 | Isolation | with arm C forced to NaN, selected estimate, `lowcmd` and safety filter bit-unchanged |
+| T7 | Mutation sensitivity | `scripts/check_test_sensitivity.py` catches a deliberate defect in each new test |
+
+T2 is the gate that makes hardware results interpretable: without it a hardware disagreement
+cannot be attributed between the port and the robot. T3 protects the shipped keeper.
+
+### 13.5b Implementation read-out (2026-08-13)
+
+Landed: `hrl/base_estimators.h` (all arms + `EstimatorBank`), logging, fail-closed config,
+A0 + A1 wiring, `tests/test_estimator_parity.py`, the C++ gate in
+`test/base_state_estimator_test.cpp`, golden fixture in `tests/fixtures/`.
+
+**T2 PASSES for all seven arms at 4e-11 to 1e-7 m/s**, four orders under the 1e-4 bar.
+Three things the implementation forced, none of them anticipated by the spec:
+
+1. **The filter runs in DOUBLE, not float.** `P` spans 1e2 (deliberately inflated position)
+   to 1e-2, so the recursion carries a condition number ~1e4; float32 epsilon predicts ~1e-3
+   relative error and that is exactly what was measured — arms B and E (no covariance
+   recursion) matched at 1e-7 while every EKF arm sat at 2-3e-4, failing the bar on precision
+   alone. `leg_fk` in `base_state.h` is now scalar-templated for this; the float
+   instantiation is the untouched shipped path.
+2. **Offline and online cannot share an initial condition.** The harness warm-starts velocity
+   at sample 0 from arm A's first finite reading — it can look ahead. Online, arm A needs a
+   previous foot position, so the warm start lands one tick later. Contracting arms forget
+   that (B/D/E/F agree to 1e-5 post-settle); **the position-only arms do not** (C, C+grav
+   separate to 2-4e-4), because a divergent filter amplifies any initial difference. The gate
+   therefore primes both sides explicitly from `estimator_parity_v0.txt`, which is what
+   isolates a porting error from a convention difference. That C amplifies it at all is one
+   more independent symptom of the arm that already failed §12's bar.
+3. **Cost, measured: ~20 µs/tick amortized for all seven arms, on the target CPU.** The
+   controller runs on the dev machine and talks to the robot over DDS, so the desktop Ryzen
+   IS the deployment processor — this is not an extrapolation. Breakdown: predict 9 µs every
+   tick, update 20 µs on the ~50% of ticks carrying a fresh DDS sample, 1.5 µs for the
+   kinematics plus arms B and E. Against the 1 ms tick that is ~2% of budget, so the
+   passive-arm decimation fallback is very unlikely to be needed. T5 still wants one live
+   session to confirm the whole `run()` tick under real DDS load.
+
+Deviation from §13.4: the arms live in a **new** `hrl/base_estimators.h` rather than growing
+`base_state.h`, so the shipped leg-odometry path is not even in the same file as the new code.
+
+Not yet done: T5 (on-robot timing), T6 (isolation assertion), T7 (mutation sensitivity for the
+new tests), and a hardware build.
+
+### 13.6 Vocabulary (proposed for `CONTEXT.md`)
+
+Two terms are needed and one earlier usage was wrong.
+
+**Fused base velocity** — a pelvis-velocity estimate that combines the IMU with leg
+kinematics through a filter (arms B-F), as opposed to _Leg odometry_, which is instantaneous
+and unfiltered. _Avoid_: "the estimator" (ambiguous per the existing glossary entry); "EKF"
+(only four of the arms are EKFs).
+
+**Contact-transition loss** — the roughly fixed displacement a _Fused base velocity_ loses
+per step (measured 9-17 mm/step, speed-independent, 4 tape legs), from the stationary-foot
+measurement being applied across touchdown and lift-off, when the foot is not yet or no
+longer stationary. It is a *filter* artifact: _Leg odometry_ does not show it.
+_Avoid_: "rollover" (the glossary reserves that for the shelved WL-D arm-6 reward, a policy
+behaviour); "stance-point error" (the glossary records the point choice as settled and
+irrelevant, and this is about the transition, not the point); "slip" (a ground phenomenon).
+
+### 13.7 Risks
+
+* **Loop budget.** Four 27-state EKFs at 1 kHz is the main unknown; T5 gates it. Fixed-size
+  Eigen throughout, no dynamic allocation in the loop.
+* **Fail-closed breaks old configs by design.** Every HRL deploy config is updated in the same
+  change; any config not updated will refuse to boot. That is the intent, and it is why this
+  is worth an ADR.
+* **NaN columns downstream.** "Log raw" means the offline harness must tolerate NaN from arm
+  C; it already does (`~np.isnan(v).any(axis=1)` everywhere).

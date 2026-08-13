@@ -99,21 +99,34 @@ inline Eigen::Vector3f base_vel_increment(float psi, const Eigen::Vector3f& w_T,
 // encoders of that leg. The shared kinematic core: both consumers below start here and
 // differ only in which POINT of the foot they then evaluate, so there is exactly one copy
 // of the link table in this file.
+// Scalar-templated core. The float instantiation below is the shipped path and is
+// unchanged; base_estimators.h instantiates it at DOUBLE, because an error-state covariance
+// recursion whose P spans 1e2 (inflated position) to 1e-2 carries a condition number ~1e4,
+// where float32 epsilon predicts ~1e-3 relative error -- measured, and enough to break the
+// C++/Python parity bar on its own (doc/hrl/h1_2_ekf_design.md §13.5 T2).
+template <typename S>
+inline void leg_fk_t(const S q[12], int leg, Eigen::Matrix<S, 3, 1>& p,
+                     Eigen::Matrix<S, 3, 3>& R)
+{
+    using V3 = Eigen::Matrix<S, 3, 1>;
+    const S sy = (leg == 0) ? S(1) : S(-1);
+    const S* j = q + 6 * leg;
+    R = Eigen::Matrix<S, 3, 3>(Eigen::AngleAxis<S>(j[0], V3::UnitZ()));
+    p = V3(S(0), sy * S(0.0875), S(-0.1632));
+    p += R * V3(S(0), sy * S(0.0755), S(0));
+    R = R * Eigen::AngleAxis<S>(j[1], V3::UnitY());
+    R = R * Eigen::AngleAxis<S>(j[2], V3::UnitX());
+    p += R * V3(S(0), S(0), S(-0.4));
+    R = R * Eigen::AngleAxis<S>(j[3], V3::UnitY());
+    p += R * V3(S(0), S(0), S(-0.4));
+    R = R * Eigen::AngleAxis<S>(j[4], V3::UnitY());
+    p += R * V3(S(0), S(0), S(-0.02));
+    R = R * Eigen::AngleAxis<S>(j[5], V3::UnitX());
+}
+
 inline void leg_fk(const float q[12], int leg, Eigen::Vector3f& p, Eigen::Matrix3f& R)
 {
-    const float sy = (leg == 0) ? 1.0f : -1.0f;
-    const float* j = q + 6 * leg;
-    R = Eigen::Matrix3f(Eigen::AngleAxisf(j[0], Eigen::Vector3f::UnitZ()));
-    p = Eigen::Vector3f(0.0f, sy * 0.0875f, -0.1632f);
-    p += R * Eigen::Vector3f(0.0f, sy * 0.0755f, 0.0f);
-    R = R * Eigen::AngleAxisf(j[1], Eigen::Vector3f::UnitY());
-    R = R * Eigen::AngleAxisf(j[2], Eigen::Vector3f::UnitX());
-    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
-    R = R * Eigen::AngleAxisf(j[3], Eigen::Vector3f::UnitY());
-    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.4f);
-    R = R * Eigen::AngleAxisf(j[4], Eigen::Vector3f::UnitY());
-    p += R * Eigen::Vector3f(0.0f, 0.0f, -0.02f);
-    R = R * Eigen::AngleAxisf(j[5], Eigen::Vector3f::UnitX());
+    leg_fk_t<float>(q, leg, p, R);
 }
 
 inline float lowest_foot_z(const float q[12])

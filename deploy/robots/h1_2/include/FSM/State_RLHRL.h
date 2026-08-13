@@ -12,6 +12,7 @@
 #include "FSM/FSMState.h"
 #include "isaaclab/envs/mdp/terminations.h"
 #include "hrl/base_state.h"
+#include "hrl/base_estimators.h"
 #include "hrl/goal_space.h"
 #include "hrl/hrl_telemetry.h"
 
@@ -79,6 +80,7 @@ public:
             lo_sum_.setZero();
             lo_n_ = 0;
             lo_prev_valid_ = false;
+            est_bank_.reprime();
             lev0_ = hrl::rz(psi, lev);
             gt_vel0_ = hrl::rz(psi, (env->robot->data.root_quat_w.conjugate()
                                      * highstate_->velocity()) - lev);
@@ -272,6 +274,14 @@ private:
     // rather than four times, and the difference is always same-foot.
     Eigen::Vector3f lo_p_prev_[2];
     bool lo_prev_valid_{false};
+
+    // [ESTIMATOR BENCH] All seven arms run every tick; exactly one (est_arm_, from the
+    // required `base_estimator:` config key) feeds lo_sum_ and therefore obs["hl_vel"]. The
+    // rest are passive: they reach est_sample_ and nothing else — never lowcmd, never the
+    // safety filter, never each other's state. That isolation is what makes it safe to run
+    // arm C here at all, since it is known to diverge on real data (docs/adr/0007).
+    hrl::EstimatorBank est_bank_;
+    int est_arm_{0};   // index into kEstArmNames; 0 = legodom, the shipped path
 #if SAFETY_FILTER
     // run()-thread only: the snapshot the estimator block above just read, held so the
     // flight recorder (same tick, same function) can log it. No lock: both writer and

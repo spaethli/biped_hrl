@@ -12,6 +12,7 @@
 // their include path — building unchanged. Remove this block when reverting.
 #if __has_include("safety_logger.h")
 #  include "safety_logger.h"
+#  include "hrl/base_estimators.h"
 #  define STATE_RLBASE_HAS_SAFETY_LOGGER 1
 #endif
 
@@ -98,6 +99,9 @@ private:
     // (2026-08-12). A0 does not consume it; it exists so the only genuinely-still regime on
     // this robot can be replayed offline against a known v == 0.
     EstSample est_sample_{};
+    // All seven estimator arms, PASSIVE here: A0's obs has no base linear velocity
+    // term, so nothing on this path can consume one. They exist to be logged.
+    hrl::EstimatorBank est_bank_;
 #endif
 };
 

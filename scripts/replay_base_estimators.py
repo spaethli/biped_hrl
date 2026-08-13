@@ -551,6 +551,18 @@ class MeasCfg:
   sigma_rot: float = 2.0e-2    # rad, foot orientation model error              [assumed]
 
 
+def to_world(v_pelvis: np.ndarray, s: Session, pre: dict) -> np.ndarray:
+  """Pelvis-frame arm output -> world, inverting the output conversion in ``run_ekf``.
+
+  Displacement is the E2 metric (drift vs a tape measure), and it only equals the integral
+  of the reported velocity in the WORLD frame: integrating pelvis-frame vx over a walk that
+  turns measures nothing physical. Yaw is unobservable, so the world frame here is "yaw as
+  the vendor filter believes it" -- fine over a straight there-and-back, not over a spin.
+  """
+  v_T = np.einsum("nij,nj->ni", _rot_batch(2, -s.psi), v_pelvis) + np.cross(s.gyro, R_IMU)
+  return np.einsum("nji,nj->ni", pre["C"], v_T)
+
+
 def build_R(J_v: np.ndarray, J_w: np.ndarray, alpha: np.ndarray, cfg: MeasCfg,
             use_ori: bool) -> np.ndarray:
   """Measurement covariance for one sample, BUILT from the kinematics rather than tuned.
@@ -1056,7 +1068,7 @@ def main() -> int:
     span = s.t[seg][-1] - s.t[seg][0]
     print(f"\n-- {label}: {int(seg.sum())} samples, {span:.1f} s")
     print(f"{'arm':14s} {'mean vx':>9s} {'mean vy':>9s} {'std vx':>9s} {'std vy':>9s} "
-          f"{'drift x':>9s} {'drift y':>9s}")
+          f"{'drift x':>9s} {'drift y':>9s} {'disp X':>9s} {'disp Y':>9s} {'|disp|':>9s}")
     for name, v in arms.items():
       ok = seg & ~np.isnan(v).any(axis=1)
       if ok.sum() < 2:
@@ -1064,8 +1076,11 @@ def main() -> int:
         continue
       vv, tt = v[ok], s.t[ok]
       dx = np.trapezoid(vv[:, 0], tt), np.trapezoid(vv[:, 1], tt)
+      w = to_world(v, s, pre)[ok]            # world displacement = the tape-measure metric
+      pw = np.trapezoid(w[:, 0], tt), np.trapezoid(w[:, 1], tt)
       print(f"{name:14s} {vv[:,0].mean():9.4f} {vv[:,1].mean():9.4f} "
-            f"{vv[:,0].std():9.4f} {vv[:,1].std():9.4f} {dx[0]:9.3f} {dx[1]:9.3f}")
+            f"{vv[:,0].std():9.4f} {vv[:,1].std():9.4f} {dx[0]:9.3f} {dx[1]:9.3f} "
+            f"{pw[0]:9.3f} {pw[1]:9.3f} {np.hypot(*pw):9.3f}")
   return 0
 
 

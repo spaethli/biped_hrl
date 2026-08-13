@@ -66,6 +66,18 @@ struct EstSample
     float q[13];    // leg encoders + waist yaw, sdk order, encoder-zero offset APPLIED
     float dq[13];   // the SAME 13 joints' velocities (2026-08-11) -- see note below
     float dpsi;     // waist yaw rate == dq[12]; kept for back-compat with the 08-10 columns
+    // Every estimator arm's PELVIS-frame velocity, vx/vy only (the HL consumes head<2>).
+    // All seven run every tick; exactly one is selected to feed obs["hl_vel"], the rest are
+    // passive and reach this log and nothing else. NaN is written as-is: a diverging arm is
+    // evidence and is never reset (docs/adr/0007). Order is kEstArmNames.
+    float v_arm[7][2];
+};
+
+// Fixed column order for EstSample::v_arm, and the accepted values of the deploy config's
+// `base_estimator:` key. Changing this order silently reinterprets every logged session, so
+// it is a one-way door: append, never reorder.
+static constexpr const char* kEstArmNames[7] = {
+    "legodom", "compl", "ekf", "ekf_grav", "ekf_rot", "jacobian", "ekf_att"
 };
 
 class SafetyLogger
@@ -201,6 +213,9 @@ public:
             for (int i = 0; i < 13; i++) buf_ << ",est_q" << i;
             for (int i = 0; i < 13; i++) buf_ << ",est_dq" << i;
             buf_ << ",est_dpsi";
+            for (int a = 0; a < 7; a++)
+                buf_ << ",est_v_" << kEstArmNames[a] << "_x"
+                     << ",est_v_" << kEstArmNames[a] << "_y";
         }
         buf_ << '\n';
         // Truncate/create the file and write the header now (first entry only).
@@ -271,6 +286,8 @@ public:
             for (int i = 0; i < 13; i++) buf_ << ',' << e.q[i];
             for (int i = 0; i < 13; i++) buf_ << ',' << e.dq[i];
             buf_ << ',' << e.dpsi;
+            for (int a = 0; a < 7; a++)
+                buf_ << ',' << e.v_arm[a][0] << ',' << e.v_arm[a][1];
             buf_ << std::setprecision(4);
         }
         buf_ << '\n';

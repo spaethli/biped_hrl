@@ -4,6 +4,28 @@
 
 Binary: `deploy/robots/h1_2/build/h1_2_ctrl`
 
+**Build** (the controller runs on the dev machine and talks to the robot over DDS, so this
+is a normal local build, not a cross-compile):
+
+```bash
+cd deploy/robots/h1_2/build && cmake .. && make -j8
+```
+
+Standalone CMake project (`project(h1_2_controller)`), not a colcon package — it does not
+build with the rest of `ramlab_ws`. Deps already on this machine: unitree_sdk2 at
+`/opt/unitree_robotics`, iceoryx from ROS Humble, onnxruntime in `deploy/thirdparty/`.
+⚠️ The one thing that must NOT be built here is a **binary with modified safety constants**
+(a temporary `H1_2_TILT_LIMIT` in this dir reached the real robot on 2026-07-23) — hardware
+sessions launch from exactly this path. Ordinary feature builds belong here; threshold
+experiments go in a scratch dir.
+
+Header-only unit tests are built by hand (no test target):
+
+```bash
+cd deploy/robots/h1_2 && g++ -std=c++17 -O2 -Iinclude -I../../include -I/usr/include/eigen3 \
+    test/base_state_estimator_test.cpp -o /tmp/bse_test && (cd . && /tmp/bse_test)
+```
+
 Setup scripts (**source them, don't execute**):
 
 - `source setup_all_mujoco.sh` → `H1_2_DOMAIN_ID=1`, `NETWORK=lo`,

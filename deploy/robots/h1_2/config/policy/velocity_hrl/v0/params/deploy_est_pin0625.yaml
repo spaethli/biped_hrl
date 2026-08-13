@@ -30,6 +30,10 @@ default_joint_pos: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52
 hrl:
   hl_algorithm: learned                         # oracle (analytic V*=command+nominal, no high_level.onnx)
                                                 # | learned (default; needs high_level.onnx)
+  # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
+  # (docs/adr/0007); the other six arms run passively and are logged only.
+  # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
+  base_estimator: legodom
   c: 8                                          # HL period (control steps); HL holds V* between fires
   hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
                                                 # (ignored when hl_algorithm: oracle)

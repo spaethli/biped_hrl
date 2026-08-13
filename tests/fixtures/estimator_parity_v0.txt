@@ -1,0 +1,6 @@
+# Initial condition for the parity gate: arm A's first FINITE pelvis velocity.
+# The offline harness applies this at sample 0 (it can look ahead); the online
+# bank cannot, so the gate primes both sides with it explicitly. Isolating a
+# porting error from that convention is the entire point -- the divergent
+# position-only arm amplifies a one-tick difference to ~1e-3 m/s.
+0.007829848325440035 0.02080395755114949 0.0028938507576351433
