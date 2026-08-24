@@ -33,6 +33,7 @@ from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.utils.lab_api.string import resolve_matching_names_values
 
 from ..runner import VelocityOnPolicyRunner
+from . import base_estimators
 from .goal_space import build_goal_space, init_goal_buffer
 from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 from .state_noise import GoalStateNoise, HlVelJitter
@@ -279,25 +280,39 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # which sim reproduces). Ignored unless hl_vel_source='leg_odom'.
     self.hl_vel_residual = HlVelJitter(train_cfg.get("hl_vel_residual"), env.num_envs, device)
     self.hl_vel_source: str = train_cfg.get("hl_vel_source", "state")
-    if self.hl_vel_source not in ("state", "leg_odom"):
-      raise ValueError(f"hl_vel_source must be 'state' or 'leg_odom', got {self.hl_vel_source!r}")
-    if self.hl_vel_source == "leg_odom":
+    _valid_sources = ("state", "leg_odom") + base_estimators.ARM_NAMES
+    if self.hl_vel_source not in _valid_sources:
+      raise ValueError(f"hl_vel_source must be one of {_valid_sources}, got {self.hl_vel_source!r}")
+    if self.hl_vel_source != "state":
       if not self.hl_obs_vel:
-        raise ValueError("hl_vel_source='leg_odom' requires hl_obs_vel=True (obs['hl_vel'] "
-                         "is never read otherwise, so the estimator would be a silent no-op).")
+        raise ValueError(f"hl_vel_source={self.hl_vel_source!r} requires hl_obs_vel=True "
+                         "(obs['hl_vel'] is never read otherwise, so the estimator would be "
+                         "a silent no-op).")
       if self.hl_vel_jitter.enable:
-        raise ValueError("hl_vel_source='leg_odom' and hl_vel_jitter are the two ARMS of the "
-                         "WL-F comparison, not composable: enabling both stacks exogenous "
-                         "noise on the endogenous estimator and makes neither measurable.")
+        raise ValueError(f"hl_vel_source={self.hl_vel_source!r} and hl_vel_jitter are ARMS "
+                         "of the WL-F comparison, not composable: enabling both stacks "
+                         "exogenous noise on the endogenous estimator and makes neither "
+                         "measurable.")
       if self.hl_vel_residual.enable and not any(
         (self.hl_vel_residual.jitter_std != 0).tolist() + (self.hl_vel_residual.bias != 0).tolist()
       ):
         raise ValueError("hl_vel_residual is enabled but every magnitude is 0 — a silent "
                          "no-op that would still be recorded in agent.yaml as 'residual on'.")
-      if not hasattr(env.unwrapped, "leg_odom"):
-        raise ValueError("hl_vel_source='leg_odom' needs the env's per-substep leg-odometry "
-                         "metrics term (config/h1_2_a1/env_cfgs.py). Missing here, which "
-                         "means the estimator would silently read zeros forever.")
+      if self.hl_vel_source == "leg_odom":
+        if not hasattr(env.unwrapped, "leg_odom"):
+          raise ValueError("hl_vel_source='leg_odom' needs the env's per-substep "
+                           "leg-odometry metrics term (config/h1_2_a1/env_cfgs.py). Missing "
+                           "here, which means the estimator would silently read zeros forever.")
+      else:
+        # The six base_estimators.py arms (WL-F redux, 2026-08-24) share one lazily-
+        # activated bank term -- activate() is what actually constructs the (possibly
+        # expensive, EKF) filter state, so runs using 'state'/'leg_odom' never pay for it.
+        if not hasattr(env.unwrapped, "estimator_bank"):
+          raise ValueError(f"hl_vel_source={self.hl_vel_source!r} needs the env's "
+                           "per-substep estimator-bank metrics term "
+                           "(config/h1_2_a1/env_cfgs.py). Missing here, which means the "
+                           "estimator would silently read zeros forever.")
+        env.unwrapped.estimator_bank.activate(self.hl_vel_source)
     elif self.hl_vel_residual.enable:
       raise ValueError("hl_vel_residual only applies on top of the simulated estimator; with "
                        f"hl_vel_source={self.hl_vel_source!r} it is a silent no-op. Use "
@@ -547,19 +562,23 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     ``HlVelJitter`` if enabled. ``v_est`` is ``state_n`` at the fire and
     ``achieved + noise_off`` after the step.
 
-    ``leg_odom`` — the simulated estimator. At the fire it CLOSES the window that just
-    ended and latches the c-average; for the rest of the window that latched value is held,
-    which is both what the C++ does (``hl_vel_lo_`` is written only at the fire,
-    ``State_RLHRL.cpp:444``) and what ``HlVelJitter``'s one-sample-per-window convention
-    does — so the TD3 buffer's ``next_s`` stays the value the actor actually conditioned on.
-    ``v_est`` is ignored: the estimator reads the robot's legs, not the goal state.
+    ``leg_odom`` / the six ``base_estimators.py`` arms — a simulated estimator. At the
+    fire it CLOSES the window that just ended and latches the c-average; for the rest of
+    the window that latched value is held, which is both what the C++ does (``hl_vel_lo_``
+    is written only at the fire, ``State_RLHRL.cpp:444``) and what ``HlVelJitter``'s
+    one-sample-per-window convention does — so the TD3 buffer's ``next_s`` stays the value
+    the actor actually conditioned on. ``v_est`` is ignored: the estimator reads the
+    robot's legs (and, for the EKF/compl arms, the synthesized IMU), not the goal state.
 
     Returns a fresh tensor in both branches. The ``state`` branch must not mutate its
-    input (a VIEW of ``state_n``); the ``leg_odom`` branch must not hand out the
+    input (a VIEW of ``state_n``); the estimator branches must not hand out the
     accumulator's own storage. ``tests/test_hl_vel_jitter_isolation.py`` guards both.
     """
     if self.hl_vel_source == "leg_odom":
       v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()
+      return self.hl_vel_residual(v)
+    if self.hl_vel_source in base_estimators.ARM_NAMES:
+      v = (uenv.estimator_bank.fire() if fire else uenv.estimator_bank.value).clone()
       return self.hl_vel_residual(v)
     return self.hl_vel_jitter(v_est[:, 0:2])
 

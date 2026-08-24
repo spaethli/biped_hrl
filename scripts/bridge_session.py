@@ -35,10 +35,12 @@ import argparse
 import os
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+RESTAND_FALL_HEIGHT = 0.9  # matches deploy_gate_analyzer.FALL_HEIGHT
 BRIDGE = '/opt/unitree_mujoco/simulate/build/unitree_mujoco'
 SETUP = Path.home() / 'ramlab_ws' / 'setup_all_mujoco.sh'
 CTRL_DIR = REPO / 'deploy' / 'robots' / 'h1_2' / 'build'
@@ -72,16 +74,17 @@ def setup_env():
   return env
 
 
-def release_band(key='9'):
-  """Toggle the bridge's elastic band: a GLFW key on the mujoco window, so XTEST it."""
-  try:
-    from Xlib import display, X
-    from Xlib.ext import xtest
-  except ImportError:
-    print('[band] python-xlib not installed -- band NOT released (pip install python-xlib)')
-    return False
-  d = display.Display()
-
+def _focus_mujoco_window(d, X, label):
+  """Focus the mujoco window WITHOUT raising it (2026-08-04): XTEST keys are GLFW key
+  callbacks, which only fire for the FOCUSED window, but a forced raise would steal the
+  desktop during an unattended run. Returns the window on success, None (having already
+  printed why) on failure -- the caller must treat None as "key NOT sent", not retry blind:
+  the toggle/reset is otherwise silent (no log line anywhere from the bridge itself), so a
+  swallowed keypress used to produce a session that looked perfect -- correct FSM
+  transitions, CSV written, commands held -- while the robot hung on the harness the whole
+  time. An ICONIFIED window is unmapped and cannot hold focus, which is why this asserts
+  focus landed rather than trusting the XTEST call to have worked.
+  """
   def walk(win, out):
     try:
       if win.get_wm_name():
@@ -98,36 +101,125 @@ def release_band(key='9'):
   walk(d.screen().root, wins)
   hit = next((w for n, w in wins if 'mujoco' in n.lower() or 'unitree' in n.lower()), None)
   if hit is None:
-    print('[band] no mujoco window found -- band NOT released')
-    return False
-  # Focus WITHOUT raising (2026-08-04). The band toggle is a GLFW key callback
-  # (main.cc:622-631), and GLFW only sees keys for the FOCUSED window, so XTEST needs
-  # focus -- but not a raise. Dropping the forced raise lets the window sit behind
-  # everything else during an unattended run. An ICONIFIED window still cannot work: it is
-  # unmapped, so it cannot hold focus, which is why the assert below exists.
+    print(f'[{label}] no mujoco window found -- key NOT sent')
+    return None
   hit.set_input_focus(X.RevertToParent, X.CurrentTime)
   d.sync()
   time.sleep(0.4)
-  # Assert focus actually landed. Without this the function returned True having proved
-  # nothing: the toggle is silent (no log line anywhere), so a swallowed keypress produced
-  # a session that looked perfect -- correct FSM transitions, CSV written, commands held --
-  # with the robot hanging on the harness for the entire run.
   focused = d.get_input_focus().focus
   try:
     ok = focused.id == hit.id or focused.query_tree().parent.id == hit.id
   except Exception:
     ok = False
   if not ok:
-    print('[band] FOCUS DID NOT LAND on the mujoco window -- band NOT released. '
+    print(f'[{label}] FOCUS DID NOT LAND on the mujoco window -- key NOT sent. '
           'Is the window iconified? It must be mapped (backgrounded is fine).')
+    return None
+  return hit
+
+
+def release_band(key='9'):
+  """Toggle the bridge's elastic band: a GLFW key on the mujoco window, so XTEST it. NB
+  this is a TOGGLE, not a release: sending it twice re-attaches the band. The analyzer's
+  travel check is the backstop that catches a failed release (and every other cause)."""
+  try:
+    from Xlib import display, X
+    from Xlib.ext import xtest
+  except ImportError:
+    print('[band] python-xlib not installed -- band NOT released (pip install python-xlib)')
+    return False
+  d = display.Display()
+  hit = _focus_mujoco_window(d, X, 'band')
+  if hit is None:
     return False
   code = d.keysym_to_keycode(ord(key))
   xtest.fake_input(d, X.KeyPress, code); d.sync(); time.sleep(0.05)
   xtest.fake_input(d, X.KeyRelease, code); d.sync()
-  # NB this is a TOGGLE, not a release: sending it twice re-attaches the band. The
-  # analyzer's travel check is the backstop that catches that (and every other cause).
   print(f'[band] released (key {key}, focus verified)')
   return True
+
+
+def reset_sim():
+  """Backspace on the mujoco window -> `mj_resetData(m, d); mj_forward(m, d)`
+  (main.cc:632-634, `user_key_cb`): an actual physics-state reset to the model's initial
+  keyframe, not a joint-position hold. This is what makes restand-after-a-real-fall work at
+  all -- FixStand ('i') only drives a joint configuration, it cannot move the floating base,
+  so it cannot recover a robot that is actually lying on the ground (confirmed 2026-08-24:
+  a p->i->h retry loop against a face-planted robot cycled for 150s at gt_h~0.15 without
+  ever standing back up). Does NOT touch the elastic band's `enable_` state -- a separate
+  global in the bridge process, untouched by mj_resetData -- so a caller that already
+  released the band must re-attach it (another `release_band()` toggle) before this leaves
+  the robot self-supporting; otherwise the reset robot just topples again during FixStand,
+  same as it would at a fresh session start with `--no-band`.
+  """
+  try:
+    from Xlib import display, X, XK
+    from Xlib.ext import xtest
+  except ImportError:
+    print('[reset] python-xlib not installed -- sim NOT reset (pip install python-xlib)')
+    return False
+  d = display.Display()
+  hit = _focus_mujoco_window(d, X, 'reset')
+  if hit is None:
+    return False
+  code = d.keysym_to_keycode(XK.string_to_keysym('BackSpace'))
+  xtest.fake_input(d, X.KeyPress, code); d.sync(); time.sleep(0.05)
+  xtest.fake_input(d, X.KeyRelease, code); d.sync()
+  print('[reset] sim reset (Backspace, focus verified)')
+  return True
+
+
+class FallWatcher:
+  """Polls a growing `<base>_hrl.csv` for `gt_h` (sim-bridge ground-truth height,
+  from `hrl::Telemetry` -- reads 0 on real hardware, which is what keeps this class
+  sim-bridge-only structurally, not just by convention) dropping below
+  RESTAND_FALL_HEIGHT, and flags `fallen` so the caller can restand before the next
+  phase. Opt-in only (bridge_session.py's default behaviour is unchanged when this
+  is never constructed): recovery buys per-phase evidence after a fall, it does not
+  touch deploy_gate_analyzer.py's fall gate, which stays blocking regardless.
+  """
+
+  def __init__(self, hrl_csv: Path, poll_s: float = 0.5):
+    self.hrl_csv = hrl_csv
+    self.poll_s = poll_s
+    self.fallen = threading.Event()
+    self._stop = threading.Event()
+    self._gt_h_idx = None
+    self._thread = threading.Thread(target=self._run, daemon=True)
+
+  def start(self):
+    self._thread.start()
+
+  def stop(self):
+    self._stop.set()
+    self._thread.join(timeout=2)
+
+  def _run(self):
+    while not self._stop.is_set():
+      try:
+        self._poll_once()
+      except Exception:
+        pass  # a torn read on a mid-flush file is expected; just retry next tick
+      time.sleep(self.poll_s)
+
+  def _poll_once(self):
+    if not self.hrl_csv.exists():
+      return
+    with open(self.hrl_csv) as f:
+      lines = f.read().splitlines()
+    if len(lines) < 2:
+      return
+    if self._gt_h_idx is None:
+      header = lines[0].split(',')
+      if 'gt_h' not in header:
+        return
+      self._gt_h_idx = header.index('gt_h')
+    row = lines[-1].split(',')
+    if len(row) <= self._gt_h_idx:
+      return  # last line torn mid-flush; the next poll re-reads a complete one
+    gt_h = float(row[self._gt_h_idx])
+    if gt_h < RESTAND_FALL_HEIGHT:
+      self.fallen.set()
 
 
 def main():
@@ -140,6 +232,16 @@ def main():
   ap.add_argument('--stand-s', type=float, default=6.0, help='FixStand settle before takeover')
   ap.add_argument('--no-band', action='store_true', help='leave the elastic band attached')
   ap.add_argument('--no-analyze', action='store_true')
+  ap.add_argument('--auto-restand', action='store_true',
+                  help='sim-bridge only, default off. Poll <base>_hrl.csv\'s gt_h; on a '
+                       f'fall (gt_h < {RESTAND_FALL_HEIGHT}) hold zero command briefly, '
+                       'then Backspace (a real mj_resetData physics reset, not a joint '
+                       'hold -- FixStand alone cannot recover a robot actually lying on '
+                       'the ground) and resume, before the next command phase, so one '
+                       'fall does not cost every later phase. The policy is never taken '
+                       'out of control (no FSM cycling). Recovery buys per-phase '
+                       'evidence, not forgiveness -- it does not touch '
+                       'deploy_gate_analyzer.py, so any fall anywhere still means NO-GO.')
   ap.add_argument('--deploy-cfg', default=None,
                   help='override H1_2_DEPLOY_CFG (default: whatever setup_all_mujoco.sh '
                        'exports, deploy.yaml). Filename must exist under the policy_dir\'s '
@@ -186,17 +288,43 @@ def main():
     os.write(fout, k.encode())
     print(f'[{time.strftime("%T")}] key {k!r}  ({label})')
 
-  def hold(k, secs, label):
+  def hold(k, secs, label, watcher=None):
     print(f'[{time.strftime("%T")}] hold {k!r} {secs}s  ({label})')
     end = time.time() + secs
     while time.time() < end:      # 50 Hz re-send: beats the 80 ms _key timeout
+      if watcher is not None and watcher.fallen.is_set():
+        print(f'[{time.strftime("%T")}] fall detected mid-hold -- cutting this phase short')
+        return
       os.write(fout, k.encode())
       time.sleep(0.02)
 
+  policy_key = 'o' if args.policy == 'a0' else 'h'
+  restand_count = [0]
+
+  def restand():
+    # 0 (settle) -> Backspace (mj_resetData, a real physics reset -- see reset_sim()) ->
+    # settle -> resume. The policy is NEVER taken out of control (no p/i/band cycling):
+    # it stayed in State_RLHRL the whole time, so a fresh reset pose under a held zero
+    # command is just a stand it -- the same thing a clean cmd-0 hold does at session
+    # start. NOT p -> i -> policy re-entry: FixStand only holds a joint configuration, it
+    # cannot move the floating base, so it cannot recover a robot that is actually lying on
+    # the ground -- confirmed 2026-08-24, that approach cycled 15x over 150s at gt_h~0.15
+    # and never stood up. hrl::Telemetry keeps logging through the reset (no FSM re-entry
+    # here, so `entry` does not bump -- the reset is invisible to it by design, same as any
+    # other mid-episode teleport), and `t`/`t_wall` just show the same discontinuity a
+    # cmd-0 hold would.
+    restand_count[0] += 1
+    print(f'[{time.strftime("%T")}] [restand] #{restand_count[0]}: 0 -> reset -> resume')
+    hold('0', 3.0, 'zero cmd before reset (auto-restand)')
+    reset_sim()
+    time.sleep(2)
+    watcher.fallen.clear()
+
+  watcher = None
   try:
     press('i', 'FixStand')
     time.sleep(args.stand_s)
-    press('o' if args.policy == 'a0' else 'h', f'policy takeover ({args.policy})')
+    press(policy_key, f'policy takeover ({args.policy})')
     time.sleep(3)
     # FAIL-CLOSED (2026-08-06). release_band() already verifies focus landed and returns
     # False when it did not -- but the return value used to be discarded, so a failed
@@ -213,12 +341,22 @@ def main():
         'Keep the mujoco window mapped and do not click away while the session starts '
         '(the release needs focus for ~0.5 s). Re-run this session; pass --no-band only '
         'if you deliberately want a harnessed run.')
+    if args.auto_restand:
+      # gt_h only exists in <base>_hrl.csv (hrl::Telemetry, A1 only) and only reads
+      # meaningfully on the sim bridge -- see FallWatcher's docstring. For an A0 session
+      # the file never appears, so the watcher polls harmlessly and never fires.
+      watcher = FallWatcher(Path(f'{base}_hrl.csv'))
+      watcher.start()
     for item in args.seq.split(','):
       k, secs = item.split(':')
-      hold(k, float(secs), 'commanded')
+      hold(k, float(secs), 'commanded', watcher=watcher)
+      if watcher is not None and watcher.fallen.is_set():
+        restand()
     press('p', 'Passive')
     time.sleep(2)
   finally:
+    if watcher is not None:
+      watcher.stop()
     for p in (ctrl, bridge):
       p.send_signal(signal.SIGINT)
     time.sleep(2)
@@ -229,6 +367,10 @@ def main():
     fifo.unlink(missing_ok=True)
     for f in logs.values():
       f.close()
+  if restand_count[0]:
+    print(f'[restand] {restand_count[0]} recovery/recoveries this session -- the run is '
+          f'still NO-GO if any phase fell (recovery buys per-phase evidence, not '
+          f'forgiveness); see deploy_gate_analyzer.py output above.')
 
   print(f'[done] {base}.csv')
   if not args.no_analyze:

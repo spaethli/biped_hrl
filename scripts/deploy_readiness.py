@@ -285,6 +285,8 @@ def run_bridge_arm(policy, tag, args, deploy_cfg=None, results=None, arm=None) -
          "--seq", args.seq, "--tag", tag, "--no-analyze"]
   if deploy_cfg:
     cmd += ["--deploy-cfg", deploy_cfg]
+  if getattr(args, "auto_restand", False) and arm == "candidate":
+    cmd += ["--auto-restand"]
   rc, out = run(cmd)
   # Surface the elastic-band release (2026-08-06). bridge_session prints exactly one
   # `[band] ...` line and this function used to keep only the `[log]` path, so the single
@@ -566,6 +568,14 @@ def main() -> int:
                        "h1_2_ctrl binary, deploy.yaml, scene, --seq, --bridge-cfg) and "
                        "never expires by time, so use this only when something the "
                        "fingerprint cannot see has moved.")
+  ap.add_argument("--auto-restand", action="store_true",
+                  help="pass through to bridge_session.py for the CANDIDATE arm only "
+                       "(never the A0 control). Default off, matching bridge_session.py's "
+                       "own default. On a fall, holds zero command then Backspace-resets "
+                       "the sim (mj_resetData -- FixStand cannot recover a robot actually "
+                       "lying down) before the next phase, so one fall does not cost "
+                       "every later phase's evidence -- does not touch stage_analyze's "
+                       "fall gate, which stays blocking.")
   ap.add_argument("--no-stage-policy", dest="stage_policy", action="store_false",
                   help="score whatever is ALREADY in --policy-dir/exported instead of "
                        "staging --checkpoint-file into it. Use to validate an export you "

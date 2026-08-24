@@ -29,7 +29,7 @@ Normalization:
 
 Usage:
   # A0 vs two A1 variants, default 8-axis comparator, A0 as baseline (first file)
-  python scripts/plot_radar.py logs/a0.log logs/a1_v1.log logs/a1_v2.log \\
+  python scripts/plot_radar.py logs/deploy_safety/a0.log logs/deploy_safety/aa1_v1.log logs/deploy_safety/aa1_v2.log \\
       --labels A0,A1-v1,A1-v2
 
   # thesis figure: vector output, explicit baseline, custom title
@@ -41,7 +41,7 @@ separating series past 3 (see dataviz palette notes), which is why every run als
 distinct line style + marker; past 8 runs the fixed 8-slot categorical palette runs out of
 slots and the script refuses rather than cycling hues.
 
-Writes PNG (default; --format pdf/svg for LaTeX-ready vector output) next to the first
+Writes pdf (default; --format png/svg for LaTeX-ready vector output) next to the first
 input file as `<first_input_stem>_radar.<ext>`, unless --out overrides it.
 """
 
@@ -173,7 +173,7 @@ def main() -> int:
   ap.add_argument("--informative", help="comma-separated custom metric keys to classify "
                    "as descriptive-only (plotted, not scored)")
   ap.add_argument("--theme", choices=["light", "dark"], default="light")
-  ap.add_argument("--format", choices=["png", "pdf", "svg"], default="png")
+  ap.add_argument("--format", choices=["png", "pdf", "svg"], default="pdf")
   ap.add_argument("--out", help="output file path (default: <first_input_stem>_radar.<ext> "
                    "next to the first input)")
   ap.add_argument("--title")

@@ -28,6 +28,7 @@ from src.tasks.velocity.rl.hrl.goal_space import (
   DEFAULT_GOAL_COMPONENTS,
   goal_dim as compute_goal_dim,
 )
+from src.tasks.velocity.rl.hrl.base_estimators import EstimatorBank
 from src.tasks.velocity.rl.hrl.leg_odom import leg_odometry
 
 
@@ -91,6 +92,15 @@ def unitree_h1_2_flat_a1_env_cfg(
   # ``leg_odom_err`` metric stays available on every arm — including the HlVelJitter
   # comparator, which is what makes the two arms scorable against each other.
   cfg.metrics["leg_odom_err"] = MetricsTermCfg(func=leg_odometry, per_substep=True)
+  # WL-F redux (2026-08-24): the six base_estimators.py arms (compl/ekf/ekf_grav/ekf_rot/
+  # jacobian/ekf_att), training-side counterparts to the deploy bench's arms B-F. Registered
+  # unconditionally like leg_odometry above, but UNLIKE it does no work and constructs no
+  # filter state until HierarchicalRunner calls ``env.estimator_bank.activate(hl_vel_source)``
+  # -- see EstimatorBank's docstring for why: the four EKF variants are a batched Kalman
+  # filter (persistent [N, up to 27, 27] covariance), and running all six regardless of
+  # ``hl_vel_source`` would tax every A1 run, including ``state``/``leg_odom`` baselines that
+  # never read this bank's output.
+  cfg.metrics["estimator_bank"] = MetricsTermCfg(func=EstimatorBank, per_substep=True)
     # Upweight velocity tracking in the reward the HL optimizes (A1 only; A0 untouched).
   # With weight 1.0, tracking (~+0.6/ep) is swamped by the penalty terms (joint_pos_limits
   # ~-3.6, action_rate ~-3.4), so the learned HL's dominant gradient is "reduce penalties"

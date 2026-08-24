@@ -1,5 +1,5 @@
 {
-  "staged_at": "2026-08-12T09:10:17+02:00",
+  "staged_at": "2026-08-24T10:25:34+02:00",
   "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-08-05_05-52-23_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42/model_10000.pt",
   "source_run": "2026-08-05_05-52-23_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42",
   "md5": {
