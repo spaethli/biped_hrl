@@ -83,9 +83,20 @@ cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 
 SEED=${SEED:-42}
 HL_VEL_SOURCE=${HL_VEL_SOURCE:-state}
-LL_STAND_STILL=${LL_STAND_STILL:-0.0}
 LL_CADENCE_COEF=${LL_CADENCE_COEF:-0.5}
 HL_COT=${HL_COT:-0.2}
+FIX0P8=${FIX0P8:-False}
+LL_STAND_STILL=${LL_STAND_STILL:-1.0}
+LL_ANGMOM=${LL_ANGMOM:-0.025}
+LL_FOOTSLIP=${LL_FOOTSLIP:-0.25}
+LL_FOOTCLEAR=${LL_FOOTCLEAR:-1.0}
+LL_JOINT_ACC=${LL_JOINT_ACC:-2.5e-7}
+LL_JOINT_LIMITS=${LL_JOINT_LIMITS:-10.0}
+LL_SOFT_LANDING=${LL_SOFT_LANDING:-1e-3}
+LL_BODY_ANG_VEL=${LL_BODY_ANG_VEL:-0.05}
+POSTURE_ALL_JOINTS=${POSTURE_ALL_JOINTS:-True}
+LL_ACTION_RATE=${LL_ACTION_RATE:-0.05}
+ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
 LL_ENERGY=${LL_ENERGY:-0.05}
 NUM_ENVS=${NUM_ENVS:-4096}
 MAX_ITER=${MAX_ITER:-10001}
@@ -109,23 +120,75 @@ if [[ "$HL_VEL_SOURCE" != "state" ]]; then
   VS_TAG="_${TAG}"
 fi
 
-# 0.0/off is tagless, matching train_h1_2_a1a_LL_rewards.sh's convention for this exact flag.
+if [[ "$FIX0P8" == "True" ]]; then
+  CAD_FLAG="--agent.hl-cadence True --agent.hl-cadence-source random --agent.cadence-period-range 0.8,0.8 --agent.hl-cot-coef 0.0"
+  CAD_TAG="_fix0p8"
+else
+  CAD_FLAG="--agent.hl-cadence True --agent.hl-cadence-source hl --agent.hl-cot-coef ${HL_COT}"
+  CAD_TAG="_cot$(echo $HL_COT | tr '.' 'p')"
+fi
+
+# ll_cadence_coef is ALWAYS tagged with its value (arm 1's own lever).
+CADENCE_COEF_TAG="_cad$(echo $LL_CADENCE_COEF | tr '.' 'p')"
+
+# Arm 3/4 mirror levers: 0.0 = off/tagless (byte-identical to the batch baseline).
 SS_FLAG=""; SS_TAG=""
 awk "BEGIN{exit !($LL_STAND_STILL > 0)}" && SS_FLAG="--agent.ll-stand-still-coef ${LL_STAND_STILL}" \
   && SS_TAG="_standstill$(echo $LL_STAND_STILL | tr '.' 'p')"
 
-# Cadence/CoT/energy: same construction as train_h1_2_a1a_LL_rewards.sh, but the DEFAULTS
-# here are the hardware baseline's values (0.5 / 0.2 / 0.05), not that script's bare
-# defaults, so a plain `sbatch` call with no overrides reproduces the deployed run.
-CAD_FLAG="--agent.hl-cadence True --agent.hl-cadence-source hl --agent.hl-cot-coef ${HL_COT}"
-CAD_TAG="_cot$(echo $HL_COT | tr '.' 'p')"
-CADENCE_COEF_TAG="_cad$(echo $LL_CADENCE_COEF | tr '.' 'p')"
+AM_FLAG=""; AM_TAG=""
+awk "BEGIN{exit !($LL_ANGMOM > 0)}" && AM_FLAG="--agent.ll-angmom-coef ${LL_ANGMOM}" \
+  && AM_TAG="_angmom$(echo $LL_ANGMOM | tr '.' 'p')"
+
+FS_FLAG=""; FS_TAG=""
+awk "BEGIN{exit !($LL_FOOTSLIP > 0)}" && FS_FLAG="--agent.ll-footslip-coef ${LL_FOOTSLIP}" \
+  && FS_TAG="_footslip$(echo $LL_FOOTSLIP | tr '.' 'p')"
+
+FC_FLAG=""; FC_TAG=""
+awk "BEGIN{exit !($LL_FOOTCLEAR > 0)}" && FC_FLAG="--agent.ll-footclear-coef ${LL_FOOTCLEAR}" \
+  && FC_TAG="_footclear$(echo $LL_FOOTCLEAR | tr '.' 'p')"
 
 EN_FLAG=""; EN_TAG=""
 awk "BEGIN{exit !($LL_ENERGY > 0)}" && EN_FLAG="--agent.ll-energy-coef ${LL_ENERGY}" \
   && EN_TAG="_energy$(echo $LL_ENERGY | tr '.' 'p')"
 
-RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${EN_TAG}${VS_TAG}${SS_TAG}_s${SEED}"
+# WL-D (2026-07-24): joint_acc_l2 mirror. Tagless at 0.0/off.
+JA_FLAG=""; JA_TAG=""
+awk "BEGIN{exit !($LL_JOINT_ACC > 0)}" && JA_FLAG="--agent.ll-joint-acc-coef ${LL_JOINT_ACC}" \
+  && JA_TAG="_jacc$(echo $LL_JOINT_ACC | tr '.' 'p')"
+
+# WL-D: joint_pos_limits mirror (the largest measured A1-vs-A0 reward-gap term).
+JL_FLAG=""; JL_TAG=""
+awk "BEGIN{exit !($LL_JOINT_LIMITS > 0)}" && JL_FLAG="--agent.ll-joint-limits-coef ${LL_JOINT_LIMITS}" \
+  && JL_TAG="_jlim$(echo $LL_JOINT_LIMITS | tr '.' 'p')"
+
+# WL-D: soft_landing mirror (first-contact impact-force penalty).
+SL_FLAG=""; SL_TAG=""
+awk "BEGIN{exit !($LL_SOFT_LANDING > 0)}" && SL_FLAG="--agent.ll-soft-landing-coef ${LL_SOFT_LANDING}" \
+  && SL_TAG="_softland$(echo $LL_SOFT_LANDING | tr '.' 'p')"
+
+# WL-D: body_angular_velocity_penalty mirror (torso xy angular velocity).
+BAV_FLAG=""; BAV_TAG=""
+awk "BEGIN{exit !($LL_BODY_ANG_VEL > 0)}" && BAV_FLAG="--agent.ll-body-ang-vel-coef ${LL_BODY_ANG_VEL}" \
+  && BAV_TAG="_bodyangvel$(echo $LL_BODY_ANG_VEL | tr '.' 'p')"
+
+# WL-D combo batch (2026-07-23): ll_action_rate_coef override (smoothness lever / A0
+# action-rate mirror). Default 0.02 is the rl_cfg default, so only tag on divergence.
+AR_FLAG=""; AR_TAG=""
+awk "BEGIN{exit !($LL_ACTION_RATE != 0.02)}" && AR_FLAG="--agent.ll-action-rate-coef ${LL_ACTION_RATE}" \
+  && AR_TAG="_ar$(echo $LL_ACTION_RATE | tr '.' 'p')"
+
+# Arm 5: the ankle-roll posture anchor (weight fixed at 4.0 via the rl_cfg default).
+ANKLE_FLAG=""; ANKLE_TAG=""
+[[ "$ANKLE_ANCHOR" == "True" ]] && ANKLE_FLAG="--agent.ll-posture-anchor-ankle-roll True" \
+  && ANKLE_TAG="_ankle"
+
+# WL-D: extend the LL posture anchor to every joint (supersedes the subset + ankle_roll).
+PAJ_FLAG=""; PAJ_TAG=""
+[[ "$POSTURE_ALL_JOINTS" == "True" ]] && PAJ_FLAG="--agent.ll-posture-all-joints True" \
+  && PAJ_TAG="_postureall"
+
+RUN_NAME="a1a${CAD_TAG}${CADENCE_COEF_TAG}${SS_TAG}${AM_TAG}${FS_TAG}${FC_TAG}${EN_TAG}${JA_TAG}${JL_TAG}${SL_TAG}${BAV_TAG}${AR_TAG}${ANKLE_TAG}${PAJ_TAG}${VS_TAG}_s${SEED}"
 
 echo "[a1-hlvel] RUN=$RUN_NAME  hl_vel_source=$HL_VEL_SOURCE  ll_stand_still=$LL_STAND_STILL  cadence_coef=$LL_CADENCE_COEF  hl_cot=$HL_COT  energy=$LL_ENERGY  seed=$SEED"
 
@@ -138,6 +201,7 @@ python scripts/train.py Unitree-H1_2-Flat-A1 \
     $EN_FLAG \
     $VS_FLAG \
     $SS_FLAG \
+    $AM_FLAG $FS_FLAG $FC_FLAG $JA_FLAG $JL_FLAG $SL_FLAG $BAV_FLAG $AR_FLAG $ANKLE_FLAG $PAJ_FLAG \
     --agent.run-name ${RUN_NAME}
 
 wandb sync --sync-all
