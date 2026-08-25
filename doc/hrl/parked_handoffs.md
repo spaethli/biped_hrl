@@ -168,9 +168,11 @@ the best battery arm). Per CLAUDE.md: analysis → spec → approval → impleme
    floor). And fixed period is falsified as an *action-rate* lever: pinning at A0's own
    0.6 s clock still leaves +39% over A0.
 
-**Implementation gotcha:** `cadence_period_range` cannot be set from the CLI — the tyro
-tuple override raises "Unrecognized options" under `--agent` (confirmed 2026-07-03). Range
-changes are code edits to the default.
+**Implementation gotcha — RETRACTED 2026-08-25.** `cadence_period_range` *can* be set from
+the CLI, with Python syntax: `--agent.cadence-period-range "(0.625,0.625)"`. Only the
+space-separated form (`... 0.625 0.625`) raises "Unrecognized options", which is what the
+2026-07-03 note actually hit; mjlab sets `tyro.conf.UsePythonSyntaxForLiteralCollections`.
+Range changes need no code edit, so cadence arms can run in parallel from one tree.
 
 **Do not spend arms on:** raising `ll_cadence_coef` to get bigger steps (tested — stride
 0.352 → 0.438 → 0.496 while `action_rate` went 1.13 → 1.21 → 1.28 and CoT 0.897 → 1.413);

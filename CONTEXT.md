@@ -183,3 +183,47 @@ accruing negative reward). The reason A1 uses `fell_over = time_out` (a truncati
 bootstraps) instead of A0's true terminal. An all-positive (exp) intrinsic would remove
 it — the motivation for the planned exp follow-up.
 _Avoid_: collapse (broader — also covers std blowup / coverage collapse).
+
+**Smoothness**:
+Not a scalar, and never reported as one: a family of quantities indexed by three
+coordinates — *where* in the chain (commanded → torque → realized joint → body), *which*
+statistic (mean = sustained agitation, p95 = impact severity), and *which* _Regime_. The
+coordinates are load-bearing because they rank policies oppositely: one arm was best of 13
+on commanded action rate and worst of 13 on realized `jacc_legs_p95`.
+_Avoid_: "smoothness" bare in any claim (always name the coordinate); "action rate" as a
+synonym (that is one cell of the table); "jitter" unqualified (say _Action jitter_ or _DoF
+position jitter_ — they are different rungs of the chain).
+
+**Action jitter**:
+The third time-derivative of the *commanded* joint targets, `d³q_des/dt³` in rad/s³,
+legs-only. The primary smoothness quantity (LCP, Chen 2025), chosen because it separates
+smoothing methods ~13x where first/second-derivative metrics separate them 1.2-1.7x.
+Published Unitree H1 references: **0.44 rad/s³** in MuJoCo, 1.11-1.20 on real ground.
+_Avoid_: action rate (the *first* derivative — a different, much less discriminating
+number); `act_legs` (the same first derivative in raw action units).
+
+**DoF position jitter**:
+The third time-derivative of the *realized* joint position, rad/s³, legs-only — the
+realized-motion counterpart of _Action jitter_, and the rung where the plant's own
+filtering shows up. Published Unitree H1 reference: 0.10 rad/s³ in MuJoCo.
+_Avoid_: joint acceleration / `jacc` (the second derivative, kept only as the p95
+impact-severity statistic).
+
+**Regime**:
+Which of the two disjoint command conditions a smoothness number was measured under:
+**walking** (‖cmd‖ > 0.1, A0's `command_threshold`) or **standing** (‖cmd‖ ≤ 0.1). Always
+reported separately, never pooled, because a lever can improve one while destroying the
+other (measured: 5325 vs 142 zero-command touchdowns) and because the aggregate bench is
+~95/5 walking/standing (`rel_standing_envs = 0.05`), too thin to surface a standing defect.
+_Avoid_: "the benchmark number" (the aggregate pools regimes and is not a walking number);
+"stand still" (that names the `ll_stand_still_coef` reward term, not a measurement
+condition).
+
+**Physical units rule**:
+Every commanded-side smoothness number is reported in radians, never raw action units,
+because the action scale `κ_j = 0.25·τ_max_j/Kp_j` spans 6.7x across the body (legs 0.25,
+shoulder_yaw 0.0375). Legs-only numbers are unaffected in *ranking* (κ is uniform 0.25
+across all 12 leg joints, so the conversion is a constant ×0.25), but whole-body raw norms
+physically over-weight the arms by 3-6.7x and are invalid across the Model v2 PD-gain
+restructure.
+_Avoid_: whole-body `action_rate` in any cross-policy claim.
