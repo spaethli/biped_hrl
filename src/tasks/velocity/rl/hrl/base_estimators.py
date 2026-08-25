@@ -71,6 +71,31 @@ LEG_WAIST_JOINT_NAMES: tuple[str, ...] = LEG_JOINT_NAMES + ("torso_joint",)
 R_IMU: tuple[float, float, float] = (-0.04452, -0.01891, 0.27756)
 GRAVITY_W: tuple[float, float, float] = (0.0, 0.0, -9.81)
 
+# Real accelerometer/gyro saturation ranges (~20g / ~2000 deg/s, generous vs typical MEMS
+# full-scale limits). synthetic_imu() clamps to these -- not because the robot ever legitimately
+# gets here, but because an njmax constraint-buffer overflow (h1_2/env_cfgs.py njmax=300, MuJoCo
+# silently drops excess contact rows under early random-policy chaos) can leave one env's qacc
+# huge-but-FINITE for a tick. That passes every isfinite() guard in BaseEkf/ComplementaryFilter
+# (2026-08-24 fix) untouched and lands in obs["hl_vel"] as a legitimate-looking outlier --
+# 2026-08-25, ekf_rot local run, same "RuntimeError: normal expects std >= 0.0" crash from a
+# different cause (physics-magnitude corruption, not filter divergence). Saturating at the
+# source is the one place that protects every downstream consumer (compl AND all four ekf* arms)
+# at once.
+ACC_SATURATION: float = 200.0   # m/s^2
+GYRO_SATURATION: float = 35.0   # rad/s
+
+# 2026-08-25: acc/gyro saturation alone did not stop a repeat "std >= 0.0" crash (ekf_rot,
+# same run started AFTER that fix landed). Root cause: BaseEkf.update_feet's inputs
+# (p_I/Jv/Jw, from joint positions q12, not qacc) have their own, separate unclamped path --
+# an njmax overflow can drop a joint-limit constraint row too, letting q12 swing extreme for
+# a tick. Its own Mahalanobis gate (`mahal <= gate*m`) doesn't save it: if the corrupted
+# measurement inflates S along with e, the normalized distance can stay "small" while dx
+# itself is huge. A raw magnitude bound on the injected velocity correction is a physical
+# sanity check that no covariance-relative test can be fooled around -- applied both where
+# update_feet injects dx and in predict()'s existing finite-guard (so it also catches
+# anything update_gravity/update_attitude leave behind, the next tick).
+EKF_V_MAX: float = 20.0   # m/s -- no H1-2 base velocity estimate is legitimately this large
+
 ARM_NAMES: tuple[str, ...] = ("compl", "ekf", "ekf_grav", "ekf_rot", "jacobian", "ekf_att")
 """The six arms this module adds. ``legodom``/``state`` are handled elsewhere (leg_odom.py /
 ground truth) — see ``hl_vel_source`` in rl_cfg.py for the full 8-value vocabulary."""
@@ -371,6 +396,7 @@ class BaseEkf:
 
   def predict(self, acc: torch.Tensor, gyro: torch.Tensor, dt: float, alpha: torch.Tensor) -> None:
     N = self.r.shape[0]
+    r0, v0, R0, P0 = self.r, self.v, self.R, self.P  # pre-tick, for the finite-guard below
     f = acc - self.bf
     w = gyro - self.bw
     a_w = torch.einsum("nij,nj->ni", self.R, f) + _vec(GRAVITY_W, acc)
@@ -399,6 +425,23 @@ class BaseEkf:
         Q[:, self.i_th + 3 * i : self.i_th + 3 * i + 3, self.i_th + 3 * i : self.i_th + 3 * i + 3] = (
           I3 * (self.s["foot_th"] ** 2 + free**2).view(-1, 1, 1) * dt)
     self.P = F @ self.P @ F.transpose(1, 2) + Q
+
+    # A non-finite result -- e.g. a transient NaN in qacc under early random-policy
+    # exploration (mjlab ships its own nan_guard.py for exactly this: qpos/qvel/qacc CAN
+    # go non-finite mid-training), or any other numerical blow-up in this filter itself --
+    # must not silently poison the state forever. Without this, one bad tick's NaN sits in
+    # self.R/self.v/self.P and every subsequent tick re-derives from it, so the corruption
+    # never heals until an episode reset; hundreds of iterations later it surfaces as
+    # "RuntimeError: normal expects std >= 0.0" deep inside PPO's actor.sample(), with no
+    # estimator code anywhere in the traceback (2026-08-24, ekf_rot/ekf_grav cluster jobs).
+    # Holding the pre-tick state is a no-op whenever the tick was clean (the common case).
+    ok = (torch.isfinite(self.r).all(-1) & torch.isfinite(self.v).all(-1)
+          & torch.isfinite(self.R).flatten(-2).all(-1) & torch.isfinite(self.P).flatten(-2).all(-1)
+          & (self.v.norm(dim=-1) < EKF_V_MAX))
+    self.r = torch.where(ok.unsqueeze(-1), self.r, r0)
+    self.v = torch.where(ok.unsqueeze(-1), self.v, v0)
+    self.R = torch.where(ok.view(-1, 1, 1), self.R, R0)
+    self.P = torch.where(ok.view(-1, 1, 1), self.P, P0)
 
   def update_feet(self, s_p: torch.Tensor, s_R: torch.Tensor | None, alpha: torch.Tensor,
                   R_meas: torch.Tensor, gate: float = 25.0) -> None:
@@ -457,16 +500,25 @@ class BaseEkf:
       return
     mahal = torch.einsum("ni,nij,nj->n", e, Sinv, e)
     any_active = row_active.any(dim=-1)
-    apply = any_active & (mahal <= gate * m)
-    if not apply.any():
-      return
     K = self.P @ H.transpose(1, 2) @ Sinv
     dx = torch.einsum("nij,nj->ni", K, e)
-    dx = torch.where(apply.unsqueeze(-1), dx, torch.zeros_like(dx))
-    self._inject(dx)
     I_n = _eye(self.n, N, e)
     IKH = I_n - K @ H
     P_new = IKH @ self.P @ IKH.transpose(1, 2) + K @ Rm @ K.transpose(1, 2)
+    # mahal is already NaN-safe (any comparison against NaN is False, so a NaN e/Sinv is
+    # excluded by the gate below on its own) -- but a merely ILL-conditioned S can still
+    # produce a huge-but-finite K/dx that passes the Mahalanobis test (if the corruption that
+    # inflated e also inflated S, the normalized distance can stay "small"), or a P_new with a
+    # stray NaN from the matrix products above; require both finite AND a physically plausible
+    # velocity correction before applying (see EKF_V_MAX's comment).
+    dx_v = dx[:, self.i_v : self.i_v + 3]
+    finite = (torch.isfinite(dx).all(-1) & torch.isfinite(P_new).flatten(-2).all(-1)
+              & (dx_v.norm(dim=-1) < EKF_V_MAX))
+    apply = any_active & (mahal <= gate * m) & finite
+    if not apply.any():
+      return
+    dx = torch.where(apply.unsqueeze(-1), dx, torch.zeros_like(dx))
+    self._inject(dx)
     self.P = torch.where(apply.view(-1, 1, 1), P_new, self.P)
 
   def update_gravity(self, acc: torch.Tensor, sigma: float = 0.05, tol: float = 0.5) -> None:
@@ -475,8 +527,8 @@ class BaseEkf:
     this exists (the position-only arm's tilt error otherwise ran to 72.8 deg)."""
     N = self.r.shape[0]
     n = acc.norm(dim=-1)
-    gate = (n - 9.81).abs() < tol
-    if not gate.any():
+    phys_gate = (n - 9.81).abs() < tol
+    if not phys_gate.any():
       return
     meas = acc / n.clamp(min=1e-6).unsqueeze(-1)
     h = torch.einsum("nji,j->ni", self.R, _vec((0.0, 0.0, 1.0), acc))  # R^T @ z_world
@@ -484,13 +536,23 @@ class BaseEkf:
     H[:, :, self.i_phi : self.i_phi + 3] = skew(h)
     Rm = _eye(3, N, acc) * sigma**2
     S = H @ self.P @ H.transpose(1, 2) + Rm
-    K = self.P @ H.transpose(1, 2) @ torch.linalg.inv(S)
+    try:
+      Sinv = torch.linalg.inv(S)
+    except RuntimeError:
+      return
+    K = self.P @ H.transpose(1, 2) @ Sinv
     dx = torch.einsum("nij,nj->ni", K, meas - h)
-    dx = torch.where(gate.unsqueeze(-1), dx, torch.zeros_like(dx))
-    self._inject(dx)
     I_n = _eye(self.n, N, acc)
     IKH = I_n - K @ H
     P_new = IKH @ self.P @ IKH.transpose(1, 2) + K @ Rm @ K.transpose(1, 2)
+    # See update_feet's matching comment: an ill-conditioned (not necessarily singular) S
+    # can pass the physical gate above and still produce a non-finite dx/P_new.
+    finite = torch.isfinite(dx).all(-1) & torch.isfinite(P_new).flatten(-2).all(-1)
+    gate = phys_gate & finite
+    if not gate.any():
+      return
+    dx = torch.where(gate.unsqueeze(-1), dx, torch.zeros_like(dx))
+    self._inject(dx)
     self.P = torch.where(gate.view(-1, 1, 1), P_new, self.P)
 
   def update_attitude(self, R_meas: torch.Tensor) -> None:
@@ -501,13 +563,30 @@ class BaseEkf:
     H[:, :, self.i_phi : self.i_phi + 3] = _eye(3, N, e)
     Rm = _eye(3, N, e) * self.s["att"] ** 2
     S = H @ self.P @ H.transpose(1, 2) + Rm
-    K = self.P @ H.transpose(1, 2) @ torch.linalg.inv(S)
-    self._inject(torch.einsum("nij,nj->ni", K, e))
+    try:
+      Sinv = torch.linalg.inv(S)
+    except RuntimeError:
+      return
+    K = self.P @ H.transpose(1, 2) @ Sinv
+    dx = torch.einsum("nij,nj->ni", K, e)
     I_n = _eye(self.n, N, e)
     IKH = I_n - K @ H
-    self.P = IKH @ self.P @ IKH.transpose(1, 2) + K @ Rm @ K.transpose(1, 2)
+    P_new = IKH @ self.P @ IKH.transpose(1, 2) + K @ Rm @ K.transpose(1, 2)
+    # This update had no gate at all before -- it always fires when called (unlike
+    # update_feet's contact gate or update_gravity's physical gate), so finiteness is the
+    # ONLY thing standing between a bad tick and permanently poisoning self.R/self.P.
+    ok = torch.isfinite(dx).all(-1) & torch.isfinite(P_new).flatten(-2).all(-1)
+    if not ok.any():
+      return
+    dx = torch.where(ok.unsqueeze(-1), dx, torch.zeros_like(dx))
+    self._inject(dx)
+    self.P = torch.where(ok.view(-1, 1, 1), P_new, self.P)
 
   def _inject(self, dx: torch.Tensor) -> None:
+    # Backstop, not the primary guard: every call site above already gates on finiteness
+    # before calling this, but a bad dx must never move r/v/R/p/Rf/bf/bw regardless of
+    # what any future call site does or forgets to check.
+    dx = torch.where(torch.isfinite(dx).all(-1, keepdim=True), dx, torch.zeros_like(dx))
     self.r = self.r + dx[:, self.i_r : self.i_r + 3]
     self.v = self.v + dx[:, self.i_v : self.i_v + 3]
     self.R = self.R @ so3_exp(dx[:, self.i_phi : self.i_phi + 3])
@@ -541,7 +620,12 @@ class ComplementaryFilter:
     pred = self.v + a_P * dt
     alpha = dt / (self.tau + dt)
     fused = (1.0 - alpha) * pred + alpha * v_legodom
-    self.v = torch.where(ok.unsqueeze(-1), fused, pred)
+    v_new = torch.where(ok.unsqueeze(-1), fused, pred)
+    # Same reasoning as BaseEkf.predict: self.v is persistent state that feeds next tick's
+    # `pred`, so a single non-finite a_P/v_legodom (e.g. a transient NaN from the
+    # synthetic-IMU input) would otherwise poison every subsequent tick permanently.
+    finite = torch.isfinite(v_new).all(-1)
+    self.v = torch.where(finite.unsqueeze(-1), v_new, self.v)
     return self.v
 
 
@@ -563,7 +647,7 @@ def synthetic_imu(free_q: torch.Tensor, free_v: torch.Tensor, free_a: torch.Tens
     dpsi   [N]     waist yaw joint rate
 
   Returns (acc_T [N, 3] specific force incl. gravity, gyro_T [N, 3], C [N, 3, 3] world->torso,
-  R_torso_W [N, 3, 3]).
+  R_torso_W [N, 3, 3]). acc_T/gyro_T are saturated to ACC_SATURATION/GYRO_SATURATION.
   """
   quat = free_q[:, 3:7]
   R_pelvis_W = matrix_from_quat(quat)
@@ -588,6 +672,13 @@ def synthetic_imu(free_q: torch.Tensor, free_v: torch.Tensor, free_a: torch.Tens
   # algebraically, see the module docstring): w_T = Rz(-psi) (w_P + dpsi*z).
   z = _vec((0.0, 0.0, 1.0), quat)
   gyro_T = torch.einsum("nij,nj->ni", rz(-psi), w_pelvis + dpsi.unsqueeze(-1) * z)
+
+  # Saturate to real-sensor range -- see ACC_SATURATION's comment. nan_to_num first (clamp
+  # alone passes NaN through unchanged); a no-op on every physically-plausible tick.
+  acc_T = torch.nan_to_num(acc_T, nan=0.0, posinf=ACC_SATURATION, neginf=-ACC_SATURATION)
+  acc_T = acc_T.clamp(-ACC_SATURATION, ACC_SATURATION)
+  gyro_T = torch.nan_to_num(gyro_T, nan=0.0, posinf=GYRO_SATURATION, neginf=-GYRO_SATURATION)
+  gyro_T = gyro_T.clamp(-GYRO_SATURATION, GYRO_SATURATION)
 
   return acc_T, gyro_T, C, R_torso_W
 
@@ -704,8 +795,15 @@ class EstimatorBank:
     return diag
 
   def _accumulate(self, v_xy: torch.Tensor) -> None:
-    self.sum = self.sum + v_xy
-    self.n = self.n + 1.0
+    # Central backstop: every arm (including the stateless jacobian one, which has no
+    # persistent state of its own to guard) funnels through here before its window
+    # average can reach obs["hl_vel"]. Summing one non-finite tick would poison the WHOLE
+    # window's average (NaN + anything = NaN); skip that tick's contribution instead --
+    # `fire()`'s existing `got = self.n > 0` already handles "no samples this window" by
+    # holding the last latched value, so this degrades to that same, already-safe path.
+    ok = torch.isfinite(v_xy).all(-1)
+    self.sum = torch.where(ok.unsqueeze(-1), self.sum + v_xy, self.sum)
+    self.n = torch.where(ok, self.n + 1.0, self.n)
 
   def fire(self) -> torch.Tensor:
     got = self.n > 0

@@ -165,8 +165,10 @@ class HlVelJitterCfg:
   obs only (per-HL-fire, every ``c`` steps) and does NOT cancel for jitter (only a
   constant bias would). Mixing the two into one cfg would make it easy to wire a
   jitter term into the wrong channel. Off by default (RQ2-safe). Per-axis scalar
-  fields (not a tuple) — the tyro CLI is finicky with tuple overrides (confirmed
-  2026-07-03, ``cadence_period_range``)."""
+  fields (not a tuple) — originally to dodge a believed-unsettable tuple CLI, which
+  2026-08-25 showed was only a syntax error (see ``cadence_period_range``). The scalars
+  stay: naming each axis is clearer than a positional pair, and they are already baked
+  into every saved config."""
 
   enable: bool = False
   bias_vx: float = 0.0
@@ -571,9 +573,14 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   (the "no entrainment" reads were the structure_keys eval bug); v3 widened to (0.35..1.0);
   v5/v6 tried (0.35..1.3) for the d(T) slow band and both LOST entrainment (band is a
   curriculum variable — the unfollowable 1.0–1.3 slice diluted the signal); v7 stages back to
-  (0.35..1.0). Old runs restore their own saved range via play.py structure_keys. (Set as the
-  default: the tyro CLI tuple override is finicky — confirmed 2026-07-03, "Unrecognized
-  options" under --agent.)"""
+  (0.35..1.0). Old runs restore their own saved range via play.py structure_keys.
+
+  **CLI-settable, with Python syntax only** (re-verified 2026-08-25): pass
+  ``--agent.cadence-period-range "(0.625,0.625)"``. The space-separated form
+  ``--agent.cadence-period-range 0.625 0.625`` is what raises "Unrecognized options" — the
+  2026-07-03 note read that as "the tuple cannot be overridden" and sent range changes
+  through code edits ever since. mjlab sets ``tyro.conf.UsePythonSyntaxForLiteralCollections``
+  (``mjlab/__init__.py``), which is exactly what makes the parenthesised form parse."""
   ll_cadence_coef: float = 0.5
   """A1a (ADR-0004): weight on the ``feet_gait`` cadence-entrainment reward added to the LL
   intrinsic, keyed to the HL-commanded stride period (``hrl_phase``). Matches A0's foot_gait
