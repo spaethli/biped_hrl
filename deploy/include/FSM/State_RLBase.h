@@ -46,7 +46,11 @@ public:
                                 /*with_estimator=*/true,
                                 env->cfg["joint_offset"]
                                   ? env->cfg["joint_offset"].as<std::vector<float>>()
-                                  : std::vector<float>{});
+                                  : std::vector<float>{},
+                                /*base_estimator=*/"none",  // A0 runs the bank passively
+                                env->cfg["hold_joint_ids"]
+                                  ? env->cfg["hold_joint_ids"].as<std::vector<int>>()
+                                  : std::vector<int>{});
 #endif
 
         // Start policy thread

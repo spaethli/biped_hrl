@@ -1,6 +1,15 @@
 # Leg-mass and foot-geometry nominal correction (Model v3)
 
-**Status:** PROPOSED / staged, held for the next model version (the user's call 2026-07-24).
+**Status: SUPERSEDED BY ADR-0008 (2026-08-25).** Model v3 is now defined by ADR-0008 as
+**action clip + leg mass**. The leg-mass spec in item 1 below is carried into that cut
+**verbatim**, but justified as a *fidelity* correction only — V1's falsification (leg mass moved
+the hardware lean by nothing) stands and the lean claim is not made. **Item 2, the foot sole
+geometry, is NOT cut in v3**; it stays a live, unscheduled proposal, since ours is still the only
+H1-2 sim using hand-authored flat foot capsules and it remains the CoP-transfer lever. Everything
+below is retained as the investigation record — the V1 read-out, the Spec A hardware rejection,
+the Spec B `joint_offset` confirmation, and probe P1 — none of which is superseded.
+
+**Original status:** PROPOSED / staged, held for the next model version (the user's call 2026-07-24).
 Not applied. The leg-mass edit was made, verified, and reverted. **Amended 2026-07-28 after the
 inclinometer session** (see "Amendment" below): scope stays **leg mass + foot sole geometry**,
 and Component A (the attitude error) is now split into ~0.9 deg of foot-sole wedge (a SIM defect,

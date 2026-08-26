@@ -1,6 +1,7 @@
 """Unitree H1_2 velocity environment configurations."""
 
 from src.assets.robots import (
+  H1_2_ACTION_CLIP,
   H1_2_ACTION_SCALE,
   get_h1_2_robot_cfg,
 )
@@ -89,6 +90,13 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
   joint_pos_action.scale = H1_2_ACTION_SCALE
+  # ADR-0008 (Model v3): the commanded target is clipped to the hardware limits, mirroring
+  # the truncation the C++ deploy path applies at the same point in the pipeline
+  # (isaaclab/envs/mdp/actions/joint_actions.h:54). Without it the policy trains against a
+  # trajectory the robot cannot execute. Pairs with the `action_clip` reward term, which
+  # prices the discarded excess -- the clip alone makes every target past the bound produce
+  # an identical outcome, so nothing would distinguish 0.1 rad over from 1.0 rad over.
+  joint_pos_action.clip = H1_2_ACTION_CLIP
 
   cfg.viewer.body_name = "torso_link"
 
@@ -99,6 +107,17 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.observations["critic"].terms["foot_height"].params[
     "asset_cfg"
   ].site_names = site_names
+
+  # Blind actor (2026-08-26): the terrain height scan is a sim-only signal -- the H1-2 has
+  # no sensor that produces it, and the deploy obs vector is the 7 proprioceptive terms
+  # (92 dims). Keeping it in the actor made the rough export a 279-dim policy that the C++
+  # runner cannot feed: algorithms.h sizes the input tensor from the ONNX shape and never
+  # checks the vector it was handed, so the 187 missing floats were read as adjacent heap
+  # memory -> erratic actions -> safety hold -> near-passive robot. The critic keeps the
+  # scan (asymmetric actor-critic: privileged value function, deployable policy), so a
+  # blind rough actor exports at exactly the flat 92 dims and is a drop-in for the existing
+  # deploy config.
+  del cfg.observations["actor"].terms["height_scan"]
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
@@ -159,6 +178,8 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Apply play mode overrides.
   if play:
+    # Increase number of contacts broadphase+narrowphase may report per world
+    cfg.sim.nconmax = 512
     # Effectively infinite episode length.
     cfg.episode_length_s = int(1e9)
 
@@ -199,7 +220,8 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.scene.sensors = tuple(
     s for s in (cfg.scene.sensors or ()) if s.name != "terrain_scan"
   )
-  del cfg.observations["actor"].terms["height_scan"]
+  # actor: already dropped by the rough builder (blind actor); critic still carries it.
+  cfg.observations["actor"].terms.pop("height_scan", None)
   del cfg.observations["critic"].terms["height_scan"]
 
   # Disable terrain curriculum (not present in play mode since rough clears all).

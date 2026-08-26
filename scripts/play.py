@@ -80,6 +80,18 @@ class PlayConfig:
   uniform smoothness deficit. Works on A0 (non-hierarchical) too, where c defaults to 8 and
   the flat profile is the control proving any A1 structure is real, not a binning artifact.
   Sibling to ``eval_steps``; reuses ``eval_seeds``."""
+  check_joint_limits: bool = False
+  """Deploy parity check: with ``--eval-steps``, score the policy's COMMANDED joint
+  position targets (``action_manager['joint_pos'].processed_actions``, the same quantity
+  the C++ writes to ``motor_cmd().q()``) against the hardware position limits in
+  ``deploy/robots/h1_2/include/h1_2_limits.h``. On hardware those bounds are enforced by a
+  per-joint command clamp (``State_RLBase.cpp``), so a target past them is silently
+  truncated and the joint never does what the policy intended. In sim nothing clamps the
+  target, so the same policy can train against a trajectory it can never execute on the
+  robot, and the defect is invisible until the flight recorder reports it. Reports the
+  per-joint over-limit rate and worst overshoot in radians, directly comparable to
+  ``safety_analyzer.py``'s ``raw_policy_violations`` on a real session. Costs one tensor
+  compare per step; no extra rollout."""
   probe_lean: int = 0
   """Backward-lean sensitivity probe (ADR-0006 / WL-B0e): if > 0, run this many
   deterministic standing steps per swept bias value and report the steady-state base
@@ -524,6 +536,35 @@ def run_play(task_id: str, cfg: PlayConfig):
       prev_jacc_signed: torch.Tensor | None = None
       achieved_vxs = []  # per-step env-mean achieved vx (ramp metric for --eval-cmd-vx holds)
       prev_actions: torch.Tensor | None = None
+      # --check-joint-limits: hardware command bounds, read from the deploy header rather
+      # than duplicated here (it is the audited source -- 5-source consensus, WL-B0 item 2).
+      lim_lo = lim_hi = lim_names = None
+      jl_over = jl_max = None
+      if cfg.check_joint_limits:
+        import re
+        hdr = (Path(__file__).parent.parent
+               / "deploy/robots/h1_2/include/h1_2_limits.h").read_text()
+        blk = hdr.split("h1_2_joint_limits = {{", 1)[1].split("}};", 1)[0]
+        rows = re.findall(r"\{\s*(-?[\d.]+)f?,\s*(-?[\d.]+)f?\s*\}\s*,?\s*//\s*\d+\s+(\w+)", blk)
+        by_name = {n.lower(): (float(a), float(b)) for a, b, n in rows}
+        at = uenv.action_manager.get_term("joint_pos")
+        sim_names = uenv.scene["robot"].joint_names
+        tgt = at._target_ids if hasattr(at, "_target_ids") else list(range(len(sim_names)))
+        tgt = list(range(len(sim_names))) if tgt is None else list(tgt)
+        # The sim model calls slot 12 `torso`, the deploy header calls it `waist_yaw`
+        # (same joint; play.py's own group patterns already match both spellings).
+        alias = {"torso": "waist_yaw"}
+        lim_names = [alias.get(n, n) for n in
+                     (sim_names[i].replace("_joint", "").lower() for i in tgt)]
+        miss = [n for n in lim_names if n not in by_name]
+        if miss:
+          raise SystemExit(f"--check-joint-limits: no deploy limit for {miss}")
+        lim_lo = torch.tensor([by_name[n][0] for n in lim_names], device=env.device)
+        lim_hi = torch.tensor([by_name[n][1] for n in lim_names], device=env.device)
+        jl_over = torch.zeros(len(lim_names), device=env.device)
+        jl_max = torch.zeros(len(lim_names), device=env.device)
+        jl_sum = torch.zeros(len(lim_names), device=env.device)  # mean excess/step (ADR-0008 sizing)
+        jl_rew = {}  # term name -> summed |contribution|, for the reward-share table
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
       prev_contact: torch.Tensor | None = None
       n_feet = 0
@@ -540,6 +581,30 @@ def run_play(task_id: str, cfg: PlayConfig):
           obs, _, dones, extras = env.step(actions.to(env.device))
 
           # 1. Tracking error.
+          if cfg.check_joint_limits:
+            # RECOMPUTE the pre-clip target: raw*scale+offset, matching the C++ `q_cmd`
+            # before its clamp. Reading `_processed_actions` back would report 0.0 forever
+            # once ADR-0008's clip is configured, because mjlab's process_actions
+            # overwrites it with the CLAMPED value -- the instrument would die at exactly
+            # the moment it is needed, which is the same measure-after-the-clamp defect
+            # ADR-0008 exists to fix.
+            _t = uenv.action_manager.get_term("joint_pos")
+            q_cmd = _t.raw_action * _t.scale + _t.offset
+            over = torch.maximum(lim_lo - q_cmd, q_cmd - lim_hi).clamp(min=0.0)  # [B, D]
+            jl_over += (over > 0).float().mean(dim=0)
+            jl_sum += over.mean(dim=0)
+            jl_max = torch.maximum(jl_max, over.amax(dim=0))
+            # Reward shares (ADR-0008 sizing): the excess weight is set so `action_clip`
+            # contributes what `joint_pos_limits` contributes at the baseline violation
+            # level, so both must be measured on the SAME rollout. NOTE a term whose
+            # weight is 0.0 is skipped by RewardManager.compute and reads 0 here -- that
+            # is why the sizing uses the RAW mean excess above, not this table, for the
+            # numerator; this table supplies the target contribution only.
+            _rm = uenv.reward_manager
+            _sr = _rm._step_reward
+            for _i, _n in enumerate(_rm.active_terms):
+              jl_rew[_n] = jl_rew.get(_n, 0.0) + float(_sr[:, _i].abs().mean())
+
           cmd = uenv.command_manager.get_command("twist")  # [B, >=3]
           achieved = torch.cat(
             [robot.root_link_lin_vel_b[:, :2], robot.root_link_ang_vel_b[:, 2:3]], dim=-1
@@ -708,6 +773,46 @@ def run_play(task_id: str, cfg: PlayConfig):
 
     print()
     print("=" * 58)
+    if cfg.check_joint_limits and jl_over is not None:
+      rate = (jl_over / cfg.eval_steps).tolist()
+      mean_ex = (jl_sum / cfg.eval_steps).tolist()
+      worst = sorted(zip(lim_names, rate, jl_max.tolist(), mean_ex), key=lambda r: -r[1])
+      tot = sum(rate) / max(len(rate), 1)
+      tot_ex = sum(mean_ex)
+      print()
+      print("=" * 78)
+      print(f"  COMMANDED JOINT-LIMIT CHECK (last seed) | {cfg.eval_steps} steps x {n_envs} envs")
+      print("=" * 78)
+      print(f"  any-joint over-limit rate (mean per joint) = {tot:.5f}")
+      print(f"  TOTAL mean excess/step (the reward term's raw value) = {tot_ex:.6f} rad")
+      hit = [w for w in worst if w[1] > 0]
+      if not hit:
+        print("  no commanded target left the hardware limits")
+      for n, r, m, e in hit[:8]:
+        print(f"    {n:<20} rate {r:>8.5f}   max_over {m:>7.4f}   mean_excess {e:>8.6f} rad")
+      # ADR-0008 sizing: `action_clip`'s weight should make it contribute what
+      # `joint_pos_limits` contributes here. That target is read off this table; the
+      # numerator is the RAW total above, because a weight-0.0 term is never evaluated
+      # by RewardManager.compute and would otherwise read a misleading 0.
+      if jl_rew:
+        print("  -" * 39)
+        print(f"  reward-term shares (|contribution| per step, {cfg.eval_steps} steps)")
+        tot_r = sum(jl_rew.values()) or 1.0
+        for n, v in sorted(jl_rew.items(), key=lambda kv: -kv[1])[:10]:
+          mark = "  <-- sizing target" if n == "joint_pos_limits" else (
+                 "  <-- 0.0 weight: NOT evaluated" if n == "action_clip" else "")
+          print(f"    {n:<24} {v / cfg.eval_steps:>10.6f}  ({100 * v / tot_r:>5.2f}%){mark}")
+        jpl = jl_rew.get("joint_pos_limits", 0.0) / cfg.eval_steps
+        if tot_ex > 0:
+          print(f"  => suggested |weight| = {jpl:.6f} / {tot_ex:.6f} = {jpl / tot_ex:.4f}")
+      print("=" * 78)
+      jl_json = {"total_mean_excess_rad": round(tot_ex, 6),
+                 "per_joint": {n: {"rate": round(r, 6), "max_over_rad": round(m, 4),
+                                   "mean_excess_rad": round(e, 6)}
+                               for n, r, m, e in hit},
+                 "reward_share": {n: round(v / cfg.eval_steps, 6) for n, v in jl_rew.items()}}
+      print(f"[LIMITS] {json.dumps(jl_json)}")
+
     print(f"  BENCHMARK SCORECARD  |  {cfg.eval_steps} steps x {n_envs} envs x {cfg.eval_seeds} seed(s)")
     print("=" * 58)
     print(f"  Tracking  err_vx    : {_fmt('err_vx')}")

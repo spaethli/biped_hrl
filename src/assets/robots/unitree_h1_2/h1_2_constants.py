@@ -260,6 +260,35 @@ for a in H1_2_ARTICULATION.actuators:
     H1_2_ACTION_SCALE[n] = 0.25 * e / s
 
 
+# ADR-0008 (Model v3): clip the COMMANDED joint target to the hardware position limits.
+# On the robot the C++ deploy path truncates every command to `h1_2_joint_limits`
+# (State_RLBase.cpp), so a target past a mechanical stop never executes. Training had no
+# equivalent, and `joint_pos_limits` does not cover it -- that term penalises the MEASURED
+# position, which MuJoCo already clamps to the joint range, so the *command* was unpriced
+# and the A0 baseline learned to ask for up to 1.0 rad past the ankle stops (2.2% of steps
+# in sim, 12-15% on hardware; ADR-0008 Context). Derived from the compiled MJCF rather than
+# hand-entered: `jnt_range` is the same table the deploy header carries, pinned equal by
+# tests/test_deploy_parity.py::test_deploy_joint_limits_match_the_training_model, so there
+# is exactly one source and no second copy to drift out of step.
+#
+# Keys are ANCHORED exact names on purpose: resolve_matching_names_values raises when one
+# target matches two patterns, so a loose `.*ankle_pitch.*` style key would be a landmine
+# the moment another joint shares the substring.
+def _derive_action_clip() -> dict[str, tuple[float, float]]:
+  model = mujoco.MjSpec.from_file(str(H1_2_XML)).compile()
+  out: dict[str, tuple[float, float]] = {}
+  for j in range(model.njnt):
+    if not model.jnt_limited[j]:
+      continue  # the floating base joint; not actuated, no meaningful range
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j)
+    assert name is not None
+    out[f"^{name}$"] = (float(model.jnt_range[j][0]), float(model.jnt_range[j][1]))
+  return out
+
+
+H1_2_ACTION_CLIP: dict[str, tuple[float, float]] = _derive_action_clip()
+
+
 if __name__ == "__main__":
   import mujoco.viewer as viewer
 

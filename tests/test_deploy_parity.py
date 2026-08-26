@@ -500,3 +500,151 @@ def test_exported_high_level_onnx_carries_the_baked_goal_scale():
   )
   scale = [float(x) for x in meta["goal_scale"].split(",")]
   assert len(scale) == 7 and all(s > 0 for s in scale)
+
+
+# --- ADR-0008 (Model v3): the commanded-target clip ---------------------------
+
+ALL_DEPLOY_YAMLS = [
+  DEPLOY / f"config/policy/{fam}/v0/params/{cfg}.yaml"
+  for fam in ("velocity", "velocity_hrl")
+  for cfg in ("deploy", "deploy_est", "deploy_est_pin0625", "deploy_real")
+]
+
+
+@pytest.fixture(scope="module")
+def training_clip() -> dict[str, tuple[float, float]]:
+  """The clip the training action term applies, keyed by anchored joint name."""
+  from src.assets.robots.unitree_h1_2.h1_2_constants import H1_2_ACTION_CLIP
+
+  return H1_2_ACTION_CLIP
+
+
+def test_training_clip_covers_every_actuated_joint(training_clip, model_ranges):
+  """A joint missing from the clip is trained UNCLIPPED while the robot truncates it —
+  the exact asymmetry ADR-0008 exists to remove, and it would be silent."""
+  clipped = {k.strip("^$") for k in training_clip}
+  assert clipped == set(model_ranges), (
+    f"clip/model mismatch: missing {set(model_ranges) - clipped}, "
+    f"extra {clipped - set(model_ranges)}"
+  )
+
+
+def test_training_clip_matches_the_deploy_limit_header(training_clip, limits_header):
+  """Three-way parity, leg 1: training clip == h1_2_limits.h.
+
+  If these drift, sim trains against a different truncation than the robot applies, which
+  is invisible in both places — sim keeps working and the robot just behaves wrong."""
+  names, limits = limits_header
+  mismatched = []
+  for name, (lo, hi) in zip(names, limits):
+    key = f"^{_joint_xml_name(name)}$"
+    assert key in training_clip, f"{name}: not clipped in training"
+    tlo, thi = training_clip[key]
+    if abs(tlo - lo) > 1e-3 or abs(thi - hi) > 1e-3:
+      mismatched.append(f"{name}: training ({tlo}, {thi}) vs header ({lo}, {hi})")
+  assert not mismatched, "training clip drifted from the deploy header:\n" + "\n".join(
+    mismatched
+  )
+
+
+@pytest.mark.parametrize("yaml_path", ALL_DEPLOY_YAMLS, ids=lambda p: p.parts[-3] + "/" + p.name)
+def test_deploy_yaml_clip_matches_the_limit_header(yaml_path, limits_header):
+  """Three-way parity, leg 2: every deploy yaml's clip == h1_2_limits.h, in joint_ids_map
+  order (joint_actions.h:57 indexes ``_clip[i]`` by action index, not by name).
+
+  All eight configs, not just the real-robot pair: a bridge config that clips differently
+  from the robot reproduces the 2026-08-05 class of defect where sim and hardware disagree
+  invisibly because the bridge is the only thing anyone watches."""
+  cfg = yaml.safe_load(yaml_path.read_text())
+  clip = cfg["actions"]["JointPositionAction"]["clip"]
+  assert clip is not None, f"{yaml_path.name}: clip is null — deploy would not truncate"
+  names, limits = limits_header
+  assert len(clip) == len(names) == 27
+
+  mismatched = []
+  for i, (name, (lo, hi)) in enumerate(zip(names, limits)):
+    assert len(clip[i]) == 2, f"{name}: clip[{i}] is not a [lo, hi] pair"
+    if abs(clip[i][0] - lo) > 1e-3 or abs(clip[i][1] - hi) > 1e-3:
+      mismatched.append(f"{name}: yaml {clip[i]} vs header ({lo}, {hi})")
+  assert not mismatched, f"{yaml_path.name} clip drifted:\n" + "\n".join(mismatched)
+
+
+def test_action_clip_excess_is_measured_before_the_clip():
+  """The excess must be recomputed from ``raw_action * scale + offset``, NOT read back
+  from ``processed_actions``.
+
+  mjlab's ``BaseAction.process_actions`` overwrites ``_processed_actions`` with the CLAMPED
+  value, so a term reading it back would be identically zero the moment the clip is
+  configured — the penalty would silently never fire and ``--check-joint-limits`` would
+  report a clean bill of health forever. That is the same measure-after-the-clamp defect
+  ADR-0008 exists to fix, so it is exercised behaviourally: this stub reproduces mjlab's
+  overwrite exactly, so a term that reads the clamped value returns 0.0 and fails here."""
+  import torch
+
+  from src.tasks.velocity.mdp.rewards import action_clip_excess
+
+  class _Cfg:
+    clip = {"^j$": (-1.0, 1.0)}
+
+  class _Term:
+    cfg = _Cfg()
+    raw_action = torch.tensor([[2.0, -3.0]])   # -> preclip 2.0 / -3.0
+    scale = 1.0
+    offset = 0.0
+    _clip = torch.tensor([[[-1.0, 1.0], [-1.0, 1.0]]])
+    # mjlab overwrites this with the CLAMPED value; the excess is gone by reward time.
+    _processed_actions = torch.tensor([[1.0, -1.0]])
+
+  class _Env:
+    num_envs = 1
+    device = "cpu"
+
+    class action_manager:
+      @staticmethod
+      def get_term(_name):
+        return _Term()
+
+  got = float(action_clip_excess(_Env()))
+  # |2.0 - 1.0| + |-3.0 - (-1.0)| = 1.0 + 2.0
+  assert got == pytest.approx(3.0), (
+    f"expected the PRE-clip excess 3.0, got {got}; reading the clamped "
+    f"processed_actions back would give 0.0"
+  )
+
+
+def test_a1_routes_the_clip_penalty_into_the_low_level_intrinsic():
+  """A0's env reward term never reaches A1's low level (``ll_task_reward_coef = 0``), so
+  the clip needs its own A1 routing or it is priced for A0 and free for A1 — an RQ2
+  confound baked into the reward, not the architecture."""
+  import inspect
+
+  from src.tasks.velocity.config.h1_2_a1.rl_cfg import HrlRunnerCfg
+  from src.tasks.velocity.rl.hrl import hrl_runner
+
+  assert hasattr(HrlRunnerCfg(), "ll_action_clip_coef"), (
+    "HrlRunnerCfg has no ll_action_clip_coef -> A1 trains with the clip unpriced"
+  )
+  src = inspect.getsource(hrl_runner)
+  assert "self.ll_action_clip_coef" in src, "runner never reads ll_action_clip_coef"
+  assert "action_clip_excess" in src, (
+    "runner reads the coefficient but never calls action_clip_excess -> the term is "
+    "configurable and inert"
+  )
+
+
+def test_the_built_env_actually_applies_the_clip(training_clip):
+  """The clip constant existing is not the same as the action term USING it.
+
+  Without this, deleting ``joint_pos_action.clip = H1_2_ACTION_CLIP`` leaves every other
+  clip test green — the constant is still correct, the deploy yamls still match it — while
+  training silently reverts to the unclipped v2 behaviour the ADR exists to end. Caught by
+  the mutation harness as a MISSED before this test was added."""
+  from mjlab.tasks.registry import load_env_cfg
+
+  import src.tasks  # noqa: F401  (registers the task ids)
+
+  for task in ("Unitree-H1_2-Flat", "Unitree-H1_2-Flat-A1"):
+    cfg = load_env_cfg(task, play=False)
+    clip = cfg.actions["joint_pos"].clip
+    assert clip is not None, f"{task}: action term has no clip -> trains unclipped"
+    assert clip == training_clip, f"{task}: action clip is not H1_2_ACTION_CLIP"

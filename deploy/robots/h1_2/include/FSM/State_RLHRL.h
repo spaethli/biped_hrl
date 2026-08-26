@@ -146,7 +146,10 @@ public:
                                 // est_arm_ is parsed fail-closed in the constructor, so it
                                 // is already valid here; enter() cannot be reached with an
                                 // unknown arm name.
-                                kEstArmNames[est_arm_]);
+                                kEstArmNames[est_arm_],
+                                env->cfg["hold_joint_ids"]
+                                  ? env->cfg["hold_joint_ids"].as<std::vector<int>>()
+                                  : std::vector<int>{});
 #endif
 
         policy_thread_running = true;

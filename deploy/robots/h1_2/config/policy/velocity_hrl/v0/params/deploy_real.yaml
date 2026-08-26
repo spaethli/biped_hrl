@@ -29,7 +29,7 @@ joint_offset: [0,0,0,0,0,0, 0,0,0,0,0,0, 0, 0,0,0,0,0,0,0, 0,0,0,0,0,0,0]
 
 # Split deploy (ADR-0005 step 3b): joints below get default_joint_pos as target
 # instead of the policy action (upper body held; obs still see all 27 joints).
-hold_joint_ids: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+#hold_joint_ids: [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
 
 # Keeper line (velgoal + cadence, 2026-07-14); hl_target_mode was absolute for the old
 # 7-dim runs — the keeper is delta-trained.
@@ -38,7 +38,7 @@ hrl:
   # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
   # (docs/adr/0007); the other six arms run passively and are logged only.
   # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
-  base_estimator: ekf_rot
+  base_estimator: compl
   c: 8
   hl_target_mode: delta
   goal_components: [velocity, orientation, height]
@@ -83,11 +83,45 @@ commands:
     ranges:
       lin_vel_x: [-0.5, 1.0]
       lin_vel_y: [-0.5, 0.5]
-      ang_vel_z: [-0.5, 0.5]
+      ang_vel_z: [-1.0, 1.0]
       heading: null
 actions:
   JointPositionAction:
-    clip: null
+    # ADR-0008 (Model v3): commanded-target clip, hardware position limits in
+    # joint_ids_map order. MUST equal h1_2_limits.h and the training clip
+    # (H1_2_ACTION_CLIP); all three are the compiled MJCF's jnt_range, pinned
+    # together by tests/test_deploy_parity.py. Applied by joint_actions.h:54 at the
+    # SAME pipeline point as mjlab's, which is the point -- the State_RLBase safety
+    # clamp acts after the hold blend and is therefore a different operation.
+    clip: [
+      [-0.43, 0.43],   # left_hip_yaw_joint
+      [-3.14, 2.5],   # left_hip_pitch_joint
+      [-0.43, 3.14],   # left_hip_roll_joint
+      [-0.12, 2.19],   # left_knee_joint
+      [-0.897334, 0.523598],   # left_ankle_pitch_joint
+      [-0.261799, 0.261799],   # left_ankle_roll_joint
+      [-0.43, 0.43],   # right_hip_yaw_joint
+      [-3.14, 2.5],   # right_hip_pitch_joint
+      [-3.14, 0.43],   # right_hip_roll_joint
+      [-0.12, 2.19],   # right_knee_joint
+      [-0.897334, 0.523598],   # right_ankle_pitch_joint
+      [-0.261799, 0.261799],   # right_ankle_roll_joint
+      [-2.35, 2.35],   # torso_joint
+      [-3.14, 1.57],   # left_shoulder_pitch_joint
+      [-0.38, 3.4],   # left_shoulder_roll_joint
+      [-2.66, 3.01],   # left_shoulder_yaw_joint
+      [-0.95, 3.18],   # left_elbow_joint
+      [-3.01, 2.75],   # left_wrist_roll_joint
+      [-0.4625, 0.4625],   # left_wrist_pitch_joint
+      [-1.27, 1.27],   # left_wrist_yaw_joint
+      [-3.14, 1.57],   # right_shoulder_pitch_joint
+      [-3.4, 0.38],   # right_shoulder_roll_joint
+      [-3.01, 2.66],   # right_shoulder_yaw_joint
+      [-0.95, 3.18],   # right_elbow_joint
+      [-2.75, 3.01],   # right_wrist_roll_joint
+      [-0.4625, 0.4625],   # right_wrist_pitch_joint
+      [-1.27, 1.27],   # right_wrist_yaw_joint
+    ]
     joint_names: [.*]
     # v2 scale = 0.25*effort/kp: legs 0.25, torso 0.166667, shoulder p/r 0.083333,
     # shoulder_yaw 0.0375, elbow+wrists 0.05625.

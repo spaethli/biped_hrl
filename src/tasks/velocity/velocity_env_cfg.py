@@ -24,6 +24,7 @@ from mjlab.scene import SceneCfg
 from mjlab.sensor import GridPatternCfg, ObjRef, RayCastSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.tasks.velocity import mdp
+from src.tasks.velocity import mdp as project_mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.config import ROUGH_TERRAINS_CFG
@@ -306,6 +307,17 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
     "is_terminated": RewardTermCfg(func=mdp.is_terminated, weight=-200.0),
     "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
     "joint_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-10.0),
+    # ADR-0008 (Model v3): price the commanded target the action clip discards. Distinct
+    # from `joint_pos_limits` above, which scores the MEASURED position against the soft
+    # band -- this one scores the COMMAND, which nothing did before. It exists to keep the
+    # region the clip creates discriminable: under a bare clip every target past the bound
+    # yields the same outcome, so the policy can park in saturation.
+    # SIZED 2026-08-26 to -3.5. The rule first adopted (match what `joint_pos_limits`
+    # contributes) is unexecutable: that term reads < 5e-7/step on a trained policy, so
+    # matching it gives ~0. Re-anchored to the smallest LIVE shaping term, action_rate_l2
+    # (0.0306/step), against the measured mean excess of 0.008676 rad/step -> 3.5. An
+    # independent route (2-5% of episode reward) gives 2.0-5.0, so the two agree. ADR-0008.
+    "action_clip": RewardTermCfg(func=project_mdp.action_clip_excess, weight=-3.5),
     "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.05),
     "foot_gait": RewardTermCfg(
       func=mdp.feet_gait,

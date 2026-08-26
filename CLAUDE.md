@@ -31,6 +31,10 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` — prints
   `[VELINC] {json}`. `delta`-mode goal obs cancels absolute velocity, so deploy needs only the
   within-window increment → `.claude/docs/hrl-infra.md`.
+- Commanded joint-limit check (deploy parity): `python scripts/play.py <TaskID>
+  --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --check-joint-limits True` — scores the
+  policy's COMMANDED targets against `h1_2_limits.h`, in the same shape as `safety_analyzer.py`'s
+  `raw_policy_violations`, so sim and hardware compare directly. `[LIMITS] {json}`.
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2 --num-envs 64` (defaults to
   1 env without the flag; pre-2026-07-15 probes on cadence ckpts ran frozen-phase — see
@@ -189,9 +193,30 @@ analysis and the proposed change first.
   a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds. Gait lift-off
   iteration scales with num_envs — never judge stuck-vs-slow before ~2x the expected
   lift-off (see `docs/adr/0005` amendment).
+- **`Unitree-H1_2-Rough` (2026-08-26): the actor is BLIND, and sim sizing is the binding
+  constraint on a 12 GB card.** The terrain `height_scan` is **critic-only** (asymmetric
+  actor-critic). An actor that reads it exports at **279** dims and is undeployable: the
+  H1-2 has no such sensor, the deploy vector is 92, and the C++ runner does not validate
+  the length, so the robot goes limp via the safety hold rather than erroring
+  (`.claude/docs/deployment.md`, "Obs-dim contract"). Blind actor = flat's 92 dims = drop-in
+  export. **Sizing:** EPA collision scratch is `num_envs × nconmax × (376 + 132·ccd_iterations)`
+  bytes, so stock rough (`ccd_iterations=500`, `nconmax=48`) wants **13 GB** at 4096 envs.
+  Train with `--env.sim.mujoco.ccd-iterations 200` (open-loop probe: divergence vs ccd 500
+  equals the GPU non-determinism floor) or drop to 2048 envs. Play sets `nconmax=512`
+  because play draws random tiles and the **initial-pose** contact count reaches ~195;
+  steady-state demand is only 38, so training's 48 is correct and was never dropping contacts.
 - **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
-  derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid;
-  v2 logs to `*_v2`. Replays need the constants the checkpoint trained with (env-side scales).
+  derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid.
+  Replays need the constants the checkpoint trained with (env-side scales).
+- **Model v3 (2026-08-26, `docs/adr/0008`, supersedes ADR-0006) = action clip + leg mass; logs
+  to `*_v3`.** Commanded joint targets are clipped to the hard limits in training AND in all 8
+  deploy yamls (the `State_RLBase` safety clamp is NOT the same operation: it acts after the
+  hold blend), plus an L1 penalty on the clipped excess (`action_clip` -3.5 / A1
+  `ll_action_clip_coef` **+3.5** — the mirror is a positive MAGNITUDE, since the runner computes
+  `r_lo - coef*excess`). Leg mass corrected x1.20787 as fidelity only, NOT as a lean fix (V1's
+  falsification stands). ⚠ `joint_pos_limits` (-10.0) is now known **inert** (< 5e-7/step on a
+  trained policy): it scores MEASURED position, which MuJoCo's `qpos` clamp already prevents.
+  v2 checkpoints are not comparable across the boundary.
 
 ## Where the deep context lives
 
