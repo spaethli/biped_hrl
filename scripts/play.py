@@ -473,6 +473,18 @@ def run_play(task_id: str, cfg: PlayConfig):
       return torch.as_tensor(sorted(ids), device=robot.joint_pos.device) if ids else None
     leg_ids = _grp([".*hip.*", ".*knee.*", ".*ankle.*"])
     arm_ids = _grp([".*shoulder.*", ".*elbow.*", ".*wrist.*"])
+    # Per-joint action scale kappa (rad per action unit), read from the live action term
+    # rather than re-imported from the robot constants, so it can never desync from the
+    # plant the checkpoint is actually being replayed on. Needed because every commanded-
+    # side smoothness number is reported in RADIANS: kappa = 0.25*tau_max/Kp spans 6.7x
+    # across the body (legs 0.25, shoulder_yaw 0.0375), so a raw-action-unit whole-body
+    # norm physically over-weights the arms 3-6.7x. See CONTEXT.md "Physical units rule".
+    _act_scale = uenv.action_manager.get_term("joint_pos").scale
+    if not torch.is_tensor(_act_scale):
+      _act_scale = torch.full((1, uenv.action_manager.total_action_dim),
+                              float(_act_scale), device=robot.joint_pos.device)
+    kappa = _act_scale[:1].to(robot.joint_pos.device)  # [1, A], env-invariant
+    ctrl_dt = uenv.step_dt
     # CoT / cadence metrics (A1a M0): mechanical power, cost of transport, achieved stride period.
     try:
       contact_sensor = uenv.scene["feet_ground_contact"]
@@ -502,6 +514,14 @@ def run_play(task_id: str, cfg: PlayConfig):
       ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
       # Leg-restricted action rate + whole-body/leg/arm joint-accel (deploy diagnostics).
       act_legs_list, jacc_list, jacc_legs_list, jacc_arms_list = [], [], [], []
+      # LCP smoothness suite (Chen 2025), legs-only, in the paper's units. `ajit` is the
+      # THIRD derivative of the commanded joint target (rad/s^3) and `qjit` the third
+      # derivative of the realized joint position -- the two metrics the paper's ablation
+      # ranks on, because they separate smoothing methods ~13x where first/second
+      # derivatives (our action_rate / jacc) separate them only 1.2-1.7x.
+      ajit_list, qjit_list, act_legs_rad_list = [], [], []
+      act_hist: list[torch.Tensor] = []   # last 3 raw action tensors, newest last
+      prev_jacc_signed: torch.Tensor | None = None
       achieved_vxs = []  # per-step env-mean achieved vx (ramp metric for --eval-cmd-vx holds)
       prev_actions: torch.Tensor | None = None
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
@@ -545,12 +565,37 @@ def run_play(task_id: str, cfg: PlayConfig):
             act_legs_list.append(
               d_ar[:, leg_ids].norm(dim=-1).mean().item() if leg_ids is not None
               else float("nan"))
+            if leg_ids is not None:
+              act_legs_rad_list.append(
+                (d_ar * kappa)[:, leg_ids].norm(dim=-1).mean().item())
           prev_actions = actions.clone()
+
+          # 3c. Action jitter (LCP primary): d3(q_des)/dt3 in rad/s^3, legs-only.
+          # q_des = q_def + kappa*a, and q_def is constant, so the third derivative of the
+          # command is the third difference of kappa*a. Backward third difference
+          # (a_t - 3a_{t-1} + 3a_{t-2} - a_{t-3}) / dt^3 -- exact here because the action
+          # sequence carries no sensor noise, unlike the same operator on hardware logs.
+          act_hist.append(actions.clone())
+          if len(act_hist) > 4:
+            act_hist.pop(0)
+          if len(act_hist) == 4:
+            a3, a2, a1, a0_ = act_hist  # oldest -> newest
+            d3 = (a0_ - 3.0 * a1 + 3.0 * a2 - a3) * kappa / (ctrl_dt ** 3)
+            ajit_list.append(
+              d3[:, leg_ids].norm(dim=-1).mean().item() if leg_ids is not None
+              else float("nan"))
 
           # 3b. Joint acceleration (deploy diagnostic): whole-body + leg/arm-restricted
           # mean |qddot|. p95 (below, post-rollout) separates contact-impulse spikes
           # from steady-state jitter -- the mean alone conflates the two.
           jacc = robot.joint_acc.abs()
+          # 3d. DoF position jitter (LCP realized-side counterpart): one difference of the
+          # SIGNED joint acceleration, not of |qddot| -- differencing the absolute value
+          # would miss every sign flip, which is most of what jerk is.
+          if prev_jacc_signed is not None and leg_ids is not None:
+            qjit = (robot.joint_acc - prev_jacc_signed) / ctrl_dt
+            qjit_list.append(qjit[:, leg_ids].norm(dim=-1).mean().item())
+          prev_jacc_signed = robot.joint_acc.clone()
           jacc_list.append(jacc.mean().item())
           jacc_legs_list.append(
             jacc[:, leg_ids].mean().item() if leg_ids is not None else float("nan"))
@@ -633,6 +678,15 @@ def run_play(task_id: str, cfg: PlayConfig):
         "jacc_arms":     _m(jacc_arms_list),
         "jacc_legs_p95": _p95(jacc_legs_list),
         "jacc_arms_p95": _p95(jacc_arms_list),
+        # LCP suite, legs-only, rad/s^3 (published Unitree H1 refs: action jitter 0.44 in
+        # MuJoCo, 1.11-1.20 on real ground; NOT rate-matched to our 50 Hz -- a sanity band,
+        # never a pass/fail gate).
+        "ajit_legs":     _m(ajit_list) if ajit_list else float("nan"),
+        "ajit_legs_p95": _p95(ajit_list) if ajit_list else float("nan"),
+        "qjit_legs":     _m(qjit_list) if qjit_list else float("nan"),
+        "qjit_legs_p95": _p95(qjit_list) if qjit_list else float("nan"),
+        # Commanded agitation in PHYSICAL units (rad/step): act_legs is raw action units.
+        "act_legs_rad":  _m(act_legs_rad_list) if act_legs_rad_list else float("nan"),
         "orient_dev":  _m(orient_devs),
         "height_dev":  _m(height_devs),
         "ub_pose_dev": _m(ub_pose_devs),

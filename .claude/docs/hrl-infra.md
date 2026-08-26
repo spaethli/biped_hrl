@@ -423,6 +423,21 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   `deployment.md`.
 
 ## Gotchas (apply to all HRL arches)
+- **Score smoothness per REGIME — the aggregate bench cannot see a standing defect.**
+  `rel_standing_envs=0.05`, so the aggregate is ~95% walking; a 31-44x zero-command defect
+  reported as "+24%" (2026-08-26). Use `--eval-cmd-vx 0.5` for walking and `--eval-cmd-vx 0.0`
+  for standing, always separately. Vocabulary and the metric set → `CONTEXT.md`.
+- **`--diagnose-symmetry` is SILENTLY SKIPPED when `--eval-steps > 0`** — the eval block
+  ends `env.close(); return` before reaching it, so no `[SYMDIAG]` is emitted and the touchdown
+  counts are simply absent. Run it as its own invocation.
+- **`cadence_period_range` IS settable from the CLI**, with Python syntax and quoted:
+  `--agent.cadence-period-range "(0.625,0.625)"`. Only the space-separated form raises
+  "Unrecognized options" (mjlab sets `tyro.conf.UsePythonSyntaxForLiteralCollections`). The
+  2026-07-03 note read that as "not overridable" and routed range changes through code edits
+  for two months — retracted 2026-08-26.
+- **Commanded-side smoothness is reported in radians, never raw action units** — `kappa =
+  0.25*tau_max/Kp` spans 6.7x across the body, so whole-body raw norms over-weight the arms
+  3-6.7x. Legs-only is unaffected in ranking (kappa is uniform 0.25 across all 12 leg joints).
 - **The exp kernel's "strictly positive" guarantee rests on `orientation` being in the goal
   space** (found 2026-07-29 while writing `tests/`). `exp(-d²/σ²)` underflows to *exactly*
   0.0 in float32 past `|Δv| > 4.7 m/s` / `|Δh| > 0.94 m`; the sum stays positive only
