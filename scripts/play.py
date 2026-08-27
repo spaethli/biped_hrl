@@ -12,6 +12,8 @@ import tyro
 import yaml
 
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs import mdp as envs_mdp
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -131,6 +133,14 @@ class PlayConfig:
   fixed-command replays walk STRAIGHT instead of slowly circling (the A0-inherited yaw drift
   curves the path when wz is just pinned to 0). Requires --eval-cmd-vx; overrides eval_cmd_wz
   (wz becomes the live heading correction, clipped to the task's ang_vel_z range)."""
+  eval_payload_kg: float | None = None
+  """WP1 payload pilot (2026-08-27): pin an exact torso payload mass (kg, added at the COM)
+  for the whole eval rollout, instead of the training-time sampled range. Reuses the existing
+  ``base_mass`` DR mechanism (``dr.body_mass``, same function as WL-D arm 8's wide-DR bundle)
+  with a degenerate ``ranges=(kg, kg)`` -- the same pin idiom as --eval-cadence-period. None
+  (default) -> no event added, byte-identical to current behavior. The checkpoint under test
+  was NOT trained with payload DR, so this is a zero-shot generalization probe: does the
+  optimal stride period shift with an injected payload the policy never saw."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -180,6 +190,24 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
+
+  # WP1 payload pilot: pin an exact torso payload for the whole eval rollout (see
+  # --eval-payload-kg docstring). Reuses dr.body_mass with a degenerate range instead of
+  # adding a parallel mass mechanism.
+  if cfg.eval_payload_kg is not None:
+    if "base_com" not in env_cfg.events:
+      raise SystemExit("--eval-payload-kg: task has no 'base_com' event to borrow the "
+                        "torso asset_cfg from.")
+    env_cfg.events["base_mass"] = EventTermCfg(
+      mode="startup",
+      func=envs_mdp.dr.body_mass,
+      params={
+        "asset_cfg": env_cfg.events["base_com"].params["asset_cfg"],
+        "operation": "add",
+        "ranges": (cfg.eval_payload_kg, cfg.eval_payload_kg),
+      },
+    )
+    print(f"[WP1] Pinned torso payload = {cfg.eval_payload_kg} kg.")
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(
@@ -504,6 +532,14 @@ def run_play(task_id: str, cfg: PlayConfig):
       contact_sensor = None
     step_dt = uenv.step_dt
     MASS_G = 75.0 * 9.81  # H1-2 ~75 kg; dimensionless CoT = energy / (m g distance)
+    # WP1 payload pilot: copper-loss-corrected CoT variant, metric-only (never enters any
+    # reward -- the trained/mechanical `power`/`cot` below are unchanged). k = 0.3 from
+    # Yang et al. 2022 (CoRL), "Fast and Efficient Locomotion via Learned Gait Transitions"
+    # (arXiv:2104.04644) eq. 3, Sum_i max(tau_i*omega_i + k*tau_i^2, 0), their "motor
+    # parameter" following the MIT-Cheetah/Di Carlo actuator convention. NOT fit to the
+    # H1-2's M107/GO2HV actuators specifically (no public winding-resistance/torque-constant
+    # spec for them); a documented literature default.
+    COPPER_LOSS_K = 0.3
 
     # Collect label / structure info for the JSON line.
     bench_meta: dict = {"label": str(resume_path) if resume_path is not None else "unknown"}
@@ -524,6 +560,10 @@ def run_play(task_id: str, cfg: PlayConfig):
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
       ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
+      # WP1 payload pilot: copper-loss power (metric-only), body roll/pitch-rate magnitude
+      # (wobble proxy), and per-step cross-env vx variance (F5 analogue -- the N=64 parallel
+      # envs under a pinned --eval-cmd-vx ARE the "N repeats of an identical command").
+      powers_copper, omega_xys, achieved_vx_vars = [], [], []
       # Leg-restricted action rate + whole-body/leg/arm joint-accel (deploy diagnostics).
       act_legs_list, jacc_list, jacc_legs_list, jacc_arms_list = [], [], [], []
       # LCP smoothness suite (Chen 2025), legs-only, in the paper's units. `ajit` is the
@@ -566,6 +606,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         jl_sum = torch.zeros(len(lim_names), device=env.device)  # mean excess/step (ADR-0008 sizing)
         jl_rew = {}  # term name -> summed |contribution|, for the reward-share table
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
+      energy_eng_copper = 0.0  # copper-loss CoT numerator (metric-only)
       prev_contact: torch.Tensor | None = None
       n_feet = 0
       gait_offsets = torch.tensor([0.0, 0.5], device=env.device).view(1, -1)
@@ -614,6 +655,10 @@ def run_play(task_id: str, cfg: PlayConfig):
           errs_vy.append(ae[:, 1].mean().item())
           errs_yaw.append(ae[:, 2].mean().item())
           achieved_vxs.append(achieved[:, 0].mean().item())
+          # WP1 stability proxy (F5 analogue): cross-env variance of achieved vx at this
+          # step -- meaningful under a pinned --eval-cmd-vx, where the N envs are N
+          # repeats of the identical command (same convention as ss_err_vx/t90 below).
+          achieved_vx_vars.append(achieved[:, 0].var(dim=0).item())
 
           # 2. Survival: fall flag and episode length.
           if has_fell:
@@ -675,6 +720,10 @@ def run_play(task_id: str, cfg: PlayConfig):
           height_devs.append(
             (robot.root_link_pos_w[:, 2] - nom_h).abs().mean().item()
           )
+          # WP1 stability proxy: body roll/pitch-rate magnitude (wobble), distinct from
+          # orient_dev (a position-like projected-gravity deviation) and err_yaw (the
+          # commanded-axis yaw-RATE tracking error, about z only).
+          omega_xys.append(robot.root_link_ang_vel_b[:, :2].norm(dim=-1).mean().item())
 
           # 5. Upper-body deploy hygiene: arm+waist drift from default + joint speed.
           ub_pose_devs.append(
@@ -686,9 +735,15 @@ def run_play(task_id: str, cfg: PlayConfig):
           # 6. Mechanical power + cost of transport (gated by commanded linear speed > 0.1).
           power = (robot.qfrc_actuator * robot.joint_vel).abs().sum(dim=1)  # [B] watts
           powers.append(power.mean().item())
+          # 6b. Copper-loss-corrected power (metric-only, WP1): adds k*tau^2 per joint
+          # before summing -- see COPPER_LOSS_K comment above.
+          power_copper = ((robot.qfrc_actuator * robot.joint_vel).abs()
+                          + COPPER_LOSS_K * robot.qfrc_actuator.square()).sum(dim=1)
+          powers_copper.append(power_copper.mean().item())
           lin_speed = robot.root_link_lin_vel_b[:, :2].norm(dim=-1)  # [B] achieved m/s
           eng = (cmd[:, :2].norm(dim=-1) > 0.1).float()  # commanded-motion gate
           energy_eng += (power * eng).sum().item() * step_dt
+          energy_eng_copper += (power_copper * eng).sum().item() * step_dt
           dist_eng += (lin_speed * eng).sum().item() * step_dt
           # 7. Achieved stride period from footfall rising edges (same-foot touchdown interval).
           if contact_sensor is not None:
@@ -759,9 +814,21 @@ def run_play(task_id: str, cfg: PlayConfig):
         "mech_power_w": _m(powers) if powers else float("nan"),
         "gait_match":   _m(gait_matches) if gait_matches else float("nan"),
         "cot":          energy_eng / (dist_eng * MASS_G + 1e-6),
+        # WP1 payload pilot additions (2026-08-27): copper-loss CoT variant (metric-only,
+        # see COPPER_LOSS_K), body roll/pitch-rate wobble, and the F5-analogue cross-env
+        # vx spread under a pinned command (meaningful only with --eval-cmd-vx set).
+        "mech_power_copper_w": _m(powers_copper) if powers_copper else float("nan"),
+        "cot_copper":   energy_eng_copper / (dist_eng * MASS_G + 1e-6),
+        "omega_xy":     _m(omega_xys) if omega_xys else float("nan"),
+        "ss_vx_var":    _m(achieved_vx_vars[ss0:]) if achieved_vx_vars else float("nan"),
         "stride_period_s": (cfg.eval_steps * step_dt)
                            / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
       })
+      # WP1 payload pilot: a per-seed line, since [BENCH] below only ever prints the
+      # seed-aggregated mean+-std. The sweep CSV needs one row per (T, payload, vx, seed)
+      # for the T* seed-spread analysis, which the aggregate's std alone cannot give
+      # (fitting T* per seed, then spreading THAT, is not the same as spreading the metric).
+      print(f"[BENCH_SEED] {json.dumps({**bench_meta, 'seed': seed, **seed_results[-1]})}")
 
     # Aggregate across seeds.
     keys = list(seed_results[0].keys())
@@ -833,6 +900,9 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  UpperBody arm_vel   : {_fmt('ub_arm_vel')}")
     print(f"  Energy    power_W   : {_fmt('mech_power_w')}")
     print(f"  Energy    CoT (norm): {_fmt('cot')}")
+    print(f"  Energy    CoT copper: {_fmt('cot_copper')}")
+    print(f"  Stability omega_xy  : {_fmt('omega_xy')}")
+    print(f"  Stability ss_vx_var : {_fmt('ss_vx_var')}")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print(f"  Gait      match     : {_fmt('gait_match')}")
     if cfg.eval_cmd_vx is not None:

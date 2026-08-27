@@ -13,6 +13,57 @@ ADR-0005 for WL-E — this file summarizes and points there, it does not restate
 > now live in the author's research knowledge base. This file is the live registry:
 > who owns what, what is in flight, and the standing rules.
 
+> **Organising axis changed 2026-08-27.** The thesis was reframed and replanned for the
+> final 8 weeks (submission 2026-10-18), and the live axis is now the plan's **work
+> packages WP0–WP8**, not the WL letters. The WL table below is retained as history and
+> for the tracks still running under it (WL-B hardware in particular, which executes WP0).
+> New delegation registers under WP. See "Final-sprint work packages" immediately below.
+
+## Final-sprint work packages (WP0–WP8, opened 2026-08-27)
+
+Governing plan: `thesis_plan_8weeks.md` (plan date 2026-08-24) — claim, RQ1–RQ3, the 2x2
+arm matrix, metrics F1–F5, pre-registered Bars A–F, and the WP definitions. This registry
+does not restate it. ⚠ The plan currently lives outside the repo (`~/Downloads/`); it is
+governing, so it wants a durable home before W5.
+
+Freeze rules from the plan: **FEATURE FREEZE 2026-09-20**, **HARDWARE DATA FREEZE
+2026-10-04**. Anything not working by its freeze becomes named future work.
+
+| WP | What | Owner | State |
+|---|---|---|---|
+| **WP0** | Deployment-faithful interface (obs-diff on the 15 held joints, zero-command sampling, yaw asymmetry F3). **Blocking.** | WL-B hardware chat(s) | **live.** Three decisions taken 2026-08-27, see below. |
+| **WP1** | Payload pilot — `CoT(T, payload)` / `stability(T, payload)` surfaces, `T*(payload)`. **Gate: Bar A.** | delegated 2026-08-27 (sonnet); verdict retained by WL-A | **DONE 2026-08-27, verdict = DIVERGENCE (not pass/fail).** At vx=0.5, CoT-optimal T* moves down with payload (0.517->0.504 kg, both seeds, 3.4-4x the seed spread) while the `ss_vx_var` stability proxy moves up (0.35->0.416, >130x the seed spread) — opposite directions, per the task's explicit stop-rule this is reported and left to the planning chat, not scored PASS/FAIL. vx=1.0 is edge-degenerate on every objective (argmin pinned to the T=0.35 floor at every payload level) -- inconclusive, not a fail. Full numbers, figures, caveats -> `A1a_plan.md` "WP1 payload pilot"; raw data -> `data/2026-08-27-wp1-payload-pilot/`. |
+| **WP2** | Payload DR + env plumbing; privileged `e` channel; hardware mount fabricated **and weighed** | unassigned | queued W1–W2. Depends on WP1 spec step 1. |
+| **WP3** | Baseline arms **F-mem** (A0 + payload DR), **H-mem** (A1a + payload DR), 2 seeds each | unassigned | queued W2 |
+| **WP4** | Flat history control **F-hist** (stacked obs, end-to-end) | unassigned | queued W2–W3. *First thing to cut if the schedule slips.* |
+| **WP5** | HL adaptation module **H-adapt** (RMA phases 1/2, LL never retrained). **Core.** **Gate: Bar B.** | unassigned | queued W2–W3. Opus-class when it goes out. |
+| **WP6** | Sim evaluation matrix, 4 arms x 4 payloads x 2 seeds. **Gates: Bars C, D, E.** | unassigned | queued W3–W4 |
+| **WP7** | Hardware campaign, 3 payloads x 3 policies + OOD block. **Gate: Bar F.** Within-session comparison **mandatory**. | WL-B hardware chat(s) | queued W3–W4, reruns to W6 |
+| **WP8** | Writing | Liam | W5–W8 |
+
+### WP0 decisions taken 2026-08-27
+
+1. **Upper body runs FREE.** Hardware-observed: freeing it markedly reduces the
+   jitter/twitchiness. This retires the `hold_joint_ids` question that ADR-0005 step 3b
+   left open, and it removes the sim/deploy interface mismatch the plan flagged (up to 42
+   of 94 HL obs dims inconsistent under the hold). All four arms train and deploy free.
+   ⚠ Consequence for the record: the 225.8 s A0 hardware baseline (2026-07-23) was taken
+   **held**, so it is not a like-for-like control for anything measured free.
+2. **Zero-command sampling raised in training.** Fixes the standing-still behaviour, and
+   is the leading explanation for the HL emitting a nonzero goal at zero command. Under
+   uniform box sampling the near-zero ball is ~0.1% of the volume while a whole
+   behavioural regime is gated at ‖c‖ ≤ 0.1. The plan's conditional zero-command goal gate
+   is therefore **not** triggered so far; keep it unbuilt unless measurement says otherwise.
+   Relates to the lateral phantom (`|g|vy`, not `|g|vx`).
+3. **Ankle-limit safety trips: CLOSED by ADR-0008.** `--check-joint-limits`, v2 → v3:
+   over-limit rate 0.00193 → 0.00001 (193x), mean excess 0.008676 → 0.000003 rad/step
+   (~2900x), worst overshoot 0.997 → 0.0375 rad (27x). The residual is nonzero rather than
+   exactly zero, which is the signature of the **L1 excess penalty having shaped the
+   policy** rather than a clamp masking it — so the deploy-side clip is a genuine backstop,
+   as ADR-0008 claims. ⚠ The tail improved least (27x vs 193x/2900x), expected under an L1
+   term that prices total rather than peak excess: any residual hardware trip comes from
+   there. Full record → `docs/adr/0008`.
+
 ## Decisions locked (2026-07-16 grill)
 
 1. **Sequencing: WL-C verification gates the WL-D batch.** The HIRO-relabel hold-bias
