@@ -189,10 +189,14 @@ analysis and the proposed change first.
   (`task5b_bare_verdict.md`, `task6_nearzero_probe.md`).
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
-- Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
-  a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds. Gait lift-off
-  iteration scales with num_envs — never judge stuck-vs-slow before ~2x the expected
-  lift-off (see `docs/adr/0005` amendment).
+- Same-config runs diverge a lot (GPU non-determinism + RL chaos), and **how much depends
+  on the REGIME**: measured on two config-identical same-seed pairs (2026-08-27), walking
+  metrics reproduce to ~10% but standing ajit/touchdowns span **4.2x** and held tracking
+  **3.3x** — one replicate never reached the commanded speed at all. Score a standing arm
+  against a replicate BAND, never a single control; a <2x standing effect from one run is
+  not evidence. Treat `num_envs` as a hyperparameter: hold it fixed within a comparison
+  set; use ≥2 seeds. Gait lift-off iteration scales with num_envs — never judge
+  stuck-vs-slow before ~2x the expected lift-off (see `docs/adr/0005` amendment).
 - **`Unitree-H1_2-Rough` (2026-08-26): the actor is BLIND, and sim sizing is the binding
   constraint on a 12 GB card.** The terrain `height_scan` is **critic-only** (asymmetric
   actor-critic). An actor that reads it exports at **279** dims and is undeployable: the

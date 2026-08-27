@@ -423,6 +423,17 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   `deployment.md`.
 
 ## Gotchas (apply to all HRL arches)
+- **The run-to-run floor is REGIME-DEPENDENT — 4x at standing, ~10% at walking.** Measured
+  2026-08-27 on two config-identical, same-seed-42 replicate pairs: walking `act_legs`/`ajit`/
+  `jacc` reproduce to 1.02-1.31x, while standing `ajit` spans 4.15x, standing touchdowns 4.22x,
+  `|g|vy` 3.57x and held `ss_err_vx` 3.32x (one replicate never reached the commanded speed,
+  `t90 = nan`). This is TRAINING noise, not bench noise — re-measuring the same checkpoint
+  reproduces to 1.6-4.2%. Standing is a near-marginal equilibrium (quiet double-support vs a
+  corrective limit cycle is a bifurcation); walking is a limit cycle either way. **Score any
+  standing arm against a replicate band, and attach a measured floor to any pre-registered
+  stop rule on a standing metric** — a 30% change is unresolvable. Also: at `cmd 0` the MEAN
+  sits above the p95 for quiet policies (the set-down transient carries it), so mean and p95
+  can disagree in direction; report both.
 - **Score smoothness per REGIME — the aggregate bench cannot see a standing defect.**
   `rel_standing_envs=0.05`, so the aggregate is ~95% walking; a 31-44x zero-command defect
   reported as "+24%" (2026-08-26). Use `--eval-cmd-vx 0.5` for walking and `--eval-cmd-vx 0.0`
