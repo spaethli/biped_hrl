@@ -1,0 +1,5 @@
+vx,payload,argmin_T,y_min,loc_depth_pct,full_depth_pct,floor_2sem_pct,depth_over_floor,Tstar,Tstar_lo,Tstar_hi,status
+0.5,0,0.6,36.376362233190484,,3.491,0.237,,,,,argmin@edge(0.60)
+0.5,4,0.6,40.023838098818516,,5.624,0.199,,,,,argmin@edge(0.60)
+0.5,8,0.6,43.25277481259173,,10.406,0.28,,,,,argmin@edge(0.60)
+0.5,12,0.6,49.041007684179725,,8.955,0.23,,,,,argmin@edge(0.60)

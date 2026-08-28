@@ -171,3 +171,77 @@ at vx=0.5 they diverge — CoT wants ~0.50-0.52 s, softening slightly with paylo
 low-variance plateau's edge from 0.35 s toward ~0.42 s. They do not coincide at any
 payload level tested. Whether this triggers WP1's "add a stability term to the HL
 reward" branch is the planning chat's call.
+
+### CORRECTION (WL-A, 2026-08-27) — the DIVERGENCE verdict above does not stand
+
+Re-analysis of `wp1_sweep.csv` by the planning chat. The sweep itself, the tooling, and the
+raw numbers above are sound and are kept as delivered; what does not survive is the
+**T\* extraction** and the verdict built on it.
+
+**1. The reported CoT `T*` shift is a fit artifact.** The raw grid argmin moves *up* with
+payload; the delivered local-quadratic fit moves *down*:
+
+| payload (kg) | grid argmin s42 | grid argmin s43 | reported fit s42 |
+|---|---|---|---|
+| 0  | 0.50 | 0.50 | 0.517 (**above** the grid min) |
+| 4  | 0.50 | 0.50 | 0.506 |
+| 8  | 0.50 | 0.55 | 0.504 |
+| 12 | **0.55** | **0.55** | 0.504 (**below** the grid min) |
+
+The fit sits above the data's minimum at 0 kg and below it at 12 kg — opposite to the grid
+at both ends. That is the local quadratic being pulled by an asymmetric bracket on a
+non-uniform grid, not a physical shift.
+
+**2. Root cause: the mechanical-CoT bowl is flatter than the measurement noise.** Depth
+across the 3 points bracketing the minimum, against the ±2.6% 64-env reproducibility floor:
+
+| payload (kg) | seed 42 | seed 43 |
+|---|---|---|
+| 0  | 2.72% | 2.54% |
+| 4  | **0.81%** | **0.34%** |
+| 8  | **0.22%** | 3.93% |
+| 12 | 5.22% | 6.44% |
+
+Five of eight cells are at or under the floor, and the seeds already disagree on the grid
+argmin at 8 kg. **An argmin cannot be located inside a bowl shallower than the measurement
+error.** The delivered magnitude test (effect ≥ 2x seed spread) passed only because it
+compared against the reproducibility of a *deterministic fit over noisy data*, which is not
+the uncertainty that matters. Same class as the pre-registration lesson: the bar was
+watching the wrong quantity.
+
+**3. vx=1.0 is edge-censored, and that is the whole of the "payload has no influence"
+reading.** `cot` rises monotonically across the entire grid (0.624 → 1.037); there is no
+bowl, and T\*=0.35 is the window's left edge, not an optimum. A censored argmin cannot move
+with payload. The physics is the `v = L/T` constraint with stride length bounded: at 1.0 m/s
+and T=0.9 s the required ~0.9 m stride is out of hip range, so the robot fails outright
+(`err_vx` → 0.27). Shorter period at higher speed is correct and expected.
+
+**4. Payload IS a live latent — the signal is in the level, not the argmin.**
+
+| | mech power @12 kg | copper-loss @12 kg |
+|---|---|---|
+| vx=0.5 | +16.5% | **+34.4%** |
+| vx=1.0 | +10.6% | **+22.1%** |
+
+Copper-loss responds ~2x harder at both speeds, exactly as plan §4 predicted: `Σ|τq̇|` is
+blind to static holding torque, which is most of what a payload adds; `kτ²` is the term that
+sees it. **The trained objective is the one metric structurally least able to see the chosen
+latent.**
+
+**5. New measurement, decisive for the reward question: tracking-optimal `T` is
+payload-INVARIANT.** Grid argmin of `err_vx` is **0.50 s in 15 of 16 cells** (the lone
+exception, vx=1.0/12 kg/seed 42 at 0.35, is contradicted by its partner seed), on a bowl with
+real depth (0.0625 → 0.1615 across the grid, a 2.6x span far above noise). Payload moves the
+tracking *level* but not its optimum.
+
+Consequence: **a tracking-only HL objective has no gradient to change stride under load.**
+Dropping `hl_cot_coef` to restore RQ2 reward parity with A0 would also remove the only driver
+of the payload→stride mechanism that Bar B is defined to test. The two goals are in direct
+conflict and the choice must be made explicitly, not by default.
+
+**Corrected verdict.** Bar A is **UNRESOLVED on mechanical CoT**, **qualitatively PASSED on
+copper-loss CoT** (argmin 0.35-edge at 0/4 kg → interior 0.60 at 8/12 kg), and payload is
+confirmed a live latent in every level metric. This is **not a fail**: do not trigger the
+plan's friction/slope pivot on it. Repeat scoped as **WP1b** — score bowl depth against the
+noise floor, extend the grid below 0.35, raise the seed count, and settle the objective
+question with a measurement rather than a preference.
