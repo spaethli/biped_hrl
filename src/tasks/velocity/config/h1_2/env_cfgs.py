@@ -1,7 +1,6 @@
 """Unitree H1_2 velocity environment configurations."""
 
 from src.assets.robots import (
-  H1_2_ACTION_CLIP,
   H1_2_ACTION_SCALE,
   get_h1_2_robot_cfg,
 )
@@ -90,13 +89,6 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
   joint_pos_action.scale = H1_2_ACTION_SCALE
-  # ADR-0008 (Model v3): the commanded target is clipped to the hardware limits, mirroring
-  # the truncation the C++ deploy path applies at the same point in the pipeline
-  # (isaaclab/envs/mdp/actions/joint_actions.h:54). Without it the policy trains against a
-  # trajectory the robot cannot execute. Pairs with the `action_clip` reward term, which
-  # prices the discarded excess -- the clip alone makes every target past the bound produce
-  # an identical outcome, so nothing would distinguish 0.1 rad over from 1.0 rad over.
-  joint_pos_action.clip = H1_2_ACTION_CLIP
 
   cfg.viewer.body_name = "torso_link"
 
@@ -116,7 +108,7 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   # memory -> erratic actions -> safety hold -> near-passive robot. The critic keeps the
   # scan (asymmetric actor-critic: privileged value function, deployable policy), so a
   # blind rough actor exports at exactly the flat 92 dims and is a drop-in for the existing
-  # deploy config.
+  # deploy config. NOT part of Model v3 -- do not remove with an ADR-0008/0009 revert.
   del cfg.observations["actor"].terms["height_scan"]
 
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
@@ -178,10 +170,15 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # Apply play mode overrides.
   if play:
-    # Increase number of contacts broadphase+narrowphase may report per world
-    cfg.sim.nconmax = 512
     # Effectively infinite episode length.
     cfg.episode_length_s = int(1e9)
+
+    # Play draws random terrain tiles (curriculum off), and the INITIAL-POSE contact count
+    # on the hard tiles reaches ~195 -- put_data validates mjd.ncon <= nconmax and raised
+    # "nconmax overflow" on ~1 launch in 3 at the training value of 48. Steady-state demand
+    # is only 38 (measured, hardest row), so 48 stays correct for TRAINING; this is an
+    # init-pose headroom fix. NOT part of Model v3 -- do not remove with an ADR-0008/0009 revert.
+    cfg.sim.nconmax = 512
 
     cfg.observations["actor"].enable_corruption = False
     cfg.events.pop("push_robot", None)
@@ -220,7 +217,10 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.scene.sensors = tuple(
     s for s in (cfg.scene.sensors or ()) if s.name != "terrain_scan"
   )
-  # actor: already dropped by the rough builder (blind actor); critic still carries it.
+  # `pop`, not `del`, for the ACTOR: the rough cfg this builds on already removed
+  # height_scan from the actor (blind actor, 2026-08-26), so a strict delete raises here.
+  # Rough-terrain work, NOT Model v3 -- it rode in on the ADR-0008 commit and must survive
+  # the ADR-0009 revert. The critic keeps its scan until this line, so `del` is right there.
   cfg.observations["actor"].terms.pop("height_scan", None)
   del cfg.observations["critic"].terms["height_scan"]
 

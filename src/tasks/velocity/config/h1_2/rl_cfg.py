@@ -39,7 +39,7 @@ def unitree_h1_2_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       desired_kl=0.01, # 0.01 (2026-07-09): ~3x faster, stable to 10k, and required by full-v2 (torso+arm hold stalls at 0.005). ADR-0005.
       max_grad_norm=1.0,
     ),
-    experiment_name="h1_2_velocity_v3",
+    experiment_name="h1_2_velocity_v2",
     wandb_project="biped_hrl",
     save_interval=100,
     num_steps_per_env=24,

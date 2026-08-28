@@ -32,7 +32,6 @@ from .unitree_r1.r1_constants import (
 )
 
 from .unitree_h1_2.h1_2_constants import (
-  H1_2_ACTION_CLIP as H1_2_ACTION_CLIP,
   H1_2_ACTION_SCALE as H1_2_ACTION_SCALE,
 )
 from .unitree_h1_2.h1_2_constants import (

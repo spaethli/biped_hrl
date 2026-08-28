@@ -394,20 +394,6 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   documented deploy failure where A1a rides its joint stops far more of a bridge session
   than A0. Uses the default asset_cfg (all joints), mirroring ``joint_acc_l2``'s call
   style. 0 disables (byte-identical baseline)."""
-  ll_action_clip_coef: float = 3.5
-  """ADR-0008 (Model v3): mirrors A0's ``action_clip`` (L1 excess of the commanded joint
-  target past the hardware limits) into the LL intrinsic. Mandatory as a SEPARATE routing:
-  the env reward term never reaches the A1 low level (``ll_task_reward_coef=0``), so
-  without this the clip would be priced for A0 and free for A1 - exactly the asymmetry
-  RQ2 forbids. Distinct from ``ll_joint_limits_coef`` above, which mirrors the MEASURED
-  soft-limit term; this one scores the COMMAND.
-  SIZED 2026-08-26: 3.5, A0's ``action_clip`` magnitude verbatim (owner's call). Note the
-  sign convention differs by construction - A0 applies ``weight=-3.5`` while the runner
-  computes ``r_lo - coef*excess``, so the mirror is +3.5, not -3.5. Risk recorded in the
-  ADR: the LL intrinsic runs on a different scale
-  than A0's task reward, and h1_2_a1/env_cfgs.py:105 documents a term at weight 1.0
-  already swamping tracking - watch ``ll/action_clip_pen``'s share. 0 disables
-  (byte-identical baseline)."""
   ll_soft_landing_coef: float = 0.0
   """WL-D: mirrors A0's ``soft_landing`` (first-contact impact-force penalty, A0 weight
   -1e-3) into the LL intrinsic - targets the measured gap (A0 -0.024 vs A1 -0.085). Same
@@ -694,7 +680,7 @@ def unitree_h1_2_hrl_runner_cfg() -> HrlRunnerCfg:
       desired_kl=0.01, # 0.01 default (2026-07-09, exp-kernel scratch run validated it)
       max_grad_norm=1.0,
     ),
-    experiment_name="h1_2_velocity_a1_v3",
+    experiment_name="h1_2_velocity_a1_v2",
     wandb_project="biped_hrl",
     save_interval=100,
     num_steps_per_env=24,

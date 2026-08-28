@@ -1,6 +1,9 @@
 # Leg-mass and foot-geometry nominal correction (Model v3)
 
-**Status: SUPERSEDED BY ADR-0008 (2026-08-25).** Model v3 is now defined by ADR-0008 as
+**Status: NOT SUPERSEDED (2026-08-28).** ADR-0008 briefly superseded this and was itself
+reverted by **ADR-0009**, which cut the leg-mass correction with the rest of Model v3 after
+measuring it inert. So item 1 (leg mass) is **not applied**, and item 2 (foot sole geometry)
+is live again as a staged, unscheduled proposal. The historical framing below is kept: Model v3 is now defined by ADR-0008 as
 **action clip + leg mass**. The leg-mass spec in item 1 below is carried into that cut
 **verbatim**, but justified as a *fidelity* correction only — V1's falsification (leg mass moved
 the hardware lean by nothing) stands and the lean claim is not made. **Item 2, the foot sole

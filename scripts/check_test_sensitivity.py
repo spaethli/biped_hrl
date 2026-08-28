@@ -32,40 +32,20 @@ REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deplo
 DGA = REPO / "scripts/deploy_gate_analyzer.py"
 PRV = REPO / "scripts/deploy_provenance.py"
 BSN = REPO / "scripts/bridge_session.py"
-H12C = REPO / "src/assets/robots/unitree_h1_2/h1_2_constants.py"
-H12E = REPO / "src/tasks/velocity/config/h1_2/env_cfgs.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
-
-  # --- ADR-0008 (Model v3): the commanded-target clip ---
-  ("excess measured AFTER the clip (term reads 0 forever, ADR-0008)", RW,
-   "  preclip = term.raw_action * term.scale + term.offset",
-   "  preclip = term._processed_actions",
-   "test_action_clip_excess_is_measured_before_the_clip"),
-
-  ("training clip drops a joint (trained unclipped, robot truncates)", H12C,
-   "    if not model.jnt_limited[j]:\n      continue",
-   "    if not model.jnt_limited[j] or 'ankle_pitch' in (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or ''):\n      continue",
-   "test_training_clip_covers_every_actuated_joint"),
-
-  ("training clip widened off the hardware limits (parity gap reopens)", H12C,
-   "    out[f\"^{name}$\"] = (float(model.jnt_range[j][0]), float(model.jnt_range[j][1]))",
-   "    out[f\"^{name}$\"] = (float(model.jnt_range[j][0]) - 0.5, float(model.jnt_range[j][1]) + 0.5)",
-   "test_training_clip_matches_the_deploy_limit_header"),
-
-  ("deploy yaml clip reverted to null (robot stops truncating at the same point)", YML,
-   "    clip: [", "    clip_disabled: [",
+  # ADR-0009: the deploy clip is kept, so it stays pinned to h1_2_limits.h, and the yaml must
+  # not carry a duplicate key (yaml-cpp keeps the FIRST, PyYAML the LAST -- three A0 hardware
+  # sessions on 2026-08-27 ran clipped while the config read `clip: null`).
+  ("deploy clip drifts from the limit header (left_ankle_pitch)", YML,
+   "[-0.897334, 0.523598],", "[-1.2, 0.9],",
    "test_deploy_yaml_clip_matches_the_limit_header"),
 
-  ("A1 never routes the clip penalty (priced for A0, free for A1)", HR,
-   "            ac_pen = self.ll_action_clip_coef * mdp_rewards.action_clip_excess(uenv)",
-   "            ac_pen = self.ll_action_clip_coef * 0.0",
-   "test_a1_routes_the_clip_penalty_into_the_low_level_intrinsic"),
+  ("`clip: null` appended below the table (silent no-op on the robot, 2026-08-27)", YML,
+   "    ]\n    joint_names: [.*]", "    ]\n    clip: null\n    joint_names: [.*]",
+   "test_deploy_yaml_clip_matches_the_limit_header"),
 
-  ("training action term never gets the clip (v3 silently not applied)", H12E,
-   "  joint_pos_action.clip = H1_2_ACTION_CLIP", "  pass",
-   "test_the_built_env_actually_applies_the_clip"),
   ("goal scale re-derived live at inference (WL-C, 2026-07-16)", GS,
    "    if self._frozen_scale is not None:\n      return self._frozen_scale\n", "",
    "test_frozen_scale_survives_a_command_range_collapse"),

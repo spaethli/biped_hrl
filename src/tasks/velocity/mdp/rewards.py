@@ -840,36 +840,3 @@ def stand_still(
             reward *= scale
     return reward
 
-
-
-def action_clip_excess(
-  env: ManagerBasedRlEnv,
-  action_term_name: str = "joint_pos",
-) -> torch.Tensor:
-  """Penalise the commanded joint target that the action clip threw away (ADR-0008).
-
-  L1 sum over joints of ``|preclip - clipped|`` in radians. This is NOT the same quantity
-  as ``joint_pos_limits``: that one penalises the MEASURED position against the 0.9 soft
-  band, and MuJoCo already clamps ``qpos`` to the joint range, so it is close to inert on
-  the joints that matter here. This term prices the *command*, which nothing did before --
-  the A0 baseline learned to ask for up to 1.0 rad past the ankle stops precisely because
-  the region was free.
-
-  L1 rather than L2 on purpose: L2 would let one large excursion dominate a hundred small
-  ones, and it is the small persistent ones that produce the 12-15% hardware violation rate.
-  Same form as the ``joint_pos_limits`` term it sits beside.
-
-  The excess is RECOMPUTED as ``raw_action * scale + offset`` rather than read back from
-  the action term. mjlab's ``BaseAction.process_actions`` overwrites ``_processed_actions``
-  with the clamped value, so by reward time the pre-clip target is gone -- reading it would
-  make this term identically zero, which is the same measure-after-the-clamp defect the ADR
-  exists to fix.
-  """
-  term = env.action_manager.get_term(action_term_name)
-  # `make_velocity_env_cfg` is shared with robots that set no clip (g1, go2, ...); with no
-  # clip there is nothing to discard, so the honest value is zero rather than an error.
-  if getattr(term.cfg, "clip", None) is None:
-    return torch.zeros(env.num_envs, device=env.device)
-  preclip = term.raw_action * term.scale + term.offset
-  clipped = torch.clamp(preclip, min=term._clip[..., 0], max=term._clip[..., 1])
-  return torch.sum(torch.abs(preclip - clipped), dim=1)

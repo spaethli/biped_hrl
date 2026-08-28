@@ -605,6 +605,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         jl_max = torch.zeros(len(lim_names), device=env.device)
         jl_sum = torch.zeros(len(lim_names), device=env.device)  # mean excess/step (ADR-0008 sizing)
         jl_rew = {}  # term name -> summed |contribution|, for the reward-share table
+        jl_cmds = []  # per-step POST-clip targets, for the commanded-range percentiles
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
       energy_eng_copper = 0.0  # copper-loss CoT numerator (metric-only)
       prev_contact: torch.Tensor | None = None
@@ -635,6 +636,13 @@ def run_play(task_id: str, cfg: PlayConfig):
             jl_over += (over > 0).float().mean(dim=0)
             jl_sum += over.mean(dim=0)
             jl_max = torch.maximum(jl_max, over.amax(dim=0))
+            # Post-clip target = what the deploy path actually sends, and what the flight
+            # recorder holds: State_RLBase.cpp:221 logs `action` and the safety clamp at
+            # :164 writes a local, so `raw_q` is post-yaml-clip. Kept per step because the
+            # RANGE, not the excess, is the discriminating quantity -- `over` collapses to
+            # ~0 on any clip-trained policy, which hides whether the clip merely removed an
+            # unusable overshoot or the penalty retreated the policy off the bound.
+            jl_cmds.append(torch.clamp(q_cmd, lim_lo, lim_hi).detach())
             # Reward shares (ADR-0008 sizing): the excess weight is set so `action_clip`
             # contributes what `joint_pos_limits` contributes at the baseline violation
             # level, so both must be measured on the SAME rollout. NOTE a term whose
@@ -782,6 +790,29 @@ def run_play(task_id: str, cfg: PlayConfig):
       else:
         t90 = float("nan")
 
+      # Commanded RANGE per joint (2026-08-28, ADR-0008 follow-up). Percentiles of the
+      # POST-clip target so they compare directly against the flight recorder. p1/p99
+      # rather than min/max: one transient excursion is not authority, sustained range is.
+      # `headroom` is the distance from the used range to the nearer bound -- the quantity
+      # that separates a clip (headroom ~0, policy still reaches the stop) from a penalty
+      # that pushed the policy inward (headroom ~ one action-sigma).
+      jl_range = {}
+      if cfg.check_joint_limits and jl_cmds:
+        allc = torch.cat(jl_cmds, dim=0).float()  # [steps*B, D]
+        p01, p50, p99 = torch.quantile(
+          allc, torch.tensor([0.01, 0.5, 0.99], device=allc.device), dim=0)
+        pin = (((allc - lim_lo).abs() < 1e-9)
+               | ((allc - lim_hi).abs() < 1e-9)).float().mean(dim=0)
+        jl_range = {n: {"p1": round(p01[i].item(), 4), "p50": round(p50[i].item(), 4),
+                        "p99": round(p99[i].item(), 4),
+                        "span": round((p99[i] - p01[i]).item(), 4),
+                        "pinned": round(pin[i].item(), 5),
+                        "headroom": round(min((lim_hi[i] - p99[i]).item(),
+                                              (p01[i] - lim_lo[i]).item()), 4)}
+                    for i, n in enumerate(lim_names)}
+
+      def _span(n): return jl_range.get(n, {}).get("span", float("nan"))  # noqa: E731
+
       seed_results.append({
         "err_vx":      _m(errs_vx),
         "err_vy":      _m(errs_vy),
@@ -793,6 +824,13 @@ def run_play(task_id: str, cfg: PlayConfig):
         "mean_ep_len": _m(ep_lens),
         "action_rate": _m(action_rates) if action_rates else float("nan"),
         "act_legs":    _m(act_legs_list) if act_legs_list else float("nan"),
+        # Ankle command SPAN (rad): the deploy-relevant authority measure, since the two
+        # rolls are what reject a lateral push. Scalars here rather than print-only so
+        # they get the per-seed line and the seed mean+-std every other metric gets.
+        "ank_roll_span_l":  _span("left_ankle_roll"),
+        "ank_roll_span_r":  _span("right_ankle_roll"),
+        "ank_pitch_span_l": _span("left_ankle_pitch"),
+        "ank_pitch_span_r": _span("right_ankle_pitch"),
         "jacc":          _m(jacc_list),
         "jacc_legs":     _m(jacc_legs_list),
         "jacc_arms":     _m(jacc_arms_list),
@@ -873,7 +911,22 @@ def run_play(task_id: str, cfg: PlayConfig):
         if tot_ex > 0:
           print(f"  => suggested |weight| = {jpl:.6f} / {tot_ex:.6f} = {jpl / tot_ex:.4f}")
       print("=" * 78)
+      if jl_range:
+        print("  -" * 39)
+        print("  COMMANDED RANGE, post-clip (last seed)   span = p99-p1, "
+              "headroom = gap to nearer bound")
+        for n in ("left_ankle_roll", "right_ankle_roll",
+                  "left_ankle_pitch", "right_ankle_pitch"):
+          r = jl_range.get(n)
+          if r is None:
+            continue
+          i = lim_names.index(n)
+          print(f"    {n:<20} p1 {r['p1']:>8.4f}  p99 {r['p99']:>8.4f}  "
+                f"span {r['span']:>7.4f}  headroom {r['headroom']:>7.4f}  "
+                f"pinned {r['pinned']:>8.5f}   "
+                f"bounds [{lim_lo[i].item():+.4f},{lim_hi[i].item():+.4f}]")
       jl_json = {"total_mean_excess_rad": round(tot_ex, 6),
+                 "range": jl_range,
                  "per_joint": {n: {"rate": round(r, 6), "max_over_rad": round(m, 4),
                                    "mean_excess_rad": round(e, 6)}
                                for n, r, m, e in hit},

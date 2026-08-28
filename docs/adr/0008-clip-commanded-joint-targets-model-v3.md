@@ -1,6 +1,10 @@
 # Clip commanded joint targets to the hardware limits, and correct leg mass (Model v3)
 
-**Status:** accepted (2026-08-25). **Supersedes ADR-0006**, which defined Model v3 as leg mass
+**Status: SUPERSEDED BY ADR-0009 (2026-08-28), and REVERTED.** The parity gap diagnosed
+below is real and the diagnosis stands; the fix cost 2.1-2.4x of the commanded ankle roll
+range and bought nothing, because the firmware already truncated the commands the clip was
+added to truncate. Read ADR-0009 for the measurements and the decision. Nothing here is
+applied. Originally: accepted (2026-08-25), **superseded ADR-0006**, which defined Model v3 as leg mass
 + foot sole geometry; v3 is redefined here as **action clip + leg mass**. ADR-0006 keeps its
 investigation record (V1 falsification, Spec A rejection, Spec B confirmation) and its foot-sole
 geometry proposal, which stays staged and uncut.

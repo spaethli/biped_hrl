@@ -79,7 +79,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.ll_energy_coef: float = train_cfg.get("ll_energy_coef", 0.0)
     self.ll_joint_acc_coef: float = train_cfg.get("ll_joint_acc_coef", 0.0)
     self.ll_joint_limits_coef: float = train_cfg.get("ll_joint_limits_coef", 0.0)
-    self.ll_action_clip_coef: float = train_cfg.get("ll_action_clip_coef", 0.0)
     self.ll_soft_landing_coef: float = train_cfg.get("ll_soft_landing_coef", 0.0)
     self.ll_body_ang_vel_coef: float = train_cfg.get("ll_body_ang_vel_coef", 0.0)
     # WL-D arm 6 (2026-07-17): heel-to-toe roll-over (A) / push-off power burst (B) /
@@ -657,7 +656,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
       joint_acc_sum = 0.0
       joint_limits_sum = soft_landing_sum = body_ang_vel_sum = 0.0
-      action_clip_sum = 0.0
       pitchref_sum = pushoff_sum = rollover_sum = 0.0
       symmetry_sum = mirror_sum = 0.0
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
@@ -829,14 +827,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             jl_pen = self.ll_joint_limits_coef * joint_pos_limits(uenv)
             r_lo = r_lo - jl_pen
             joint_limits_sum += -jl_pen.mean().item()
-          # ADR-0008 (Model v3): mirror A0's action_clip (L1 excess of the COMMANDED target
-          # past the hardware limits). Separate from joint_pos_limits above, which scores
-          # the MEASURED position. The env reward term never reaches the LL, so without
-          # this routing the clip is priced for A0 and free for A1.
-          if self.ll_action_clip_coef != 0.0:
-            ac_pen = self.ll_action_clip_coef * mdp_rewards.action_clip_excess(uenv)
-            r_lo = r_lo - ac_pen
-            action_clip_sum += -ac_pen.mean().item()
           # WL-D: mirror A0's soft_landing (first-contact impact-force penalty).
           if self.ll_soft_landing_coef != 0.0:
             sl_pen = self.ll_soft_landing_coef * mdp_rewards.soft_landing(
@@ -1017,7 +1007,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/energy_pen": energy_sum / n_steps,
         "ll/joint_acc_pen": joint_acc_sum / n_steps,
         "ll/joint_limits_pen": joint_limits_sum / n_steps,
-        "ll/action_clip_pen": action_clip_sum / n_steps,
         "ll/soft_landing_pen": soft_landing_sum / n_steps,
         "ll/body_ang_vel_pen": body_ang_vel_sum / n_steps,
         "ll/pitchref_rew": pitchref_sum / n_steps,
