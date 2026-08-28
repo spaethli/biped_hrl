@@ -117,8 +117,17 @@ is already near it** — that metric is informative only when failing.
 
 ## Remaining gaps & open work
 - **Polish (not the wall):** yaw 0.167 (largest residual = HL yaw goal err 0.171; still 4×
-  better than prior A1); smoothness act_rate 1.68 vs A0 0.66; posture (orient_dev 0.13,
-  height_dev 0.11 vs A0 ~0.03) — LL-execution quality, not tracking.
+  better than prior A1); posture (orient_dev 0.13, height_dev 0.11 vs A0 ~0.03) —
+  LL-execution quality, not tracking.
+- **Smoothness (WL-S, closed 2026-08-28) — two regimes, two different fixes.** Score per
+  regime (`--eval-cmd-vx 0.5` / `0.0`); the aggregate is ~95% walking and hides standing.
+  **Standing:** `ll_joint_acc_coef=1e-7` + `rel_standing_envs=0.20` reaches the 128-touchdown
+  floor on both seeds, ajit 0.65–0.91× A0, and *improves* tracking (aggregate `err_vx` 0.083
+  vs A0 0.095) — the levers are superadditive, and the smoothness-vs-tracking frontier is
+  retired. ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking:** pinning
+  `cadence_period_range=(0.625,0.625)` matches A0 (`act_legs` 1.00×) and beats it on CoT —
+  A1 had been stepping at ~0.345 s vs A0's 0.578 s; costs `err_vy`. The combination is
+  untested. Numbers + 16-arm tables → the A1a experiment journal (research KB), 2026-08-28.
 - **Absolute-necessity ablation — DONE** (`a1_td3_delta_hltrack_5k`): tracking reward alone
   (delta) reaches 0.14/0.11/0.20 → absolute not strictly necessary, just a refinement (see
   Attribution above).
