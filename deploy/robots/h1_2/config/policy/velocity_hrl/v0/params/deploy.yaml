@@ -28,7 +28,7 @@ hrl:
   # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
   # (docs/adr/0007); the other six arms run passively and are logged only.
   # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
-  base_estimator: legodom
+  base_estimator: compl
   c: 8                                          # HL period (control steps); HL holds V* between fires
   hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
                                                 # (ignored when hl_algorithm: oracle)
@@ -38,7 +38,7 @@ hrl:
   hl_obs_vel: true                              # HL input = policy ++ command ++ (vx,vy estimate)
   hl_velocity_goals_only: true                  # HL emits velocity goal cols only; orient/height -> nominal
   hl_cadence: true                              # checkpoint trained with the cadence channel
-  hl_cadence_source: hl                         # hl = HL owns the period (+1 action dim) | random (fixed clock)
+  hl_cadence_source: hl                       # hl = HL owns the period (+1 action dim) | random (fixed clock)
   cadence_period_range: [0.35, 1.0]             # tanh -> period affine map; MUST match agent.yaml
   pin_period: 0.0                               # >0 freezes the LL phase clock (bring-up); 0 = HL-owned
   # Synthetic Gaussian noise added to the goal-space state s each step (per-component std,
@@ -58,16 +58,28 @@ commands:
     ranges:
       lin_vel_x: [-0.5, 1.0]
       lin_vel_y: [-0.5, 0.5]
+      # ±1.0 = the TRAINED range, deliberately NOT the older ±0.5 "tame joystick"
+      # setting (operator call, 2026-08-27): at ±0.5 the robot barely responded to
+      # small stick deflections, since the deploy range scales the command the policy
+      # sees. Matching training restored turning authority. Safe for current exports:
+      # goal_scale is baked into the HL ONNX metadata, so these ranges no longer feed
+      # the A1 scale derivation (that legacy path is pre-2026-07-16 exports only).
       ang_vel_z: [-1.0, 1.0]
       heading: null
 actions:
   JointPositionAction:
-    # ADR-0008 (Model v3): commanded-target clip, hardware position limits in
-    # joint_ids_map order. MUST equal h1_2_limits.h and the training clip
-    # (H1_2_ACTION_CLIP); all three are the compiled MJCF's jnt_range, pinned
-    # together by tests/test_deploy_parity.py. Applied by joint_actions.h:54 at the
-    # SAME pipeline point as mjlab's, which is the point -- the State_RLBase safety
-    # clamp acts after the hold blend and is therefore a different operation.
+    # Commanded-target clip, hardware position limits in joint_ids_map order. MUST equal
+    # h1_2_limits.h (pinned by tests/test_deploy_yaml_clip_matches_the_limit_header, which
+    # also rejects a duplicate `clip` key -- yaml-cpp takes the FIRST occurrence, PyYAML the
+    # LAST, so an override appended below this block is a silent no-op ON THE ROBOT ONLY).
+    # Applied by joint_actions.h:54, BEFORE the State_RLBase safety clamp, which acts on
+    # (1-alpha)*action + alpha*q_meas and so coincides with this only at alpha = 0 --
+    # clipping first means a safety-hold ramp blends from an already-legal target.
+    # ADR-0009 (2026-08-28): KEPT when Model v3 was reverted. Training carries no clip, so
+    # this is a deploy-side backstop, NOT a parity device. What was cut is the training-side
+    # L1 excess penalty, which pushed the ankle command ~1.8 action-sigma off the bound and
+    # cost 2.1-2.4x of the roll range. v2 ran pinned by this clip 14-21% of steps on
+    # 2026-08-27 and was the best-performing configuration of the day.
     clip: [
       [-0.43, 0.43],   # left_hip_yaw_joint
       [-3.14, 2.5],   # left_hip_pitch_joint

@@ -116,17 +116,29 @@ any plant — the elastic band does the stabilizing until the policy takes over.
 
 ## Deploy configs
 
-**Commanded joint targets are clipped to the hard limits (ADR-0008 / Model v3, 2026-08-26).**
-All 8 yamls carry `actions.JointPositionAction.clip` as 27 `[lo, hi]` pairs in `joint_ids_map`
-order, equal to `h1_2_limits.h` (itself pinned to the MJCF `jnt_range` by
-`test_deploy_joint_limits_match_the_training_model`). Applied by
-`isaaclab/envs/mdp/actions/joint_actions.h:54`, the same pipeline point as mjlab's own
-`cfg.clip`, so training and deploy are bit-comparable.
+**All 8 yamls carry `actions.JointPositionAction.clip` as 27 `[lo, hi]` pairs** in
+`joint_ids_map` order, equal to `h1_2_limits.h` and pinned by
+`test_deploy_yaml_clip_matches_the_limit_header`. Applied by `joint_actions.h:54`.
 
-⚠ **This is NOT the same as the `State_RLBase` safety clamp.** That one clamps
-`(1-alpha)*action + alpha*q_meas` — after the hold blend, before the `joint_offset` reversal — so
-it coincides with the training clip only at `alpha = 0`. With the yaml clip set it is demoted to
-a position backstop that should never fire. Do not rely on it for parity.
+**It is a backstop, not a parity device (ADR-0009, 2026-08-28).** Training carries no clip: Model
+v3's training-side clip and its L1 excess penalty were reverted after the penalty cost 2.1-2.4x of
+the commanded ankle roll range. The deploy clip was **kept** because it does no harm (v2 ran
+pinned by it 14-21% of steps on 2026-08-27 and was the best-performing configuration of the day)
+and because it clips *before* the `State_RLBase` hold blend rather than after, so a safety-hold
+ramp starts from an already-legal target. At `alpha = 0` the two are identical.
+
+**The reason it bought nothing is worth keeping:** `State_RLBase.cpp:160-165` clamps every
+commanded target to `h1_2_joint_limits` **unconditionally**, and always has. The robot has never
+sent a target past a stop. The yaml clip only moved that same truncation earlier in the pipeline,
+and the two coincide at `alpha = 0`, which is normal operation. So a policy that commands past
+its stops is a *training fidelity* gap, visible in `raw_q`, not something that reaches the motors.
+
+⚠ **Two `clip` keys under one mapping is a silent trap.** yaml-cpp resolves a duplicate key to
+the **FIRST** occurrence, so appending `clip: null` below a bounds table does nothing (verified
+against the real file, plus a two-non-null-table control). PyYAML takes the **LAST**, so a
+Python-side check reads the file the opposite way from the robot. Three hardware sessions on
+2026-08-27 ran clipped while the config said `clip: null`. **Guarded since 2026-08-28**: the clip
+parity test loads all 8 configs through a `SafeLoader` that refuses duplicate mapping keys.
 
 
 - Sim: `config/policy/velocity/v0/params/deploy.yaml` (keyboard_velocity_commands)
@@ -134,7 +146,13 @@ a position backstop that should never fire. Do not rely on it for parity.
 - **Split deploy** (ADR-0005 step 3b, 2026-07-07): `hold_joint_ids: [12..26]` in the
   `deploy_real` params makes torso+arms track `default_joint_pos` instead of the policy
   action (`State_RLBase.cpp`/`State_RLHRL.cpp`, robot-local; obs still see all 27
-  joints). Absent key = full forward (sim yamls). Gains/scales in all 4 param yamls
+  joints). Absent key = full forward (sim yamls).
+  ⚠ **The hold is OFF by default since 2026-08-28**: the key is commented out in both
+  `deploy_real` yamls and a **free upper body is the shipped default**. A1 with a free
+  upper body stands as quietly as A0 (0.00165 vs 0.00117 on the settled floor) and the
+  ~20x smoothness gap exists ONLY under the hold, so holding was buying a regression.
+  Re-enable by uncommenting, and note the flight recorder's `raw_q` is logged BEFORE the
+  substitution either way, so a session carries its own held/free counterfactual. Gains/scales in all 4 param yamls
   MUST stay in lockstep with `h1_2_constants.py` (v2-final: torso 200/2.5, shoulders
   120/2, elbow+wrists 80/1, derived scales).
 
