@@ -122,9 +122,13 @@ is already near it** — that metric is informative only when failing.
 - **Smoothness (WL-S, closed 2026-08-28) — two regimes, two different fixes.** Score per
   regime (`--eval-cmd-vx 0.5` / `0.0`); the aggregate is ~95% walking and hides standing.
   **Standing:** `ll_joint_acc_coef=1e-7` + `rel_standing_envs=0.20` reaches the 128-touchdown
-  floor on both seeds, ajit 0.65–0.91× A0, and *improves* tracking (aggregate `err_vx` 0.083
-  vs A0 0.095) — the levers are superadditive, and the smoothness-vs-tracking frontier is
-  retired. ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking:** pinning
+  floor on both seeds and *improves* tracking (aggregate `err_vx` 0.083 vs A0 0.095) — the
+  levers are superadditive, and the smoothness-vs-tracking frontier is retired. ⚠ Quote
+  standing as a range and name the channel: **0.65–0.91× A0 on the mean, 4.2× on realized
+  `jacc_legs_p95`, 8.6–11.4× on commanded `ajit_legs_p95`** (at `cmd 0` the mean sits *above*
+  the p95 — the set-down transient carries it). On the *aggregate* `jacc_legs_p95` every A1
+  arm beats A0 (0.48–0.92×) while sitting 1.0–1.8× above on the mean.
+  ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking:** pinning
   `cadence_period_range=(0.625,0.625)` matches A0 (`act_legs` 1.00×) and beats it on CoT —
   A1 had been stepping at ~0.345 s vs A0's 0.578 s; costs `err_vy`. The combination is
   untested. Numbers + 16-arm tables → the A1a experiment journal (research KB), 2026-08-28.
