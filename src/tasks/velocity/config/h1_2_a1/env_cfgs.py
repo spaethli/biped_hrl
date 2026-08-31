@@ -22,6 +22,7 @@ from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationT
 import src.tasks.velocity.mdp as mdp
 from src.tasks.velocity.config.h1_2.env_cfgs import (
   apply_lean_reward,
+  apply_payload_dr,
   unitree_h1_2_flat_env_cfg,
 )
 from src.tasks.velocity.rl.hrl.goal_space import (
@@ -65,6 +66,7 @@ def unitree_h1_2_flat_a1_env_cfg(
   play: bool = False,
   goal_components: tuple[str, ...] = DEFAULT_GOAL_COMPONENTS,
   lean: bool = False,
+  payload_dr: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """A1 flat env: A0 flat env with hierarchical observation groups.
 
@@ -74,10 +76,16 @@ def unitree_h1_2_flat_a1_env_cfg(
   ``lean=True`` strips the shaping reward terms (Track F): the env reward then matches
   lean-A0's, so the lean A0-vs-A1 comparison stays clean. Must warm-start lean-A1 from
   a *lean*-A0 checkpoint -> doc/hrl/hierarchy_benefit_roadmap.md Track F.
+
+  ``payload_dr=True`` (WP2/WP3, H-mem): torso payload DR, same ``apply_payload_dr`` A0
+  uses -- not applied during play (matches ``apply_wide_dr``'s convention; eval pins an
+  exact value via ``--eval-payload-kg`` instead of sampling).
   """
   cfg = unitree_h1_2_flat_env_cfg(play=play)
   if lean:
     apply_lean_reward(cfg)
+  if payload_dr and not play:
+    apply_payload_dr(cfg)
   _restructure_obs_groups(cfg, goal_dim=compute_goal_dim(goal_components))
   # Kernel pairing (default = exp): exp is all-positive so a TRUE terminal is safe and
   # correct (no suicide attractor). The old l2 kernel needed time_out=True (truncation)

@@ -21,6 +21,7 @@ from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from src.tasks.velocity.mdp.observations import env_latent_e
 
 
 @dataclass(frozen=True)
@@ -273,7 +274,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
       structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
                         "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
-                        "hl_obs_vel",
+                        "hl_obs_vel", "hl_obs_e",
                         # A1a cadence channel: without hl_cadence restored, eval rebuilt the
                         # runner with the channel OFF -> fixed 0.6 clock, --eval-cadence-period
                         # silently inert (the 2026-07-02 "no entrainment" false verdicts).
@@ -556,6 +557,13 @@ def run_play(task_id: str, cfg: PlayConfig):
       # on seed >= 1 (the prior rollout marked those env buffers as inference tensors).
       with torch.inference_mode():
         obs, _ = env.reset()
+
+      # WP2: log the ACTUAL sampled payload (mean over envs), not the requested
+      # --eval-payload-kg -- so a payload-DR training run's rollout can be segmented by
+      # payload post-hoc without re-running. `mode="startup"` DR does not resample on
+      # reset, so this is constant for the whole play.py process; read once per seed.
+      e_params = uenv.observation_manager.get_term_cfg("critic", "env_latent_e").params
+      payload_kg = env_latent_e(uenv, e_params["torso_cfg"], e_params["foot_cfg"])[:, 0].mean().item()
 
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
@@ -861,6 +869,8 @@ def run_play(task_id: str, cfg: PlayConfig):
         "ss_vx_var":    _m(achieved_vx_vars[ss0:]) if achieved_vx_vars else float("nan"),
         "stride_period_s": (cfg.eval_steps * step_dt)
                            / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
+        # WP2: actual sampled payload (mean over envs), see the reset()-time read above.
+        "payload_kg": payload_kg,
       })
       # WP1 payload pilot: a per-seed line, since [BENCH] below only ever prints the
       # seed-aggregated mean+-std. The sweep CSV needs one row per (T, payload, vx, seed)
@@ -958,6 +968,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Stability ss_vx_var : {_fmt('ss_vx_var')}")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print(f"  Gait      match     : {_fmt('gait_match')}")
+    print(f"  Env       payload_kg: {_fmt('payload_kg')}")
     if cfg.eval_cmd_vx is not None:
       print(f"  Hold      ss_err_vx : {_fmt('ss_err_vx')}  (last 2/3)")
       print(f"  Hold      ss_err_vy : {_fmt('ss_err_vy')}")

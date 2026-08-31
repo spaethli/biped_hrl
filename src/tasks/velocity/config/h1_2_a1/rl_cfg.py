@@ -294,6 +294,15 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   the directional target ``V*=state+scale*g`` needs current velocity to pick g=(command-v)/scale,
   which a velocity-blind HL must otherwise guess (the residual directional HL wall). Changes the
   HL obs dim -> deploy ONNX/C++ must feed v_est in the same order (deferred)."""
+  hl_obs_e: bool = False
+  """WP2 (2026-08-31): feed the HL the privileged environment latent
+  ``e = (payload_kg, com_dx, com_dy, com_dz, friction)`` as extra obs (td3 only), read
+  back live from the randomized sim state (``mdp.env_latent_e``). Off (**default**) ->
+  byte-identical to today, RQ2-safe -- exists so WP5's H-adapt Phase 1 can append the
+  privileged latent to ``o^hi`` without a parallel HL-input mechanism; WP2 does not
+  build the encoder (``mu``/``z``) that consumes it. Same wiring as ``hl_obs_vel``:
+  changes the HL obs dim, so a checkpoint trained with this on needs the same flag at
+  play/deploy time (absence-shim restores ``False``)."""
   gamma_hi: float | None = None
   """High-level discount. None -> derived horizon-matched as ``0.99 ** c`` in
   ``__post_init__`` (so changing ``c`` rescales it automatically; the old hardcoded

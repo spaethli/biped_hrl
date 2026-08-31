@@ -39,6 +39,7 @@ from .high_level import HighLevel, HighLevelPpo, OracleHighLevel
 from .state_noise import GoalStateNoise, HlVelJitter
 from .td3 import HighLevelTd3
 from ...mdp import rewards as mdp_rewards
+from ...mdp.observations import env_latent_e
 from mjlab.envs.mdp.rewards import joint_acc_l2, joint_pos_limits
 
 
@@ -65,6 +66,19 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # directional HL compute g = (command - v)/scale instead of guessing v. Off by default.
     self.hl_obs_vel: bool = train_cfg.get("hl_obs_vel", False)
     self._hl_vel_dim: int = 2 if self.hl_obs_vel else 0
+    # WP2 (2026-08-31): privileged environment latent e (payload/CoM/friction), plumbing
+    # only -- WP5's H-adapt Phase 1 consumes obs["hl_e"]. Off by default, byte-identical.
+    self.hl_obs_e: bool = train_cfg.get("hl_obs_e", False)
+    self._hl_e_dim: int = 5 if self.hl_obs_e else 0
+    # Reuse the critic obs term's already-resolved torso/foot asset_cfgs (velocity_env_cfg
+    # .py "env_latent_e") rather than re-resolving body/geom ids here.
+    self._e_torso_cfg = self._e_foot_cfg = None
+    if self.hl_obs_e:
+      e_params = env.unwrapped.observation_manager.get_term_cfg(
+        "critic", "env_latent_e"
+      ).params
+      self._e_torso_cfg = e_params["torso_cfg"]
+      self._e_foot_cfg = e_params["foot_cfg"]
     self.ll_task_reward_coef: float = train_cfg["ll_task_reward_coef"]
     # Upper-body deploy-hygiene penalties added to the LL intrinsic (ADR-0002): the env's
     # variable_posture / action_rate_l2 never reach the goal-only LL, so the A1 arms drift
@@ -493,6 +507,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         ll_actor=getattr(self.alg, "_raw_actor", self.alg.actor),
         target_mode=self.hl_target_mode,
         obs_vel_dim=self._hl_vel_dim,
+        obs_e_dim=self._hl_e_dim,
         cadence_dim=1 if self.hl_cadence_source == "hl" else 0,
         cadence_period_range=self.cadence_period_range,
         task_only_goals=self.hl_velocity_goals_only,
@@ -532,6 +547,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         # A1a comparator (blind-HL, bias-only probe) were scored.
         if self.hl_obs_vel:
           obs["hl_vel"] = state[:, 0:2]
+        # WP2: privileged latent e, ground truth at both train and eval (no noise model).
+        if self.hl_obs_e:
+          obs["hl_e"] = env_latent_e(uenv, self._e_torso_cfg, self._e_foot_cfg)
         target = self.hl.act_inference(uenv, obs, state)
         # A1a: command the stride period for this window. source='hl': act_inference
         # already wrote the HL's period (an eval pin overrides it, for the CoT(period)
@@ -682,6 +700,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             # the real HL never sees ground truth either.
             self.hl_vel_jitter.resample()
             self.hl_vel_residual.resample()  # WL-F task 4; no-op unless leg_odom + enabled
+            if self.hl_obs_e:
+              # WP2: privileged, so read at the fire step only -- no noise model, and
+              # constant within an episode (payload/CoM/friction are startup-only DR).
+              obs["hl_e"] = env_latent_e(uenv, self._e_torso_cfg, self._e_foot_cfg)
             if self.hl_obs_vel:
               obs["hl_vel"] = self._hl_vel(uenv, state_n, fire=True)
               # WL-F task 3: pair this window's estimator error with the leg action rate

@@ -6,6 +6,7 @@ from .env_cfgs import (
   unitree_h1_2_flat_env_cfg,
   unitree_h1_2_flat_explicit_pd_env_cfg,
   unitree_h1_2_flat_lean_env_cfg,
+  unitree_h1_2_flat_payload_env_cfg,
   unitree_h1_2_flat_wide_dr_env_cfg,
   unitree_h1_2_rough_env_cfg,
 )
@@ -53,6 +54,17 @@ register_mjlab_task(
   task_id="Unitree-H1_2-Flat-WideDR",
   env_cfg=unitree_h1_2_flat_wide_dr_env_cfg(),
   play_env_cfg=unitree_h1_2_flat_wide_dr_env_cfg(play=True),
+  rl_cfg=unitree_h1_2_ppo_runner_cfg(),
+  runner_cls=VelocityOnPolicyRunner,
+)
+
+# WP2/WP3 (2026-08-31): A0 + torso payload DR (0-12 kg), the F-mem baseline arm. See
+# apply_payload_dr in env_cfgs.py; --eval-payload-kg (play.py) still pins an exact
+# value on top of this range for the WP1/WP1b sweeps.
+register_mjlab_task(
+  task_id="Unitree-H1_2-Flat-Payload",
+  env_cfg=unitree_h1_2_flat_payload_env_cfg(),
+  play_env_cfg=unitree_h1_2_flat_payload_env_cfg(play=True),
   rl_cfg=unitree_h1_2_ppo_runner_cfg(),
   runner_cls=VelocityOnPolicyRunner,
 )

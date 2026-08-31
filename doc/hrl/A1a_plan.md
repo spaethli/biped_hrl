@@ -315,3 +315,167 @@ load, copper-loss `Σ(|τq̇|+kτ²)` wants a *longer* one, and it is not a k ar
 to load. The objective choice (which CoT, or a CoT+tracking blend) is the planning
 chat's; the measurements are here. Raw data → `data/2026-08-28-wp1b-payload-repeat/`
 (`wp1b_sweep.csv` 672 rows, `wp1b_drift.csv`, `wp1b_tstar_*.csv`, `wp1b_*_vs_T.png`).
+
+## WP2 — payload DR + privileged-latent plumbing (2026-08-31)
+
+Critical-path item: WP3 (baseline arms) and WP5 (H-adapt Phase 1) both gate on it.
+Governing plan: `thesis_plan_8weeks.md` §3 (the latent + taxonomy), §4 (the 2x2, RMA
+phases), WP2/WP5. Spec was grilled and approved before any code (per CLAUDE.md's
+workflow) — two open questions below were resolved in conversation, not silently.
+
+### Grilled open questions — resolved
+
+**(a) `e` dimension: ℝ⁵, not the plan's ℝ⁶.** `grep` across `src/` finds no
+`yaw_bias`/`gyro_bias`/`heading_bias` mechanism anywhere — nothing to sample yaw bias
+from in sim. A same-day check (before deciding) pulled the raw hip-yaw encoder trace
+from `logs/deploy_safety/2026-07-28_10-13-17.csv` (the WL-B0e lean-investigation hang
+session, still on disk, logs `raw_q0`/`raw_q6` = left/right hip yaw + `meas_dq0/6` at
+1 kHz). Segmenting by joint velocity finds two genuinely motionless windows (`max|dq|
+< 0.011 rad/s`, ~76 s and ~226 s — almost certainly the WL-B0 item-2 "standing" and
+"passive hang" poses): hip-yaw L−R = **−0.31° and +0.82-0.84°**. Compare: active A1a
+walking, 2026-08-13, 7 hardware sessions, hip-yaw L−R = **+10.3° to +12.1°** (mean
+0.19 rad, std 0.012) — **13x larger**. A static encoder-zero offset would read the same
+magnitude whether the robot is standing still or walking; it doesn't, which points at a
+control-induced effect (policy or load-dependent actuator behavior), not a fixed plant
+parameter — consistent with the plan's own taxonomy placing yaw bias in the "contested,
+slow execution-corrupting" class, not the "reference-changing" class this `e` channel is
+for. Caveats: the 2026-07-28 session predates the 2026-08-13 measurement by 2+ weeks and
+the checkpoint deployed that day isn't recorded in the session's meta.json, and "passive
+hang" is inferred from motion signature, not an explicit label — suggestive, not a closed
+verdict, worth a dedicated WL-B follow-up (hang + stand + walk, same session, same
+policy, plus an A0 control). Either way, a control-induced effect isn't a physical
+parameter a sim DR term can inject before a rollout, so it doesn't belong in `e` at all.
+`e = (payload_kg, com_dx, com_dy, com_dz, friction)`; yaw bias stays a hardware-only
+F2/F3 metric (WP0/WP7). **Flag for WP5**: compressing ℝ⁵→ℝ⁴ (`z=μ(e)`) is a much milder
+reduction than the plan's ℝ⁶→ℝ⁴ — worth a conscious call at that point on whether ℝ⁴
+still makes sense.
+
+**(b) Runtime readability, confirmed per-component.** `dr.body_mass`/`dr.body_com_offset`
+write `env.sim.model.body_mass`/`body_ipos` directly, per-env (`mjlab/envs/mdp/dr/body.py`);
+`dr.geom_friction` writes `env.sim.model.geom_friction` (`operation="abs"`). All three are
+plain per-env tensors, readable at any point after the `mode="startup"` event fires — no
+private DR-engine state needed except the public `env.sim.get_default_field(field)`
+(baseline before randomization, already how the DR engine itself samples).
+
+**(c) `z ∈ ℝ⁴`** — not WP2's call; flagged above for WP5.
+
+**(d) A0 critic exposure — approved, symmetric on every arm.** Same asymmetric
+actor-critic pattern already shipped for `Unitree-H1_2-Rough`'s `height_scan`
+(privileged value function, deployable actor untouched). Doesn't touch any actor's
+inputs or the env reward (RQ2-safe by the existing rule), applied uniformly to
+F-mem/H-mem/F-hist/H-adapt so no arm is asymmetrically privileged relative to another.
+
+### Implementation
+
+- **Payload DR** (`config/h1_2/env_cfgs.py`): `apply_payload_dr(cfg, ranges=(0,12))`
+  extends the existing `base_mass` event (previously reachable only via the wide-DR
+  bundle) — same event key, same `dr.body_mass`, same torso `asset_cfg` `base_com`
+  already uses. **Strictly opt-in**: `dr.body_mass` samples RNG even at a degenerate
+  `ranges=(0,0)`, so registering it unconditionally on the base env would shift the RNG
+  stream every later-registered event (`foot_friction`, `encoder_bias`, `base_com`,
+  `push_robot`) consumes, breaking byte-identical replay for every existing checkpoint —
+  the base `Unitree-H1_2-Flat`/`-A1` tasks never call it. New task variants carry it:
+  `Unitree-H1_2-Flat-Payload` (F-mem), `Unitree-H1_2-Flat-A1-Payload` (H-mem, via
+  `unitree_h1_2_flat_a1_env_cfg(payload_dr=True)`). `--eval-payload-kg` (`play.py`)
+  unchanged — it overwrites the same `base_mass` event key regardless.
+- **`mdp.env_latent_e`** (`src/tasks/velocity/mdp/observations.py`): the single readback
+  function both consumers below call — payload/CoM as deltas from
+  `env.sim.get_default_field`, friction absolute.
+- **Critic term**: unconditional entry in the existing `"critic"` `ObservationGroupCfg`
+  (`velocity_env_cfg.py`), `torso_cfg`/`foot_cfg` set per-robot in `env_cfgs.py`
+  alongside `base_com`/`foot_friction`'s own asset_cfgs.
+- **HL-only channel**: `HrlRunnerCfg.hl_obs_e: bool = False` (`config/h1_2_a1/rl_cfg.py`)
+  — exact mirror of `hl_obs_vel`/`obs["hl_vel"]`. The runner writes `obs["hl_e"]` at the
+  HL fire step only (both `learn()` and `get_inference_policy()`; no post-fire refresh
+  needed since `e` is privileged ground truth at train AND eval and constant within an
+  episode — `mode="startup"` DR doesn't resample on reset). `HighLevelTd3` gained
+  `obs_e_dim` (`_state_dim`/`_state_vec`), and `hl_obs_e` was added to `play.py`'s
+  `structure_keys` (defaults `False`, no absence-shim needed — unlike `hl_obs_vel`/
+  `hl_velocity_goals_only`, which flipped their defaults after shipping). Off →
+  byte-identical. WP2 builds only this plumbing, not WP5's `μ(e)`/`z` encoder.
+- **Logging**: `[BENCH]`/`[BENCH_SEED]` gained `payload_kg` — the ACTUAL sampled value
+  (mean over envs, via `env_latent_e`), not the requested `--eval-payload-kg`, so WP3/WP6
+  can segment a payload-DR training run by payload post-hoc without re-running.
+  `cot_copper` (WP1 payload pilot) was already logged; unchanged.
+
+### Testing
+
+`tests/test_privileged_latent.py` (7 new tests): `env_latent_e` delta/absolute
+arithmetic against a minimal fake sim (payload=0/CoM=0 exactly when DR is disabled,
+regardless of friction's independent always-on DR); `apply_payload_dr` opt-in (base A0/
+A1 tasks carry no `base_mass` event; the two new `-Payload` task variants do, at the
+requested range); `HighLevelTd3` `obs_e_dim` wiring (state-dim math, byte-identical
+`_state_vec` at `obs_e_dim=0`, correct concatenation at `obs_e_dim=5`). Full suite: 143
+passed, 2 skipped (was 141 pre-WP2 per CLAUDE.md, which flagged that count as already
+stale). `check_test_sensitivity.py` — 3 new mutations targeting the three load-bearing
+seams (delta-vs-absolute readback, the opt-in guard, the state-dim math): **3/3 caught**
+(dropping the default-subtraction, registering `apply_payload_dr` unconditionally on the
+base A0 task, and omitting `obs_e_dim` from `HighLevelTd3`'s state-dim math all turn the
+suite red on exactly the expected test).
+
+### Inertness proof
+
+**Config-level (exact, deterministic):** `test_apply_payload_dr_is_opt_in_not_on_the_base_tasks`
+proves `Unitree-H1_2-Flat`/`-A1` never register the `base_mass` event — this is the actual
+claim (no RNG-stream shift), checked by direct dict inspection, not statistics.
+
+**Rollout-level (empirical, play.py): the naive "literal diff of zero" bar from the spec
+does not hold on this platform, for a reason that predates WP2 — and the correct bar
+does.** `git stash` of all 10 WP2-changed files (scoped by explicit pathspec, leaving
+unrelated concurrent edits to `CONTEXT.md`/`worklines.md` untouched) gave a clean pre-WP2
+tree. Three `Unitree-H1_2-Flat` runs, identical command
+(`--checkpoint-file .../a0_v2_optB_fric0p1_kl01_s42/model_9900.pt --num-envs 64
+--eval-steps 600 --eval-seeds 1`, seed 42 fixed internally):
+
+| run | code | err_vx | jacc_legs | action_rate | cot | fall_rate |
+|---|---|---|---|---|---|---|
+| pre | stashed (original) | 0.079357 | 31.192 | 0.649445 | 0.563238 | 0.0 |
+| post (1st launch) | WP2 | 0.080274 | 30.389 | 0.645050 | 0.561545 | 0.0 |
+| post (2nd launch) | WP2 (same code, rerun) | 0.079098 | 33.143 | 0.650626 | 0.563266 | 0.0 |
+
+pre-vs-post differs by 0.1-2.6% per field (18 fields checked). That is NOT zero — but
+re-running the identical POST-WP2 code a second time (same command, same seed) shows a
+**same-or-larger** spread on 12 of 18 fields (e.g. `jacc_legs` pre-vs-post = −2.6%, but
+post-vs-post(rerun) = +9.1%; `jacc` −1.9% vs +6.4%). No field shows a systematic,
+one-directional shift — the sign flips inconsistently across metrics between the two
+same-code launches, which is the signature of noise, not a code effect. This matches a
+pre-existing, documented property of this codebase, unrelated to WP2:
+`hrl-infra.md`'s own gotchas list "Same-config runs diverge a lot (GPU non-determinism +
+RL chaos)" — MuJoCo-Warp on GPU is not bit-reproducible across process launches even with
+`torch.manual_seed` fixed, and jacc-family metrics (higher-order, from realized
+acceleration) are the noisiest, exactly as seen here. **Literal bit-identical replay is
+not achievable on this platform for ANY code, so it is not the correct bar; "indistinguishable
+from the platform's own same-code noise floor" is** — the same standard the codebase
+already applies everywhere else (`hrl-infra.md`: "score against a replicate band, never a
+single control"). By that standard: PASS. Exact and non-statistical: `payload_kg` reads
+**0.0** in both post-WP2 launches, confirming no payload was silently injected on the base
+task. This deviates from the spec's stated "diff of zero, not a rounding question" bar —
+flagged here rather than silently reinterpreted, with the evidence (the same-code control
+run) that makes the deviation legitimate rather than a shortcut.
+
+### WP1b T\* direction re-confirmation on the current (v2) plant
+
+**Not needed — the 2026-08-29 run was already on the v2 plant.** The `git worktree`
+it ran in (at `d077902`, pre-ADR-0009) only isolated `scripts/` and `doc/`. `src/`
+and `src/assets/` — including `h1_2.xml` (leg mass) — resolve to the MAIN checkout
+via the editable install's `__editable__.unitree_rl_mjlab-*.pth`
+(`'src' -> .../unitree_rl_mjlab/src`), regardless of cwd or which worktree `play.py`
+lives in. `git log c8043f3..HEAD -- src/assets/robots/unitree_h1_2/xmls/h1_2.xml` is
+empty: the leg mass has been v2 (light) continuously since the ADR-0009 revert
+(2026-08-28 14:30), which is *before* the 2026-08-29 01:25 run. That run's own drift
+probes (`cot` CV 0.43%, no trend over 4.3 h) confirm `src/` was stable through it.
+
+**Verified cell-by-cell (2026-08-31).** A fresh partial re-run on current HEAD (the
+192-cell vx=0.5 block, R=8 each, one continuous run) agrees with the committed
+2026-08-28 sweep to within the noise floor: mean |Δ| `cot` **0.56%**, `cot_copper`
+0.49%, `err_vx` 1.17% (worst cells all at T ≥ 0.65 where per-cell CV is 3–6% anyway).
+Two fully independent 8-repeat sweeps two days apart → the same numbers. The re-run
+aborted partway on an unrelated `ImportError` from the parallel WP2 `env_latent_e`
+edits to MAIN's live `src/` — which is also why a worktree cannot isolate a sweep
+here; only a separate clone + venv could, and the agreement above shows that is
+unnecessary. Verification data →
+`data/2026-08-28-wp1b-payload-repeat/v2plant_verification_2026-08-31/`.
+
+**Conclusion: the WP1b T\* directions stand on the v2 plant** — mech CoT shortens
+under load, copper CoT lengthens, both above the floor. The real robot's heavier
+legs remain a separate sim-to-real gap (WP0/WP7), not a WP1b confound.

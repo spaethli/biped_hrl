@@ -106,6 +106,56 @@ policy-independent, so in sim thrashing the feet is free. Measured, same base po
 * **Eval deliberately stays on ground truth** (same precedent as `HlVelJitter`), which is what keeps
   the `g_legs`/`err_vx` anchors comparable across arms.
 
+### Privileged environment latent `e` (WP2, 2026-08-31; WP5 will consume this)
+
+`e = (payload_kg, com_dx, com_dy, com_dz, friction)` ∈ ℝ⁵ — **not** the plan's ℝ⁶
+(payload/CoM/friction/yaw-bias): yaw bias has no sim DR mechanism anywhere in `src/`
+(grep-confirmed), and a same-day check of hardware hip-yaw hang data
+(`logs/deploy_safety/2026-07-28_10-13-17.csv`) found the L/R asymmetry is <1° when the
+robot is genuinely motionless but ~11° during active A1a walking — a 13x gap, pointing
+at a control-induced effect rather than a static encoder offset, i.e. not a physical
+parameter a sim DR term could sample before a rollout. Yaw bias stays a hardware-only
+F2/F3 metric (WP0/WP7); `e` covers only the four components that already have (or now
+have) a DR mechanism to sample from.
+
+**Single source of truth: `mdp.env_latent_e`** (`src/tasks/velocity/mdp/observations.py`)
+reads the randomized sim state back directly — `env.sim.model.body_mass`/`body_ipos`
+minus `env.sim.get_default_field(...)` for payload/CoM (both are `operation="add"` DR),
+`env.sim.model.geom_friction` absolute (that DR is `operation="abs"`). No separate
+tracking mechanism; both consumers below call it.
+
+* **Payload DR**: `apply_payload_dr` (`config/h1_2/env_cfgs.py`) extends the existing
+  `base_mass` event (previously reachable only via the wide-DR bundle) to 0-12 kg at the
+  torso COM — same event key, same `dr.body_mass`, same torso `asset_cfg` as `base_com`.
+  **Opt-in, never unconditional**: `dr.body_mass` samples RNG even at a degenerate
+  `ranges=(0,0)`, so registering it on the base task would shift the RNG stream every
+  later event consumes and break byte-identical replay of every existing checkpoint.
+  New task variants carry it: `Unitree-H1_2-Flat-Payload` (F-mem), `Unitree-H1_2-Flat-A1-Payload`
+  (H-mem, via `unitree_h1_2_flat_a1_env_cfg(payload_dr=True)`). `--eval-payload-kg`
+  (`play.py`) is unaffected — it overwrites the same `base_mass` event key regardless of
+  which task defines one.
+* **Critic term (A0 and A1 LL)**: `env_latent_e` is a term in the existing `"critic"`
+  observation group (`velocity_env_cfg.py`, `enable_corruption=False`) — same asymmetric
+  actor-critic pattern already used for `Unitree-H1_2-Rough`'s `height_scan` (privileged
+  value function, deployable actor untouched). Applied unconditionally to every arm's
+  critic (symmetric, RQ2-safe: actor and env reward untouched) — flagged per the
+  A0-comparison-cleanliness rule rather than decided silently.
+* **HL-only channel (A1, TD3 only)**: `HrlRunnerCfg.hl_obs_e: bool = False` — exact
+  mirror of `hl_obs_vel`/`obs["hl_vel"]`. On: the runner writes `obs["hl_e"]` at the HL
+  fire step (both in `learn()` and `get_inference_policy()` — `e` is privileged ground
+  truth at train AND eval, no noise model, and constant within an episode since
+  payload/CoM/friction are `mode="startup"` DR, so no post-fire refresh is needed the
+  way `obs["hl_vel"]`'s window-averaging needs one), and `HighLevelTd3` appends it via
+  `obs_e_dim` (`_state_dim`/`_state_vec`, same shape as `obs_vel_dim`). Off →
+  byte-identical, RQ2-safe. Added to `play.py`'s `structure_keys` (defaults `False`, so
+  no absence-shim needed, unlike `hl_obs_vel`/`hl_velocity_goals_only` which flipped
+  their defaults). **WP2 builds only this plumbing** — WP5 Phase 1 is what appends the
+  *learned* `z=μ(e)` to `o^hi`; no encoder exists yet.
+* **Logging**: `play.py`'s `[BENCH]`/`[BENCH_SEED]` gained `payload_kg` — the actual
+  sampled value (mean over envs, read via `env_latent_e`), not the requested
+  `--eval-payload-kg`, so a payload-DR training run can be segmented by payload post-hoc
+  without re-running. `cot_copper` (WP1 payload pilot) was already logged; unchanged.
+
 ### Base-velocity estimator comparison (WL-G, 2026-08-11; A2 will reuse this)
 
 `scripts/replay_base_estimators.py` replays six estimator arms offline on ONE flight-recorder
@@ -138,10 +188,10 @@ Numbers and the reasoning: `doc/hrl/h1_2_ekf_design.md` status block.
 ### Obs groups / dims (A1; 92 = ang_vel 3 + proj_grav 3 + command 3 + phase 2 + joint_pos 27 + joint_vel 27 + last_action 27)
 | Network | Obs | Dim |
 |---|---|---|
-| HL actor | `policy ++ command` (the A0 actor, deployable) | 92 |
+| HL actor | `policy ++ command [++ hl_vel] [++ hl_e]` (the A0 actor, deployable, +2 if `hl_obs_vel`, +5 if `hl_obs_e` — WP2) | 92 (+2/+5) |
 | HL critic (twin Q) | `state ⊕ goal` | 92 + goal_dim |
 | LL actor | `actor∖command ⊕ goal` | 89 + goal_dim |
-| LL critic | `critic∖command ⊕ goal` | privileged ok (not deployed) |
+| LL critic | `critic∖command ⊕ goal` (now includes `env_latent_e`, +5 — WP2) | privileged ok (not deployed) |
 **The command is removed from the LL obs on purpose** — if the LL saw it, it would bypass
 the hierarchy and A1 collapses into A0. The goal is then the only task-intent channel.
 

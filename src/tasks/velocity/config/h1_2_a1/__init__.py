@@ -35,3 +35,17 @@ register_mjlab_task(
   rl_cfg=_rl_cfg_lean,
   runner_cls=HierarchicalRunner,
 )
+
+# WP2/WP3 (2026-08-31): A1a + torso payload DR (0-12 kg), the H-mem baseline arm.
+_rl_cfg_payload = unitree_h1_2_hrl_runner_cfg()
+register_mjlab_task(
+  task_id="Unitree-H1_2-Flat-A1-Payload",
+  env_cfg=unitree_h1_2_flat_a1_env_cfg(
+    goal_components=_rl_cfg_payload.goal_components, payload_dr=True
+  ),
+  play_env_cfg=unitree_h1_2_flat_a1_env_cfg(
+    play=True, goal_components=_rl_cfg_payload.goal_components, payload_dr=True
+  ),
+  rl_cfg=_rl_cfg_payload,
+  runner_cls=HierarchicalRunner,
+)

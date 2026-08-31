@@ -22,6 +22,9 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 GS = REPO / "src/tasks/velocity/rl/hrl/goal_space.py"
 RW = REPO / "src/tasks/velocity/mdp/rewards.py"
 HR = REPO / "src/tasks/velocity/rl/hrl/hrl_runner.py"
+OBS = REPO / "src/tasks/velocity/mdp/observations.py"
+EC = REPO / "src/tasks/velocity/config/h1_2/env_cfgs.py"
+TD3 = REPO / "src/tasks/velocity/rl/hrl/td3.py"
 SN = REPO / "src/tasks/velocity/rl/hrl/state_noise.py"
 LO = REPO / "src/tasks/velocity/rl/hrl/leg_odom.py"
 LIM = REPO / "deploy/robots/h1_2/include/h1_2_limits.h"
@@ -335,6 +338,32 @@ MUTATIONS = [
    "    if False:\n"
    "      v = (uenv.leg_odom.fire() if fire else uenv.leg_odom.value).clone()",
    "test_leg_odom_source_never_reads_or_writes_the_goal_state"),
+
+  # WP2 (2026-08-31): env_latent_e reads payload/CoM as absolute values instead of
+  # deltas from the un-randomized default -- would read the torso's nominal mass as
+  # "payload" even with DR off.
+  ("env_latent_e drops the payload/CoM default subtraction", OBS,
+   "  payload = env.sim.model.body_mass[:, torso_gid] - mass_default[torso_gid]\n"
+   "  com_delta = env.sim.model.body_ipos[:, torso_gid, :] - ipos_default[torso_gid]",
+   "  payload = env.sim.model.body_mass[:, torso_gid]\n"
+   "  com_delta = env.sim.model.body_ipos[:, torso_gid, :]",
+   "test_env_latent_e_reads_payload_and_com_as_deltas_and_friction_as_absolute"),
+
+  # WP2: payload DR must be opt-in -- registering base_mass unconditionally on the base
+  # A0 task would shift the RNG stream for every event after it, even at a degenerate
+  # range, breaking the inertness gate for every existing A0/A1 checkpoint.
+  ("payload DR applied unconditionally to the base A0 task", EC,
+   "  cfg.sim.njmax = 300",
+   "  cfg.sim.njmax = 300\n  apply_payload_dr(cfg)",
+   "test_apply_payload_dr_is_opt_in_not_on_the_base_tasks"),
+
+  # WP2: obs_e_dim dropped from the HL's state-dim math -- obs["hl_e"] would still be
+  # concatenated in _state_vec but the actor/critic/normalizer would be built one
+  # column too narrow, a shape mismatch WP5's Phase 1 would hit at construction.
+  ("obs_e_dim omitted from HighLevelTd3's state-dim math", TD3,
+   "obs[\"policy\"].shape[-1] + obs[\"command\"].shape[-1] + obs_vel_dim + obs_e_dim",
+   "obs[\"policy\"].shape[-1] + obs[\"command\"].shape[-1] + obs_vel_dim",
+   "test_obs_e_dim_appends_hl_e_and_changes_state_dim"),
 ]
 
 
