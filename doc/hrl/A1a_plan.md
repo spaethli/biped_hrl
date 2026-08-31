@@ -245,3 +245,73 @@ confirmed a live latent in every level metric. This is **not a fail**: do not tr
 plan's friction/slope pivot on it. Repeat scoped as **WP1b** — score bowl depth against the
 noise floor, extend the grid below 0.35, raise the seed count, and settle the objective
 question with a measurement rather than a preference.
+
+### WP1b (2026-08-29) — Bar A RESOLVED and PASSES on CoT
+
+Same frozen keeper, no retrain. Run in an isolated `git worktree` at commit `d077902`
+(the tree the keeper trained on: model-v3 leg mass; the ADR-0009 revert landed after)
+so it did not touch `main`. Grid: `T ∈ {0.40,0.45,0.50,0.55,0.60,0.65,0.70}` (uniform
+0.05; 0.65/0.70 added so the copper-loss optimum for 8/12 kg is bracketed) × `payload
+∈ {0,4,8,12} kg` × `vx ∈ {0.5,0.6,0.7}`, **R=8 independent play.py processes** per cell
+(not `--eval-seeds` — see floor below), 1200 steps, 64 envs. **One continuous
+uncontended run** (4.3 h) with the reference cell (T=0.50/0 kg/vx=0.5) re-measured
+every 12 cells. `vx=1.0` excluded (edge-degenerate with this keeper, per WP1).
+
+**Noise floor, measured not assumed.** Within-session, independent processes: `cot` CV
+**0.21%** (`--eval-seeds` understates this ~8×: internal seeds share one process' RNG +
+CUDA scheduling). Across the 4.3 h run (9 drift probes): `cot` **0.43%**, `cot_copper`
+0.86%, `err_vx` 0.97%, `ss_vx_var` 11%; no drift, only a mild cold-start outlier on
+probe 1. The assumed ±2.6% was ~6–10× pessimistic for pinned-command evals. **Separate,
+larger floor — GPU contention:** a co-resident training run shifts every metric **6–15%**
+(20–40× the process floor). Proven on the aborted first attempt: same cell, repeats
+r0–5 (idle) `cot` 0.576 vs r6–7 (contended) `cot` 0.542, clean separation. Rule for
+any WP1b-class sweep: uncontended GPU + one continuous session + interleaved drift probe.
+
+**Step 4 — T\* with uncertainty (vx=0.5; local quadratic vertex on a uniform 5-pt
+window, bootstrap 16–84% over the 8 repeats; reported only where local bracket depth >
+2·SEM).**
+
+| payload | mech CoT `Σ|τq̇|` — T\* | copper CoT k=0.3 — T\* |
+|---|---|---|
+| 0 kg  | 0.516 [0.515, 0.517] | 0.570 [0.567, 0.572] |
+| 4 kg  | 0.490 [0.487, 0.494] | 0.575 [0.571, 0.578] |
+| 8 kg  | 0.483 [0.481, 0.485] | 0.602 [0.598, 0.607] |
+| 12 kg | 0.484 [0.482, 0.486] | 0.607 [0.603, 0.611] |
+| trend | **DOWN −0.032 s, monotonic, \|span\|/CI 16×** | **UP +0.037 s, monotonic, \|span\|/CI 11×** |
+| local depth vs 2·SEM | 1.5–4.1% vs 1.1–1.8% | 3.1–5.2% vs 0.8–1.1% |
+
+vx=0.6: mech CoT resolvable only 1/4 payloads (bowls flatten as speed rises); copper CoT
+resolvable 3/4, still UP (0.542→0.561 over 8 kg). vx=0.7: every objective edge-censored
+at T=0.40 — the optimal stride drops below the grid floor at that speed, as WP1
+predicted. **vx=0.5 is the speed with resolvable interior bowls, copper-loss the
+deepest.**
+
+**Step 5 — k-sensitivity.** WP1's "0/4 kg edge → 8/12 kg interior" copper regime shift
+**does not reproduce** — it was a grid-ceiling artifact (WP1 grid stopped at T=0.60; the
+copper optima are 0.54–0.61). With T to 0.70, all payloads have interior copper optima
+at every k. The **T\*-rises-with-payload direction is robust to k**: k=0.1 →
+0.543→0.589, k=0.3 → 0.570→0.607, k=1.0 → 0.573→0.614 (vx=0.5, 0→12 kg). Not an artifact
+of the unfitted literature constant.
+
+**Step 6 — objective comparison (report only, not adjudicated).**
+
+| objective | interior optimum in T? (vx=0.5) | moves with payload beyond the floor? |
+|---|---|---|
+| mech CoT `Σ|τq̇|` | yes, 4/4 payloads | yes — **shorter** stride under load (−0.032 s / 12 kg) |
+| copper CoT `Σ(|τq̇|+kτ²)` | yes, 4/4 (+3/4 at vx=0.6) | yes — **longer** stride under load (+0.037 s / 12 kg), robust to k |
+| `err_vx` (tracking) | no — argmin pinned at T=0.40 edge, or flat ~0.45 | no — wants the shortest stride at every payload |
+| `ss_vx_var` (F5 analogue) | no — monotone in T, argmin at the 0.40 edge in 12/12 cells | no interior optimum at all |
+
+Level response reconfirmed (vx=0.5, 0→12 kg): mech power +5.6%, copper power +32.6%,
+mech CoT +7.0%, copper CoT +34.7% — copper ~5× more payload-responsive.
+
+**Verdict.** Bar A is **RESOLVED and PASSES on CoT**: an injected torso payload shifts
+the CoT-optimal stride period, monotonically and above the measured noise floor, at
+vx=0.5, on **both** CoT variants. WP1's "DIVERGENCE" reading (CoT vs `ss_vx_var`) is
+superseded — `ss_vx_var` has no interior optimum, so it was never a competing optimum.
+The real divergence is **within CoT**: mechanical `Σ|τq̇|` wants a *shorter* stride under
+load, copper-loss `Σ(|τq̇|+kτ²)` wants a *longer* one, and it is not a k artifact.
+`err_vx` confirms WP1 CORRECTION §5 — a tracking-only HL has no gradient to adapt stride
+to load. The objective choice (which CoT, or a CoT+tracking blend) is the planning
+chat's; the measurements are here. Raw data → `data/2026-08-28-wp1b-payload-repeat/`
+(`wp1b_sweep.csv` 672 rows, `wp1b_drift.csv`, `wp1b_tstar_*.csv`, `wp1b_*_vs_T.png`).

@@ -1,0 +1,161 @@
+sources: ['wp1b_sweep.csv']
+672 rows | cells 84 | repeats/cell min=8 max=8 | eval_steps=[np.int64(1200)]
+T grid present: [np.float64(0.4), np.float64(0.45), np.float64(0.5), np.float64(0.55), np.float64(0.6), np.float64(0.65), np.float64(0.7)]
+
+================================================================================
+LEVEL RESPONSE TO PAYLOAD  (mean over the 0.4-0.6 core T grid)
+================================================================================
+  vx=0.5 mech_power_w           0kg=198.203  12kg=209.346  +5.6%
+  vx=0.5 mech_power_copper_w    0kg=3688.76  12kg=4889.56  +32.6%
+  vx=0.5 cot                    0kg=0.521126  12kg=0.557385  +7.0%
+  vx=0.5 cot_copper             0kg=9.70418  12kg=13.0742  +34.7%
+  vx=0.5 err_vx                 0kg=0.0709421  12kg=0.0769168  +8.4%
+  vx=0.5 ss_vx_var              0kg=0.00156265  12kg=0.00310924  +99.0%
+  vx=0.6 mech_power_w           0kg=251.529  12kg=268.433  +6.7%
+  vx=0.6 mech_power_copper_w    0kg=4261.38  12kg=5530.08  +29.8%
+  vx=0.6 cot                    0kg=0.557632  12kg=0.600874  +7.8%
+  vx=0.6 cot_copper             0kg=9.46548  12kg=12.4444  +31.5%
+  vx=0.6 err_vx                 0kg=0.0821077  12kg=0.0876426  +6.7%
+  vx=0.6 ss_vx_var              0kg=0.00233555  12kg=0.00381616  +63.4%
+  vx=0.7 mech_power_w           0kg=317.149  12kg=341.973  +7.8%
+  vx=0.7 mech_power_copper_w    0kg=4934.17  12kg=6301.8  +27.7%
+  vx=0.7 cot                    0kg=0.607432  12kg=0.65652  +8.1%
+  vx=0.7 cot_copper             0kg=9.47845  12kg=12.1635  +28.3%
+  vx=0.7 err_vx                 0kg=0.0937204  12kg=0.0992591  +5.9%
+  vx=0.7 ss_vx_var              0kg=0.00366697  12kg=0.0049481  +34.9%
+
+================================================================================
+OBJ 1: mechanical CoT  Sum|tau*qdot| / (m g d)
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.55 y=0.509404 | loc_depth= 4.09% full= 35.88% floor(2SEM)= 1.53% | fit(5pt)           T*=0.5159 [0.5148,0.5170]
+  vx=0.5 p= 4kg | argmin=0.50 y=0.513078 | loc_depth= 1.50% full= 36.82% floor(2SEM)= 1.49% | fit(5pt)           T*=0.4901 [0.4870,0.4937]
+  vx=0.5 p= 8kg | argmin=0.50 y=0.522654 | loc_depth= 2.17% full= 40.03% floor(2SEM)= 1.80% | fit(5pt)           T*=0.4831 [0.4813,0.4849]
+  vx=0.5 p=12kg | argmin=0.50 y=0.538289 | loc_depth= 2.74% full= 36.04% floor(2SEM)= 1.12% | fit(5pt)           T*=0.4839 [0.4823,0.4856]
+  vx=0.6 p= 0kg | argmin=0.50 y=0.540424 | loc_depth= 1.59% full= 46.40% floor(2SEM)= 1.62% | not-resolvable     T*=n/a
+  vx=0.6 p= 4kg | argmin=0.50 y=0.546453 | loc_depth= 2.82% full= 45.39% floor(2SEM)= 1.62% | fit(5pt)           T*=0.4650 [0.4640,0.4659]
+  vx=0.6 p= 8kg | argmin=0.45 y=0.556148 | loc_depth= 1.25% full= 42.27% floor(2SEM)= 1.50% | not-resolvable     T*=n/a
+  vx=0.6 p=12kg | argmin=0.45 y=0.574561 | loc_depth= 1.10% full= 40.48% floor(2SEM)= 1.77% | not-resolvable     T*=n/a
+  vx=0.7 p= 0kg | argmin=0.40 y=0.574567 | loc_depth=  n/a full= 50.34% floor(2SEM)= 1.39% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.40 y=0.579271 | loc_depth=  n/a full= 50.69% floor(2SEM)= 1.30% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 8kg | argmin=0.40 y=0.588955 | loc_depth=  n/a full= 47.70% floor(2SEM)= 1.41% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p=12kg | argmin=0.40 y=0.604833 | loc_depth=  n/a full= 47.64% floor(2SEM)= 1.33% | argmin@edge(0.40)  T*=n/a
+
+================================================================================
+OBJ 2: copper-loss CoT k=0.1  Sum(|tau*qdot| + 0.1*tau^2)
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.55 y=3.52175 | loc_depth= 3.05% full= 12.98% floor(2SEM)= 0.93% | fit(5pt)           T*=0.5430 [0.5401,0.5461]
+  vx=0.5 p= 4kg | argmin=0.60 y=3.83459 | loc_depth= 5.68% full= 10.05% floor(2SEM)= 0.87% | fit(5pt)           T*=0.5630 [0.5589,0.5666]
+  vx=0.5 p= 8kg | argmin=0.60 y=4.17532 | loc_depth= 2.65% full=  7.98% floor(2SEM)= 1.03% | fit(5pt)           T*=0.5868 [0.5837,0.5904]
+  vx=0.5 p=12kg | argmin=0.60 y=4.53715 | loc_depth= 2.96% full=  7.65% floor(2SEM)= 1.07% | fit(5pt)           T*=0.5894 [0.5847,0.5936]
+  vx=0.6 p= 0kg | argmin=0.40 y=3.4701 | loc_depth=  n/a full= 18.87% floor(2SEM)= 0.93% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 4kg | argmin=0.55 y=3.73997 | loc_depth= 3.14% full= 15.24% floor(2SEM)= 0.92% | fit(5pt)           T*=0.5303 [0.5274,0.5330]
+  vx=0.6 p= 8kg | argmin=0.55 y=4.06822 | loc_depth= 2.60% full= 10.77% floor(2SEM)= 0.98% | fit(5pt)           T*=0.5363 [0.5337,0.5390]
+  vx=0.6 p=12kg | argmin=0.55 y=4.40708 | loc_depth= 4.14% full=  8.69% floor(2SEM)= 1.22% | fit(5pt)           T*=0.5453 [0.5420,0.5489]
+  vx=0.7 p= 0kg | argmin=0.40 y=3.4195 | loc_depth=  n/a full= 23.41% floor(2SEM)= 0.82% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.40 y=3.69435 | loc_depth=  n/a full= 19.94% floor(2SEM)= 0.77% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 8kg | argmin=0.40 y=3.99659 | loc_depth=  n/a full= 15.82% floor(2SEM)= 0.83% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p=12kg | argmin=0.40 y=4.38005 | loc_depth=  n/a full= 11.87% floor(2SEM)= 0.74% | argmin@edge(0.40)  T*=n/a
+
+================================================================================
+OBJ 2: copper-loss CoT k=0.3  Sum(|tau*qdot| + 0.3*tau^2)
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.60 y=9.54001 | loc_depth= 5.18% full= 10.61% floor(2SEM)= 0.88% | fit(5pt)           T*=0.5700 [0.5672,0.5723]
+  vx=0.5 p= 4kg | argmin=0.60 y=10.402 | loc_depth= 4.61% full=  8.21% floor(2SEM)= 0.84% | fit(5pt)           T*=0.5747 [0.5713,0.5776]
+  vx=0.5 p= 8kg | argmin=0.60 y=11.3876 | loc_depth= 3.07% full=  7.17% floor(2SEM)= 1.01% | fit(5pt)           T*=0.6021 [0.5982,0.6065]
+  vx=0.5 p=12kg | argmin=0.60 y=12.435 | loc_depth= 3.15% full=  8.78% floor(2SEM)= 1.10% | fit(5pt)           T*=0.6068 [0.6029,0.6110]
+  vx=0.6 p= 0kg | argmin=0.40 y=9.30756 | loc_depth=  n/a full= 15.96% floor(2SEM)= 0.86% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 4kg | argmin=0.55 y=10.0962 | loc_depth= 3.66% full= 12.33% floor(2SEM)= 0.87% | fit(5pt)           T*=0.5418 [0.5389,0.5445]
+  vx=0.6 p= 8kg | argmin=0.55 y=11.0487 | loc_depth= 3.20% full=  8.03% floor(2SEM)= 0.96% | fit(5pt)           T*=0.5501 [0.5466,0.5541]
+  vx=0.6 p=12kg | argmin=0.55 y=12.0238 | loc_depth= 4.86% full=  6.49% floor(2SEM)= 1.19% | fit(5pt)           T*=0.5610 [0.5565,0.5658]
+  vx=0.7 p= 0kg | argmin=0.40 y=9.10936 | loc_depth=  n/a full= 20.01% floor(2SEM)= 0.76% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.40 y=9.9245 | loc_depth=  n/a full= 16.35% floor(2SEM)= 0.73% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 8kg | argmin=0.40 y=10.8118 | loc_depth=  n/a full= 12.35% floor(2SEM)= 0.78% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p=12kg | argmin=0.40 y=11.9305 | loc_depth=  n/a full=  8.24% floor(2SEM)= 0.71% | argmin@edge(0.40)  T*=n/a
+
+================================================================================
+OBJ 2: copper-loss CoT k=1.0  Sum(|tau*qdot| + 1.0*tau^2)
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.60 y=30.5628 | loc_depth= 4.76% full=  9.80% floor(2SEM)= 0.86% | fit(5pt)           T*=0.5731 [0.5704,0.5755]
+  vx=0.5 p= 4kg | argmin=0.60 y=33.3881 | loc_depth= 4.18% full=  7.47% floor(2SEM)= 0.83% | fit(5pt)           T*=0.5799 [0.5770,0.5828]
+  vx=0.5 p= 8kg | argmin=0.60 y=36.6306 | loc_depth= 3.40% full=  7.68% floor(2SEM)= 1.00% | fit(5pt)           T*=0.6087 [0.6044,0.6135]
+  vx=0.5 p=12kg | argmin=0.60 y=40.0775 | loc_depth= 3.46% full=  9.23% floor(2SEM)= 1.11% | fit(5pt)           T*=0.6142 [0.6101,0.6188]
+  vx=0.6 p= 0kg | argmin=0.40 y=29.7387 | loc_depth=  n/a full= 14.77% floor(2SEM)= 0.84% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 4kg | argmin=0.55 y=32.3429 | loc_depth= 3.92% full= 11.15% floor(2SEM)= 0.85% | fit(5pt)           T*=0.5472 [0.5445,0.5500]
+  vx=0.6 p= 8kg | argmin=0.55 y=35.4806 | loc_depth= 3.45% full=  6.94% floor(2SEM)= 0.96% | fit(5pt)           T*=0.5567 [0.5526,0.5614]
+  vx=0.6 p=12kg | argmin=0.55 y=38.6822 | loc_depth= 5.14% full=  6.87% floor(2SEM)= 1.19% | fit(5pt)           T*=0.5683 [0.5632,0.5737]
+  vx=0.7 p= 0kg | argmin=0.40 y=29.0239 | loc_depth=  n/a full= 18.61% floor(2SEM)= 0.73% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.40 y=31.73 | loc_depth=  n/a full= 14.89% floor(2SEM)= 0.72% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 8kg | argmin=0.40 y=34.6653 | loc_depth=  n/a full= 10.95% floor(2SEM)= 0.76% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p=12kg | argmin=0.40 y=38.357 | loc_depth=  n/a full=  6.79% floor(2SEM)= 0.70% | argmin@edge(0.40)  T*=n/a
+
+================================================================================
+OBJ 3: tracking error err_vx
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.40 y=0.0600014 | loc_depth=  n/a full=111.33% floor(2SEM)= 3.08% | argmin@edge(0.40)  T*=n/a
+  vx=0.5 p= 4kg | argmin=0.40 y=0.0621624 | loc_depth=  n/a full=110.61% floor(2SEM)= 3.50% | argmin@edge(0.40)  T*=n/a
+  vx=0.5 p= 8kg | argmin=0.45 y=0.0646305 | loc_depth= 2.72% full=116.18% floor(2SEM)= 3.59% | not-resolvable     T*=n/a
+  vx=0.5 p=12kg | argmin=0.45 y=0.0657379 | loc_depth= 5.49% full=107.80% floor(2SEM)= 3.76% | fit(4pt)           T*=0.4511 [0.4488,0.4532]
+  vx=0.6 p= 0kg | argmin=0.40 y=0.071223 | loc_depth=  n/a full= 90.82% floor(2SEM)= 2.21% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 4kg | argmin=0.45 y=0.0727693 | loc_depth= 2.30% full= 93.00% floor(2SEM)= 2.79% | not-resolvable     T*=n/a
+  vx=0.6 p= 8kg | argmin=0.45 y=0.0739902 | loc_depth= 3.90% full= 94.15% floor(2SEM)= 3.07% | fit(4pt)           T*=0.4520 [0.4500,0.4541]
+  vx=0.6 p=12kg | argmin=0.45 y=0.0770194 | loc_depth= 3.89% full= 91.59% floor(2SEM)= 3.57% | fit(4pt)           T*=0.4541 [0.4507,0.4572]
+  vx=0.7 p= 0kg | argmin=0.40 y=0.081619 | loc_depth=  n/a full= 80.04% floor(2SEM)= 2.69% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.45 y=0.0836176 | loc_depth= 1.22% full= 78.63% floor(2SEM)= 2.43% | not-resolvable     T*=n/a
+  vx=0.7 p= 8kg | argmin=0.45 y=0.0847188 | loc_depth= 3.30% full= 78.88% floor(2SEM)= 2.79% | fit(4pt)           T*=0.4518 [0.4502,0.4535]
+  vx=0.7 p=12kg | argmin=0.45 y=0.0863909 | loc_depth= 6.05% full= 81.73% floor(2SEM)= 2.46% | fit(4pt)           T*=0.4556 [0.4537,0.4575]
+
+================================================================================
+OBJ 4: cross-env vx variance ss_vx_var (F5 analogue)
+================================================================================
+  vx=0.5 p= 0kg | argmin=0.40 y=0.00042512 | loc_depth=  n/a full=2299.96% floor(2SEM)=196.85% | argmin@edge(0.40)  T*=n/a
+  vx=0.5 p= 4kg | argmin=0.40 y=0.000540124 | loc_depth=  n/a full=1893.79% floor(2SEM)=153.15% | argmin@edge(0.40)  T*=n/a
+  vx=0.5 p= 8kg | argmin=0.40 y=0.000701714 | loc_depth=  n/a full=1538.65% floor(2SEM)=119.96% | argmin@edge(0.40)  T*=n/a
+  vx=0.5 p=12kg | argmin=0.40 y=0.0011051 | loc_depth=  n/a full=967.54% floor(2SEM)=56.37% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 0kg | argmin=0.40 y=0.000445206 | loc_depth=  n/a full=3436.96% floor(2SEM)=257.70% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 4kg | argmin=0.40 y=0.000595958 | loc_depth=  n/a full=2342.40% floor(2SEM)=165.67% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p= 8kg | argmin=0.40 y=0.000824597 | loc_depth=  n/a full=1728.05% floor(2SEM)=119.54% | argmin@edge(0.40)  T*=n/a
+  vx=0.6 p=12kg | argmin=0.40 y=0.00116564 | loc_depth=  n/a full=1259.92% floor(2SEM)=95.43% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 0kg | argmin=0.40 y=0.000454786 | loc_depth=  n/a full=5189.36% floor(2SEM)=393.92% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 4kg | argmin=0.40 y=0.000623577 | loc_depth=  n/a full=3448.09% floor(2SEM)=204.48% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p= 8kg | argmin=0.40 y=0.000935001 | loc_depth=  n/a full=2213.19% floor(2SEM)=158.16% | argmin@edge(0.40)  T*=n/a
+  vx=0.7 p=12kg | argmin=0.40 y=0.00127918 | loc_depth=  n/a full=1870.89% floor(2SEM)=103.22% | argmin@edge(0.40)  T*=n/a
+
+================================================================================
+STEP 5 -- k-SENSITIVITY  (copper-loss CoT argmin_T / status, vx=0.5)
+================================================================================
+      k |                  p=0kg |                  p=4kg |                  p=8kg |                 p=12kg
+    0.1 | 0.55/fit(5pt) T*=0.543 | 0.60/fit(5pt) T*=0.563 | 0.60/fit(5pt) T*=0.5868 | 0.60/fit(5pt) T*=0.5894
+    0.3 |  0.60/fit(5pt) T*=0.57 | 0.60/fit(5pt) T*=0.5747 | 0.60/fit(5pt) T*=0.6021 | 0.60/fit(5pt) T*=0.6068
+    1.0 | 0.60/fit(5pt) T*=0.5731 | 0.60/fit(5pt) T*=0.5799 | 0.60/fit(5pt) T*=0.6087 | 0.60/fit(5pt) T*=0.6142
+
+================================================================================
+STEP 6 -- OBJECTIVE COMPARISON  (report only, no recommendation)
+================================================================================
+
+  mech cot
+    vx=0.5: interior T* resolvable in 4/4 payloads (any real structure 4/4) | 4/4 resolvable; T* 0.516->0.484 (dT*=-0.0320 over 12kg), typ CI +/-0.0020 -> MONOTONIC, |span|/CI=16.2x
+    vx=0.6: interior T* resolvable in 1/4 payloads (any real structure 1/4) | only 1/4 payloads give a resolvable interior T* -> inconclusive
+    vx=0.7: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
+
+  cot_copper k=0.3
+    vx=0.5: interior T* resolvable in 4/4 payloads (any real structure 4/4) | 4/4 resolvable; T* 0.570->0.607 (dT*=+0.0368 over 12kg), typ CI +/-0.0035 -> MONOTONIC, |span|/CI=10.6x
+    vx=0.6: interior T* resolvable in 3/4 payloads (any real structure 3/4) | 3/4 resolvable; T* 0.542->0.561 (dT*=+0.0192 over 8kg), typ CI +/-0.0037 -> MONOTONIC, |span|/CI=5.1x
+    vx=0.7: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
+
+  err_vx
+    vx=0.5: interior T* resolvable in 1/4 payloads (any real structure 1/4) | only 1/4 payloads give a resolvable interior T* -> inconclusive
+    vx=0.6: interior T* resolvable in 2/4 payloads (any real structure 2/4) | only 2/4 payloads give a resolvable interior T* -> inconclusive
+    vx=0.7: interior T* resolvable in 2/4 payloads (any real structure 2/4) | only 2/4 payloads give a resolvable interior T* -> inconclusive
+
+  ss_vx_var
+    vx=0.5: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
+    vx=0.6: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
+    vx=0.7: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
+
+CSVs -> /home/iams/ramlab_ws/src/unitree_rl_mjlab/data/2026-08-28-wp1b-payload-repeat/
+wrote wp1b_cot_vs_T.png
+wrote wp1b_cot_copper_k0p3_vs_T.png
+wrote wp1b_cot_copper_k1p0_vs_T.png
+wrote wp1b_err_vx_vs_T.png
+wrote wp1b_ss_vx_var_vs_T.png
+wrote wp1b_mech_power_w_vs_T.png
