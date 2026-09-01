@@ -69,7 +69,7 @@
 #                     phase-shifted joint mirror); >0 tags _mirrorXpXX. Implemented but
 #                     left UNTRAINED pending formulation B's read (the arm 6 pattern) -
 #                     no launch example below on purpose.
-#   NUM_ENVS, MAX_ITER
+#   NUM_ENVS, MAX_ITER, RESAMPL_EXT
 #
 # ============================================================================
 # BASELINE (2026-08-25): full_jacc, folded in from scripts/launch_a1_reward_arms.sh
@@ -112,11 +112,12 @@
 #   #              keep the baseline's shape.
 #   #   floor0p5 : raise the floor only; the HL keeps commanding period.
 #   sbatch --job-name=a1a_nocad    --export=ALL,HL_CADENCE=False,CADENCE_SOURCE=random train_h1_2_a1a_LL_rewards.sh
-#   sbatch --job-name=a1a_pin0625  --export=ALL,CADENCE_SOURCE=random,CADENCE_RANGE=0.625,0.625 train_h1_2_a1a_LL_rewards.sh
-#   sbatch --job-name=a1a_floor0p5 --export=ALL,CADENCE_RANGE=0.5,1.0 train_h1_2_a1a_LL_rewards.sh
+#   sbatch --job-name=a1a_pin0625  --export=ALL,CADENCE_SOURCE=random,CADENCE_RANGE=0.625 train_h1_2_a1a_LL_rewards.sh
+#   sbatch --job-name=a1a_floor0p5 --export=ALL,CADENCE_RANGE=0.5:1.0 train_h1_2_a1a_LL_rewards.sh
 #
-# ⚠ CADENCE_RANGE contains a comma, and --export splits on commas. Quote it as
-#   --export=ALL,"CADENCE_RANGE=0.5,1.0"  or  export it and use --export=ALL.
+# ⚠ sbatch's --export splits on commas. Pass a CADENCE_RANGE INTERVAL inline with a colon
+#   (`CADENCE_RANGE=0.5:1.0`); a lone value (`CADENCE_RANGE=0.625`) is the pin arm. Comma
+#   form (`0.5,1.0`) only survives if you `export CADENCE_RANGE=...` first, then --export=ALL.
 #
 # --- other knobs ------------------------------------------------------------
 #   # a second seed (always tagged _sNNN):
@@ -176,6 +177,8 @@ LL_PITCHREF=${LL_PITCHREF:-0.0}
 LL_PUSHOFF=${LL_PUSHOFF:-0.0}
 LL_SYMMETRY=${LL_SYMMETRY:-0.0}
 LL_MIRROR=${LL_MIRROR:-0.0}
+STANDING_FRAC=${STANDING_FRAC:-0.05}
+RESAMPL_EXT=${RESAMPL_EXT:-True}
 # Cadence family (new 2026-08-25): the three cadence arms need more than a scalar.
 # CADENCE_RANGE empty = leave at the rl_cfg default (0.35,1.0), which is what full_jacc
 # trained with. Tuple syntax: "lo,hi" or "(lo,hi)" -- both parse (mjlab sets tyro's
@@ -219,6 +222,22 @@ lever --agent.ll-pushoff-coef      "$LL_PUSHOFF"      0.0     pushoff
 lever --agent.ll-symmetry-coef     "$LL_SYMMETRY"     0.0     sym
 lever --agent.ll-mirror-coef       "$LL_MIRROR"       0.0     mirror
 
+# rel_standing_envs lives on the env (twist command term), not the agent, and its tag is
+# a percent -- so it gets its own two lines instead of a `lever` call. Last, so a sweep
+# reproduces the 2026-08-26 `_jacc1e-7_standing15` name rather than reordering the tags.
+LEVER_FLAGS+=(--env.commands.twist.rel-standing-envs "$STANDING_FRAC")
+awk "BEGIN{exit !($STANDING_FRAC == 0.05)}" \
+  || LEVER_TAGS+="_standing$(awk "BEGIN{printf \"%g\", $STANDING_FRAC*100}")"
+
+# Command resampling interval. Default (RESAMPL_EXT=True) leaves the rl_cfg long window
+# (3.0, 20.0)s -- full-episode held commands are in-distribution. RESAMPL_EXT=False switches
+# to the short (3.0, 8.0)s window and tags _rs8. Value has NO space (tyro rejects that
+# form); flag and value are separate array elements ("${LEVER_FLAGS[@]}" is quoted below).
+if [[ "$RESAMPL_EXT" == "False" ]]; then
+  LEVER_FLAGS+=(--env.commands.twist.resampling-time-range "(3.0,8.0)")
+  LEVER_TAGS+="_rs8"
+fi
+
 flag --agent.ll-posture-all-joints        "$POSTURE_ALL_JOINTS" True  posturesubset
 flag --agent.ll-posture-anchor-ankle-roll "$ANKLE_ANCHOR"       False ankle
 
@@ -234,8 +253,17 @@ if [[ "$HL_CADENCE" != "True" && "$CADENCE_SOURCE" == "hl" ]]; then
   echo "ERROR: HL_CADENCE=False needs CADENCE_SOURCE=random (source='hl' requires cadence on)." >&2
   exit 2
 fi
+# CADENCE_RANGE accepts `lo,hi`, `lo:hi`, or a lone `v`. sbatch's `--export` splits on
+# commas, so when passing it INLINE (`--export=ALL,CADENCE_RANGE=...`) use `:` for a range
+# (`0.5:1.0`) -- a comma would drop `hi`. Strip parens/space, turn `:` into `,`. A lone
+# value is the pin arm -> duplicate it into a degenerate pair; a real range is left as-is,
+# so the floor-raise arm (`0.5:1.0`) and the pin arm (`0.625`) both work inline.
+CADENCE_RANGE=${CADENCE_RANGE//[()[:space:]]/}
+CADENCE_RANGE=${CADENCE_RANGE//:/,}
+[[ -n "$CADENCE_RANGE" && "$CADENCE_RANGE" != *,* ]] && CADENCE_RANGE="${CADENCE_RANGE},${CADENCE_RANGE}"
 CAD_FLAG="--agent.hl-cadence ${HL_CADENCE} --agent.hl-cadence-source ${CADENCE_SOURCE} --agent.hl-cot-coef ${HL_COT}"
-[[ -n "$CADENCE_RANGE" ]] && CAD_FLAG="$CAD_FLAG --agent.cadence-period-range ${CADENCE_RANGE}"
+[[ -n "$CADENCE_RANGE" ]] && CAD_FLAG="$CAD_FLAG --agent.cadence-period-range (${CADENCE_RANGE})"
+
 
 # Run-name tag for the cadence family. The first two cases NAME themselves (a fixed clock
 # or no clock makes the other three knobs inert, so tagging them would be noise); below
