@@ -31,6 +31,22 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` — prints
   `[VELINC] {json}`. `delta`-mode goal obs cancels absolute velocity, so deploy needs only the
   within-window increment → `.claude/docs/hrl-infra.md`.
+- Commanded joint-limit check (deploy parity): `python scripts/play.py <TaskID>
+  --checkpoint-file <pt> --num-envs 64 --eval-steps 600 --check-joint-limits True` — scores the
+  policy's COMMANDED targets against `h1_2_limits.h`, in the same shape as `safety_analyzer.py`'s
+  `raw_policy_violations`, so sim and hardware compare directly. `[LIMITS] {json}`.
+  Also reports per-joint **`span` (p99-p1), `headroom` (gap to the nearer bound) and `pinned`**,
+  with the 4 ankle spans as bench scalars (`ank_roll_span_l/r`, `ank_pitch_span_l/r`, so they get
+  the per-seed line + seed mean±std). **`headroom` is the diagnostic**: ~0 with `pinned` > 0 means
+  a clamp truncating an overshoot, ~1 action-sigma means a penalty pushed the policy off the
+  bound. Validated against hardware `raw_q` to a few percent (ADR-0009).
+- Cadence-transmission probe: `python scripts/play.py <TaskID> --checkpoint-file <pt>
+  --num-envs 64 --diagnose-cadence 600 --eval-cmd-vx 0.5` — the HL's COMMANDED stride period at
+  every fire (mean, within-episode std across windows, windows-per-stride). `[CADDIAG] {json}`.
+  The HL's period is near-BINARY in the command (**0.905 s at cmd 0, ~0.37 s walking**), so
+  training-time `hl/period_mean` is a standing/walking MIXTURE, not a policy property — compare
+  commanded vs realized at the SAME command or the comparison is meaningless. The LL entrains at
+  0.96-0.98 either way; there is no transmission loss.
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2 --num-envs 64` (defaults to
   1 env without the flag; pre-2026-07-15 probes on cadence ckpts ran frozen-phase — see
@@ -92,7 +108,7 @@ goal decode, reward-term direction/gating, the warm-start column map, deploy/tra
 config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
 change to those. New tests must be proven able to fail:
 `python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
-it is caught (96 tests, 37/37 mutations). A test that restates the logic it guards cannot
+it is caught (160 tests as of 2026-09-01, 37/37 mutations). A test that restates the logic it guards cannot
 fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
 
 **Deploy readiness (2026-08-04): one command, one verdict.**
@@ -147,10 +163,11 @@ analysis and the proposed change first.
   eval reported a phantom "HL hold degeneracy" (A0 was immune: no goal space). Deploy C++
   reads the baked `goal_scale` from the HL ONNX metadata (`State_RLHRL.cpp`) and only
   derives from `deploy.yaml` ranges when that metadata is absent (pre-2026-07-16 exports).
-  **The deploy command ranges are an operator safety clamp and deliberately DON'T match
-  training** (`ang_vel_z` ±0.5 deployed vs ±1.0 trained: train wide for faster turning,
-  deploy narrow for a tame joystick) — which is precisely why the scale must travel with
-  the policy. `tests/test_deploy_parity.py` asserts the metadata is present so the legacy
+  **The deploy command ranges need not match training, which is precisely why the
+  scale must travel with the policy.** ⚠ The old "deploy narrow for a tame joystick" setting
+  (`ang_vel_z` ±0.5) was **abandoned 2026-08-27**: it scales the command the policy sees, so the
+  robot barely responded to small stick deflections. All 8 yamls now use the trained ±1.0. Treat
+  the ranges as a tunable with a recorded reason, not as a fixed safety convention. `tests/test_deploy_parity.py` asserts the metadata is present so the legacy
   derive-from-ranges path stays unreachable. See the A1 findings ledger (research KB) WL-C.
 - **`hl_velocity_goals_only=True` is the A1a default (2026-07-09):** the TD3 HL emits
   only the velocity goal columns (+period); orientation/height targets are pinned to
@@ -185,13 +202,61 @@ analysis and the proposed change first.
   (`task5b_bare_verdict.md`, `task6_nearzero_probe.md`).
 - `gamma_hi` is **derived from `c`** (`0.99**c`, in `HrlRunnerCfg.__post_init__`,
   unconditional) — horizon-matched, NOT independently settable. Don't re-hardcode it.
-- Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as
-  a hyperparameter: hold it fixed within a comparison set; use ≥2 seeds. Gait lift-off
-  iteration scales with num_envs — never judge stuck-vs-slow before ~2x the expected
-  lift-off (see `docs/adr/0005` amendment).
+- Same-config runs diverge a lot (GPU non-determinism + RL chaos), and **how much depends
+  on the REGIME**: measured on two config-identical same-seed pairs (2026-08-27), walking
+  metrics reproduce to ~10% but standing ajit/touchdowns span **4.2x** and held tracking
+  **3.3x** — one replicate never reached the commanded speed at all. Score a standing arm
+  against a replicate BAND, never a single control; a <2x standing effect from one run is
+  not evidence. Treat `num_envs` as a hyperparameter: hold it fixed within a comparison
+  set; use ≥2 seeds. Gait lift-off iteration scales with num_envs — never judge
+  stuck-vs-slow before ~2x the expected lift-off (see `docs/adr/0005` amendment).
+- **`Unitree-H1_2-Rough` (2026-08-26): the actor is BLIND, and sim sizing is the binding
+  constraint on a 12 GB card.** The terrain `height_scan` is **critic-only** (asymmetric
+  actor-critic). An actor that reads it exports at **279** dims and is undeployable: the
+  H1-2 has no such sensor, the deploy vector is 92, and the C++ runner does not validate
+  the length, so the robot goes limp via the safety hold rather than erroring
+  (`.claude/docs/deployment.md`, "Obs-dim contract"). Blind actor = flat's 92 dims = drop-in
+  export. **Sizing:** EPA collision scratch is `num_envs × nconmax × (376 + 132·ccd_iterations)`
+  bytes, so stock rough (`ccd_iterations=500`, `nconmax=48`) wants **13 GB** at 4096 envs.
+  Train with `--env.sim.mujoco.ccd-iterations 200` — **confirmed free by two independent
+  instruments** (2026-08-28): an open-loop probe (divergence vs ccd 500 equals the GPU
+  non-determinism floor) and a 4-run training A/B (`{500,200}x{seed 42,43}`, 301 iters,
+  1024 envs) where **0/5 metrics exceed the seed noise floor**, ratios 0.18-0.94. Or drop
+  to 2048 envs at stock ccd. Play sets `nconmax=512`
+  because play draws random tiles and the **initial-pose** contact count reaches ~195;
+  steady-state demand is only 38, so training's 48 is correct and was never dropping contacts.
+- **`hl_cot_coef` was calibrated on a superseded reward (2026-09-01, `docs/adr/0004`
+  Amendment).** The CoT denominator changed 2026-07-10 from the UNDIRECTED speed integral to the
+  SIGNED projection on the commanded direction ("to promote longer strides"); the 0.2 keeper and
+  the sweep that ruled out higher values BOTH predate it, and it then rode ~40 runs unchanged.
+  On the current reward the sign is **flipped** (larger coef = LONGER stride) and the response is
+  **threshold-like**: 0.2→2 inert, 2→5 flips. **`hl_cot_coef=5` beats A0 on 9/10 walking metrics
+  (CoT −23% at 0.61x its `err_vx`, 0 falls)** and clears ADR-0004 S4's A1a half. Cap is 5–10:
+  coef 10/20 keep `fall_rate` 0 while running ~5x A0 `err_vx`, so **a fall-rate guard cannot see
+  this failure — always pair a smoothness/energy weight guard with a tracking floor.** General
+  rule: a coefficient is calibrated against a REWARD, not a task; reformulating a reward term
+  reverts every weight tuned against it, and every sweep that ruled out neighbours, to
+  unvalidated.
 - **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
-  derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid;
-  v2 logs to `*_v2`. Replays need the constants the checkpoint trained with (env-side scales).
+  derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid.
+  Replays need the constants the checkpoint trained with (env-side scales).
+- **Model v3 was REVERTED (2026-08-28, `docs/adr/0009`). v2 is the current model** and its
+  checkpoints are valid. v3 = action clip + L1 excess penalty + leg mass (`docs/adr/0008`); the
+  three TRAINING-side changes are out and the `*_v3` namespaces are retired, but **the deploy yaml
+  clip is KEPT** (it did no harm — v2 ran pinned by it 14-21% of steps and performed best — and it
+  clips before the hold blend, so it is a backstop, not a parity device). `ang_vel_z` in the 8 deploy
+  yamls stays at **±1.0**, matching training (operator call 2026-08-27: at ±0.5 the robot barely
+  responded to small stick deflections). **Why: the penalty cost 2.1-2.4x of the commanded ankle roll
+  range** (the joint that rejects lateral pushes) and bought nothing, because
+  `State_RLBase.cpp:160-165` already truncated every over-limit command unconditionally. Measured
+  in sim and on hardware, agreeing to a few percent; `cliponly` (same plant, clip+penalty) loses
+  the same range as v3, so **the leg mass is inert** and the penalty is the cause. It is the
+  PENALTY, not the clip: a hard clip has no gradient past the bound, while an L1 penalty on the
+  SAMPLED excess pushes the mean ~1.8 action-sigma inside it.
+  ⚠ Two findings survive the revert: `joint_pos_limits` (-10.0) is **inert** (< 5e-7/step on a
+  trained policy — it scores MEASURED position, which MuJoCo's `qpos` clamp already prevents),
+  and **the bench cannot see a lost reserve** — every pre-registered metric IMPROVED under v3.
+  Score a disturbance before trusting a non-inferiority bar on anything of this shape.
 
 ## Where the deep context lives
 

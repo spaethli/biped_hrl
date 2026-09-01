@@ -59,6 +59,41 @@ def hrl_goal(env: ManagerBasedRlEnv, dim: int = 3) -> torch.Tensor:
   return goal
 
 
+def env_latent_e(
+  env: ManagerBasedRlEnv,
+  torso_cfg: SceneEntityCfg,
+  foot_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """WP2 privileged environment latent ``e`` = (payload_kg, com_dx, com_dy, com_dz,
+  friction), read back from the randomized sim state rather than tracked separately.
+
+  Single source of truth for both consumers: the A0/flat "critic" obs term and the
+  A1 HL-only ``obs["hl_e"]`` channel (``hrl_runner.py``). ``torso_cfg``/``foot_cfg``
+  select the same torso body / foot geoms as the ``base_mass``/``base_com``/
+  ``foot_friction`` DR events (set per-robot alongside them in ``env_cfgs.py``).
+
+  Payload and CoM read as DELTAS from the compiled model's un-randomized default
+  (``env.sim.get_default_field``, the same baseline the DR engine itself samples
+  around), since ``dr.body_mass``/``dr.body_com_offset`` use ``operation="add"``.
+  Friction reads as the absolute coefficient (``dr.geom_friction`` uses
+  ``operation="abs"``, so there is no "nominal" to subtract). A pure readback: no RNG
+  consumption, so it does not affect the inertness proof (WP2 acceptance gate).
+  """
+  torso_asset: Entity = env.scene[torso_cfg.name]
+  foot_asset: Entity = env.scene[foot_cfg.name]
+  torso_gid = torso_asset.indexing.body_ids[torso_cfg.body_ids][0]
+  foot_gid = foot_asset.indexing.geom_ids[foot_cfg.geom_ids][0]
+
+  mass_default = env.sim.get_default_field("body_mass")
+  ipos_default = env.sim.get_default_field("body_ipos")
+
+  payload = env.sim.model.body_mass[:, torso_gid] - mass_default[torso_gid]
+  com_delta = env.sim.model.body_ipos[:, torso_gid, :] - ipos_default[torso_gid]
+  friction = env.sim.model.geom_friction[:, foot_gid, 0]
+
+  return torch.cat([payload.unsqueeze(-1), com_delta, friction.unsqueeze(-1)], dim=-1)
+
+
 def phase(env: ManagerBasedRlEnv, period: float, command_name: str) -> torch.Tensor:
     # A1a: if the HL commands a gait cadence, the per-env accumulated phase buffer
     # (env.hrl_phase, already in [0,1)) overrides the fixed-period clock. Absent (A0 /

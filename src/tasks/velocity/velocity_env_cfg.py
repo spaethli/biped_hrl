@@ -118,6 +118,18 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       func=mdp.foot_contact_forces,
       params={"sensor_name": "feet_ground_contact"},
     ),
+    # WP2 (2026-08-31): privileged environment latent e = (payload_kg, com_dx/dy/dz,
+    # friction), critic-only -- same asymmetric actor-critic pattern already used for
+    # Rough's height_scan (privileged value function, deployable actor untouched). A
+    # pure readback of DR-randomized sim state (see mdp.env_latent_e), so it is present
+    # unconditionally and costs nothing when payload DR itself is disabled.
+    "env_latent_e": ObservationTermCfg(
+      func=mdp.env_latent_e,
+      params={
+        "torso_cfg": SceneEntityCfg("robot", body_names=()),  # Set per-robot.
+        "foot_cfg": SceneEntityCfg("robot", geom_names=()),  # Set per-robot.
+      },
+    ),
   }
 
   observations = {

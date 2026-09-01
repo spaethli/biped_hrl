@@ -1,10 +1,10 @@
 {
-  "staged_at": "2026-08-25T09:34:00+02:00",
-  "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-08-24_23-24-36_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42/model_10000.pt",
-  "source_run": "2026-08-24_23-24-36_a1a_cot0p2_cad0p5_standstill1p0_angmom0p025_footslip0p25_footclear1p0_energy0p05_jacc2p5e-7_jlim10p0_softland1e-3_bodyangvel0p05_ar0p05_postureall_s42",
+  "staged_at": "2026-08-28T10:17:45+02:00",
+  "checkpoint": "logs/rsl_rl/h1_2_velocity_a1_v2/2026-08-27_14-04-11_a1a_fullmirror_cadrand_pin0p625_s42/model_10000.pt",
+  "source_run": "2026-08-27_14-04-11_a1a_fullmirror_cadrand_pin0p625_s42",
   "md5": {
-    "high_level.onnx": "a92c69a72117fcb777755c887f34ca04",
-    "low_level.onnx": "81a28e77f28ccdac371d6bb4d7c8a055"
+    "high_level.onnx": "95652bbfa0ef9dd9802f3221f144adec",
+    "low_level.onnx": "6e17a7e81bc0dc7d966962132001193f"
   },
   "staged_by": "scripts/deploy_provenance.py",
   "checkpoint_verified_numerically": false

@@ -100,8 +100,26 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     "asset_cfg"
   ].site_names = site_names
 
+  # Blind actor (2026-08-26): the terrain height scan is a sim-only signal -- the H1-2 has
+  # no sensor that produces it, and the deploy obs vector is the 7 proprioceptive terms
+  # (92 dims). Keeping it in the actor made the rough export a 279-dim policy that the C++
+  # runner cannot feed: algorithms.h sizes the input tensor from the ONNX shape and never
+  # checks the vector it was handed, so the 187 missing floats were read as adjacent heap
+  # memory -> erratic actions -> safety hold -> near-passive robot. The critic keeps the
+  # scan (asymmetric actor-critic: privileged value function, deployable policy), so a
+  # blind rough actor exports at exactly the flat 92 dims and is a drop-in for the existing
+  # deploy config. NOT part of Model v3 -- do not remove with an ADR-0008/0009 revert.
+  del cfg.observations["actor"].terms["height_scan"]
+
   cfg.events["foot_friction"].params["asset_cfg"].geom_names = geom_names
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
+  # WP2: privileged-latent critic term reads the same torso body / foot geoms.
+  cfg.observations["critic"].terms["env_latent_e"].params["torso_cfg"].body_names = (
+    "torso_link",
+  )
+  cfg.observations["critic"].terms["env_latent_e"].params["foot_cfg"].geom_names = (
+    geom_names
+  )
 
   # Rationale for std values:
   # - Knees/hip_pitch get the loosest std to allow natural leg bending during stride.
@@ -162,6 +180,13 @@ def unitree_h1_2_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Effectively infinite episode length.
     cfg.episode_length_s = int(1e9)
 
+    # Play draws random terrain tiles (curriculum off), and the INITIAL-POSE contact count
+    # on the hard tiles reaches ~195 -- put_data validates mjd.ncon <= nconmax and raised
+    # "nconmax overflow" on ~1 launch in 3 at the training value of 48. Steady-state demand
+    # is only 38 (measured, hardest row), so 48 stays correct for TRAINING; this is an
+    # init-pose headroom fix. NOT part of Model v3 -- do not remove with an ADR-0008/0009 revert.
+    cfg.sim.nconmax = 512
+
     cfg.observations["actor"].enable_corruption = False
     cfg.events.pop("push_robot", None)
     cfg.curriculum = {}
@@ -199,7 +224,11 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg.scene.sensors = tuple(
     s for s in (cfg.scene.sensors or ()) if s.name != "terrain_scan"
   )
-  del cfg.observations["actor"].terms["height_scan"]
+  # `pop`, not `del`, for the ACTOR: the rough cfg this builds on already removed
+  # height_scan from the actor (blind actor, 2026-08-26), so a strict delete raises here.
+  # Rough-terrain work, NOT Model v3 -- it rode in on the ADR-0008 commit and must survive
+  # the ADR-0009 revert. The critic keeps its scan until this line, so `del` is right there.
+  cfg.observations["actor"].terms.pop("height_scan", None)
   del cfg.observations["critic"].terms["height_scan"]
 
   # Disable terrain curriculum (not present in play mode since rough clears all).
@@ -297,6 +326,50 @@ def unitree_h1_2_flat_wide_dr_env_cfg(play: bool = False) -> ManagerBasedRlEnvCf
   cfg = unitree_h1_2_flat_env_cfg(play=play)
   if not play:
     apply_wide_dr(cfg)
+  return cfg
+
+
+# WP2 payload DR range (thesis_plan_8weeks.md SS3): 0-12 kg added at the torso COM.
+PAYLOAD_DR_RANGE = (0.0, 12.0)
+
+
+def apply_payload_dr(
+  cfg: ManagerBasedRlEnvCfg, ranges: tuple[float, float] = PAYLOAD_DR_RANGE
+) -> None:
+  """WP2 (2026-08-31): promote torso payload to a randomized env parameter.
+
+  Extends the existing ``base_mass`` DR term (previously only reachable via the
+  wide-DR bundle, ``apply_wide_dr`` above) rather than adding a parallel mass
+  mechanism -- same event key, same ``dr.body_mass`` function, same torso asset_cfg
+  as ``base_com``. ``--eval-payload-kg`` (``play.py``) overwrites this same event key
+  with a degenerate pinned range, so it keeps working unchanged whether or not the
+  loaded task calls this function.
+
+  Deliberately NOT called from the base flat/A1 env cfgs: registering the event
+  unconditionally would make ``dr.body_mass`` sample RNG on every reset even at a
+  degenerate (0, 0) range (it still draws from the distribution before multiplying
+  by a zero-width range), shifting the RNG stream consumed by every event registered
+  after it (``foot_friction``, ``encoder_bias``, ``base_com``, ``push_robot``) and
+  failing the WP2 inertness gate even though the physical result would be identical.
+  Only task variants that explicitly call this function carry payload DR; the plain
+  ``Unitree-H1_2-Flat``/``-A1`` tasks are untouched.
+  """
+  cfg.events["base_mass"] = EventTermCfg(
+    mode="startup",
+    func=envs_mdp.dr.body_mass,
+    params={
+      "asset_cfg": cfg.events["base_com"].params["asset_cfg"],
+      "operation": "add",
+      "ranges": ranges,
+    },
+  )
+
+
+def unitree_h1_2_flat_payload_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """WP2/WP3: A0 flat env with payload DR (F-mem baseline)."""
+  cfg = unitree_h1_2_flat_env_cfg(play=play)
+  if not play:
+    apply_payload_dr(cfg)
   return cfg
 
 

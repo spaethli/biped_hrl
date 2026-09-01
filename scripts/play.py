@@ -12,6 +12,8 @@ import tyro
 import yaml
 
 from mjlab.envs import ManagerBasedRlEnv
+from mjlab.envs import mdp as envs_mdp
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -19,6 +21,7 @@ from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from src.tasks.velocity.mdp.observations import env_latent_e
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,18 @@ class PlayConfig:
   play.py's own stride_period_s metric (which divides by raw touchdown count) is
   corrupted by double-taps vs an alternation-based estimate. Sibling to ``eval_steps``;
   reuses ``eval_seeds``."""
+  diagnose_cadence: int = 0
+  """Cadence-transmission probe (2026-08-31): if > 0, run this many deterministic steps and
+  report the HL's COMMANDED stride period (``env.hrl_period``) sampled at every HL fire --
+  its within-episode mean, the per-env std ACROSS windows, and the mean absolute
+  window-to-window step. Motivation: across 17 co-trained arms the commanded period spans
+  0.387-0.505 s while the realized stride sits at 0.3487 +- 0.0044 s (slope +0.010,
+  r=+0.085), i.e. the LL does not follow the HL's period at all, while it follows a HELD
+  random period with slope +0.839 (r=+0.996). The two candidate causes -- a period that
+  jitters faster than a stride vs an LL that ignores a steady command -- imply opposite
+  fixes, and only the within-episode jitter separates them. ``hl_cadence_source='random'``
+  is the built-in control: it draws once per episode, so its std must read ~0. Sibling to
+  ``eval_steps``; reuses ``eval_seeds``."""
   diagnose_action_rate: int = 0
   """Action-rate decomposition: if > 0, run this many deterministic steps and split the
   whole-body action rate ||a_t - a_{t-1}|| by (1) position within the HL window (bin
@@ -80,6 +95,18 @@ class PlayConfig:
   uniform smoothness deficit. Works on A0 (non-hierarchical) too, where c defaults to 8 and
   the flat profile is the control proving any A1 structure is real, not a binning artifact.
   Sibling to ``eval_steps``; reuses ``eval_seeds``."""
+  check_joint_limits: bool = False
+  """Deploy parity check: with ``--eval-steps``, score the policy's COMMANDED joint
+  position targets (``action_manager['joint_pos'].processed_actions``, the same quantity
+  the C++ writes to ``motor_cmd().q()``) against the hardware position limits in
+  ``deploy/robots/h1_2/include/h1_2_limits.h``. On hardware those bounds are enforced by a
+  per-joint command clamp (``State_RLBase.cpp``), so a target past them is silently
+  truncated and the joint never does what the policy intended. In sim nothing clamps the
+  target, so the same policy can train against a trajectory it can never execute on the
+  robot, and the defect is invisible until the flight recorder reports it. Reports the
+  per-joint over-limit rate and worst overshoot in radians, directly comparable to
+  ``safety_analyzer.py``'s ``raw_policy_violations`` on a real session. Costs one tensor
+  compare per step; no extra rollout."""
   probe_lean: int = 0
   """Backward-lean sensitivity probe (ADR-0006 / WL-B0e): if > 0, run this many
   deterministic standing steps per swept bias value and report the steady-state base
@@ -119,6 +146,14 @@ class PlayConfig:
   fixed-command replays walk STRAIGHT instead of slowly circling (the A0-inherited yaw drift
   curves the path when wz is just pinned to 0). Requires --eval-cmd-vx; overrides eval_cmd_wz
   (wz becomes the live heading correction, clipped to the task's ang_vel_z range)."""
+  eval_payload_kg: float | None = None
+  """WP1 payload pilot (2026-08-27): pin an exact torso payload mass (kg, added at the COM)
+  for the whole eval rollout, instead of the training-time sampled range. Reuses the existing
+  ``base_mass`` DR mechanism (``dr.body_mass``, same function as WL-D arm 8's wide-DR bundle)
+  with a degenerate ``ranges=(kg, kg)`` -- the same pin idiom as --eval-cadence-period. None
+  (default) -> no event added, byte-identical to current behavior. The checkpoint under test
+  was NOT trained with payload DR, so this is a zero-shot generalization probe: does the
+  optimal stride period shift with an injected payload the policy never saw."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -168,6 +203,24 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.no_terminations:
     env_cfg.terminations = {}
     print("[INFO]: Terminations disabled")
+
+  # WP1 payload pilot: pin an exact torso payload for the whole eval rollout (see
+  # --eval-payload-kg docstring). Reuses dr.body_mass with a degenerate range instead of
+  # adding a parallel mass mechanism.
+  if cfg.eval_payload_kg is not None:
+    if "base_com" not in env_cfg.events:
+      raise SystemExit("--eval-payload-kg: task has no 'base_com' event to borrow the "
+                        "torso asset_cfg from.")
+    env_cfg.events["base_mass"] = EventTermCfg(
+      mode="startup",
+      func=envs_mdp.dr.body_mass,
+      params={
+        "asset_cfg": env_cfg.events["base_com"].params["asset_cfg"],
+        "operation": "add",
+        "ranges": (cfg.eval_payload_kg, cfg.eval_payload_kg),
+      },
+    )
+    print(f"[WP1] Pinned torso payload = {cfg.eval_payload_kg} kg.")
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(
@@ -233,7 +286,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
       structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
                         "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
-                        "hl_obs_vel",
+                        "hl_obs_vel", "hl_obs_e",
                         # A1a cadence channel: without hl_cadence restored, eval rebuilt the
                         # runner with the channel OFF -> fixed 0.6 clock, --eval-cadence-period
                         # silently inert (the 2026-07-02 "no entrainment" false verdicts).
@@ -277,7 +330,8 @@ def run_play(task_id: str, cfg: PlayConfig):
   # silently produced non-comparable numbers twice (the 2026-07-15 goal probe, then the
   # 2026-08-09 jacc benches), so eval paths default to 64 while interactive play stays at 1.
   _eval_mode = (cfg.eval_steps > 0 or cfg.diagnose_goals > 0 or cfg.diagnose_symmetry > 0
-                or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0)
+                or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0
+                or cfg.diagnose_cadence > 0)
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
   elif _eval_mode:
@@ -473,6 +527,18 @@ def run_play(task_id: str, cfg: PlayConfig):
       return torch.as_tensor(sorted(ids), device=robot.joint_pos.device) if ids else None
     leg_ids = _grp([".*hip.*", ".*knee.*", ".*ankle.*"])
     arm_ids = _grp([".*shoulder.*", ".*elbow.*", ".*wrist.*"])
+    # Per-joint action scale kappa (rad per action unit), read from the live action term
+    # rather than re-imported from the robot constants, so it can never desync from the
+    # plant the checkpoint is actually being replayed on. Needed because every commanded-
+    # side smoothness number is reported in RADIANS: kappa = 0.25*tau_max/Kp spans 6.7x
+    # across the body (legs 0.25, shoulder_yaw 0.0375), so a raw-action-unit whole-body
+    # norm physically over-weights the arms 3-6.7x. See CONTEXT.md "Physical units rule".
+    _act_scale = uenv.action_manager.get_term("joint_pos").scale
+    if not torch.is_tensor(_act_scale):
+      _act_scale = torch.full((1, uenv.action_manager.total_action_dim),
+                              float(_act_scale), device=robot.joint_pos.device)
+    kappa = _act_scale[:1].to(robot.joint_pos.device)  # [1, A], env-invariant
+    ctrl_dt = uenv.step_dt
     # CoT / cadence metrics (A1a M0): mechanical power, cost of transport, achieved stride period.
     try:
       contact_sensor = uenv.scene["feet_ground_contact"]
@@ -480,6 +546,14 @@ def run_play(task_id: str, cfg: PlayConfig):
       contact_sensor = None
     step_dt = uenv.step_dt
     MASS_G = 75.0 * 9.81  # H1-2 ~75 kg; dimensionless CoT = energy / (m g distance)
+    # WP1 payload pilot: copper-loss-corrected CoT variant, metric-only (never enters any
+    # reward -- the trained/mechanical `power`/`cot` below are unchanged). k = 0.3 from
+    # Yang et al. 2022 (CoRL), "Fast and Efficient Locomotion via Learned Gait Transitions"
+    # (arXiv:2104.04644) eq. 3, Sum_i max(tau_i*omega_i + k*tau_i^2, 0), their "motor
+    # parameter" following the MIT-Cheetah/Di Carlo actuator convention. NOT fit to the
+    # H1-2's M107/GO2HV actuators specifically (no public winding-resistance/torque-constant
+    # spec for them); a documented literature default.
+    COPPER_LOSS_K = 0.3
 
     # Collect label / structure info for the JSON line.
     bench_meta: dict = {"label": str(resume_path) if resume_path is not None else "unknown"}
@@ -497,14 +571,64 @@ def run_play(task_id: str, cfg: PlayConfig):
       with torch.inference_mode():
         obs, _ = env.reset()
 
+      # WP2: log the ACTUAL sampled payload (mean over envs), not the requested
+      # --eval-payload-kg -- so a payload-DR training run's rollout can be segmented by
+      # payload post-hoc without re-running. `mode="startup"` DR does not resample on
+      # reset, so this is constant for the whole play.py process; read once per seed.
+      e_params = uenv.observation_manager.get_term_cfg("critic", "env_latent_e").params
+      payload_kg = env_latent_e(uenv, e_params["torso_cfg"], e_params["foot_cfg"])[:, 0].mean().item()
+
       errs_vx, errs_vy, errs_yaw = [], [], []
       fall_flags, ep_lens, action_rates, orient_devs, height_devs = [], [], [], [], []
       ub_pose_devs, ub_arm_vels, powers, gait_matches = [], [], [], []
+      # WP1 payload pilot: copper-loss power (metric-only), body roll/pitch-rate magnitude
+      # (wobble proxy), and per-step cross-env vx variance (F5 analogue -- the N=64 parallel
+      # envs under a pinned --eval-cmd-vx ARE the "N repeats of an identical command").
+      powers_copper, omega_xys, achieved_vx_vars = [], [], []
       # Leg-restricted action rate + whole-body/leg/arm joint-accel (deploy diagnostics).
       act_legs_list, jacc_list, jacc_legs_list, jacc_arms_list = [], [], [], []
+      # LCP smoothness suite (Chen 2025), legs-only, in the paper's units. `ajit` is the
+      # THIRD derivative of the commanded joint target (rad/s^3) and `qjit` the third
+      # derivative of the realized joint position -- the two metrics the paper's ablation
+      # ranks on, because they separate smoothing methods ~13x where first/second
+      # derivatives (our action_rate / jacc) separate them only 1.2-1.7x.
+      ajit_list, qjit_list, act_legs_rad_list = [], [], []
+      act_hist: list[torch.Tensor] = []   # last 3 raw action tensors, newest last
+      prev_jacc_signed: torch.Tensor | None = None
       achieved_vxs = []  # per-step env-mean achieved vx (ramp metric for --eval-cmd-vx holds)
       prev_actions: torch.Tensor | None = None
+      # --check-joint-limits: hardware command bounds, read from the deploy header rather
+      # than duplicated here (it is the audited source -- 5-source consensus, WL-B0 item 2).
+      lim_lo = lim_hi = lim_names = None
+      jl_over = jl_max = None
+      if cfg.check_joint_limits:
+        import re
+        hdr = (Path(__file__).parent.parent
+               / "deploy/robots/h1_2/include/h1_2_limits.h").read_text()
+        blk = hdr.split("h1_2_joint_limits = {{", 1)[1].split("}};", 1)[0]
+        rows = re.findall(r"\{\s*(-?[\d.]+)f?,\s*(-?[\d.]+)f?\s*\}\s*,?\s*//\s*\d+\s+(\w+)", blk)
+        by_name = {n.lower(): (float(a), float(b)) for a, b, n in rows}
+        at = uenv.action_manager.get_term("joint_pos")
+        sim_names = uenv.scene["robot"].joint_names
+        tgt = at._target_ids if hasattr(at, "_target_ids") else list(range(len(sim_names)))
+        tgt = list(range(len(sim_names))) if tgt is None else list(tgt)
+        # The sim model calls slot 12 `torso`, the deploy header calls it `waist_yaw`
+        # (same joint; play.py's own group patterns already match both spellings).
+        alias = {"torso": "waist_yaw"}
+        lim_names = [alias.get(n, n) for n in
+                     (sim_names[i].replace("_joint", "").lower() for i in tgt)]
+        miss = [n for n in lim_names if n not in by_name]
+        if miss:
+          raise SystemExit(f"--check-joint-limits: no deploy limit for {miss}")
+        lim_lo = torch.tensor([by_name[n][0] for n in lim_names], device=env.device)
+        lim_hi = torch.tensor([by_name[n][1] for n in lim_names], device=env.device)
+        jl_over = torch.zeros(len(lim_names), device=env.device)
+        jl_max = torch.zeros(len(lim_names), device=env.device)
+        jl_sum = torch.zeros(len(lim_names), device=env.device)  # mean excess/step (ADR-0008 sizing)
+        jl_rew = {}  # term name -> summed |contribution|, for the reward-share table
+        jl_cmds = []  # per-step POST-clip targets, for the commanded-range percentiles
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
+      energy_eng_copper = 0.0  # copper-loss CoT numerator (metric-only)
       prev_contact: torch.Tensor | None = None
       n_feet = 0
       gait_offsets = torch.tensor([0.0, 0.5], device=env.device).view(1, -1)
@@ -520,6 +644,37 @@ def run_play(task_id: str, cfg: PlayConfig):
           obs, _, dones, extras = env.step(actions.to(env.device))
 
           # 1. Tracking error.
+          if cfg.check_joint_limits:
+            # RECOMPUTE the pre-clip target: raw*scale+offset, matching the C++ `q_cmd`
+            # before its clamp. Reading `_processed_actions` back would report 0.0 forever
+            # once ADR-0008's clip is configured, because mjlab's process_actions
+            # overwrites it with the CLAMPED value -- the instrument would die at exactly
+            # the moment it is needed, which is the same measure-after-the-clamp defect
+            # ADR-0008 exists to fix.
+            _t = uenv.action_manager.get_term("joint_pos")
+            q_cmd = _t.raw_action * _t.scale + _t.offset
+            over = torch.maximum(lim_lo - q_cmd, q_cmd - lim_hi).clamp(min=0.0)  # [B, D]
+            jl_over += (over > 0).float().mean(dim=0)
+            jl_sum += over.mean(dim=0)
+            jl_max = torch.maximum(jl_max, over.amax(dim=0))
+            # Post-clip target = what the deploy path actually sends, and what the flight
+            # recorder holds: State_RLBase.cpp:221 logs `action` and the safety clamp at
+            # :164 writes a local, so `raw_q` is post-yaml-clip. Kept per step because the
+            # RANGE, not the excess, is the discriminating quantity -- `over` collapses to
+            # ~0 on any clip-trained policy, which hides whether the clip merely removed an
+            # unusable overshoot or the penalty retreated the policy off the bound.
+            jl_cmds.append(torch.clamp(q_cmd, lim_lo, lim_hi).detach())
+            # Reward shares (ADR-0008 sizing): the excess weight is set so `action_clip`
+            # contributes what `joint_pos_limits` contributes at the baseline violation
+            # level, so both must be measured on the SAME rollout. NOTE a term whose
+            # weight is 0.0 is skipped by RewardManager.compute and reads 0 here -- that
+            # is why the sizing uses the RAW mean excess above, not this table, for the
+            # numerator; this table supplies the target contribution only.
+            _rm = uenv.reward_manager
+            _sr = _rm._step_reward
+            for _i, _n in enumerate(_rm.active_terms):
+              jl_rew[_n] = jl_rew.get(_n, 0.0) + float(_sr[:, _i].abs().mean())
+
           cmd = uenv.command_manager.get_command("twist")  # [B, >=3]
           achieved = torch.cat(
             [robot.root_link_lin_vel_b[:, :2], robot.root_link_ang_vel_b[:, 2:3]], dim=-1
@@ -529,6 +684,10 @@ def run_play(task_id: str, cfg: PlayConfig):
           errs_vy.append(ae[:, 1].mean().item())
           errs_yaw.append(ae[:, 2].mean().item())
           achieved_vxs.append(achieved[:, 0].mean().item())
+          # WP1 stability proxy (F5 analogue): cross-env variance of achieved vx at this
+          # step -- meaningful under a pinned --eval-cmd-vx, where the N envs are N
+          # repeats of the identical command (same convention as ss_err_vx/t90 below).
+          achieved_vx_vars.append(achieved[:, 0].var(dim=0).item())
 
           # 2. Survival: fall flag and episode length.
           if has_fell:
@@ -545,12 +704,37 @@ def run_play(task_id: str, cfg: PlayConfig):
             act_legs_list.append(
               d_ar[:, leg_ids].norm(dim=-1).mean().item() if leg_ids is not None
               else float("nan"))
+            if leg_ids is not None:
+              act_legs_rad_list.append(
+                (d_ar * kappa)[:, leg_ids].norm(dim=-1).mean().item())
           prev_actions = actions.clone()
+
+          # 3c. Action jitter (LCP primary): d3(q_des)/dt3 in rad/s^3, legs-only.
+          # q_des = q_def + kappa*a, and q_def is constant, so the third derivative of the
+          # command is the third difference of kappa*a. Backward third difference
+          # (a_t - 3a_{t-1} + 3a_{t-2} - a_{t-3}) / dt^3 -- exact here because the action
+          # sequence carries no sensor noise, unlike the same operator on hardware logs.
+          act_hist.append(actions.clone())
+          if len(act_hist) > 4:
+            act_hist.pop(0)
+          if len(act_hist) == 4:
+            a3, a2, a1, a0_ = act_hist  # oldest -> newest
+            d3 = (a0_ - 3.0 * a1 + 3.0 * a2 - a3) * kappa / (ctrl_dt ** 3)
+            ajit_list.append(
+              d3[:, leg_ids].norm(dim=-1).mean().item() if leg_ids is not None
+              else float("nan"))
 
           # 3b. Joint acceleration (deploy diagnostic): whole-body + leg/arm-restricted
           # mean |qddot|. p95 (below, post-rollout) separates contact-impulse spikes
           # from steady-state jitter -- the mean alone conflates the two.
           jacc = robot.joint_acc.abs()
+          # 3d. DoF position jitter (LCP realized-side counterpart): one difference of the
+          # SIGNED joint acceleration, not of |qddot| -- differencing the absolute value
+          # would miss every sign flip, which is most of what jerk is.
+          if prev_jacc_signed is not None and leg_ids is not None:
+            qjit = (robot.joint_acc - prev_jacc_signed) / ctrl_dt
+            qjit_list.append(qjit[:, leg_ids].norm(dim=-1).mean().item())
+          prev_jacc_signed = robot.joint_acc.clone()
           jacc_list.append(jacc.mean().item())
           jacc_legs_list.append(
             jacc[:, leg_ids].mean().item() if leg_ids is not None else float("nan"))
@@ -565,6 +749,10 @@ def run_play(task_id: str, cfg: PlayConfig):
           height_devs.append(
             (robot.root_link_pos_w[:, 2] - nom_h).abs().mean().item()
           )
+          # WP1 stability proxy: body roll/pitch-rate magnitude (wobble), distinct from
+          # orient_dev (a position-like projected-gravity deviation) and err_yaw (the
+          # commanded-axis yaw-RATE tracking error, about z only).
+          omega_xys.append(robot.root_link_ang_vel_b[:, :2].norm(dim=-1).mean().item())
 
           # 5. Upper-body deploy hygiene: arm+waist drift from default + joint speed.
           ub_pose_devs.append(
@@ -576,9 +764,15 @@ def run_play(task_id: str, cfg: PlayConfig):
           # 6. Mechanical power + cost of transport (gated by commanded linear speed > 0.1).
           power = (robot.qfrc_actuator * robot.joint_vel).abs().sum(dim=1)  # [B] watts
           powers.append(power.mean().item())
+          # 6b. Copper-loss-corrected power (metric-only, WP1): adds k*tau^2 per joint
+          # before summing -- see COPPER_LOSS_K comment above.
+          power_copper = ((robot.qfrc_actuator * robot.joint_vel).abs()
+                          + COPPER_LOSS_K * robot.qfrc_actuator.square()).sum(dim=1)
+          powers_copper.append(power_copper.mean().item())
           lin_speed = robot.root_link_lin_vel_b[:, :2].norm(dim=-1)  # [B] achieved m/s
           eng = (cmd[:, :2].norm(dim=-1) > 0.1).float()  # commanded-motion gate
           energy_eng += (power * eng).sum().item() * step_dt
+          energy_eng_copper += (power_copper * eng).sum().item() * step_dt
           dist_eng += (lin_speed * eng).sum().item() * step_dt
           # 7. Achieved stride period from footfall rising edges (same-foot touchdown interval).
           if contact_sensor is not None:
@@ -617,6 +811,29 @@ def run_play(task_id: str, cfg: PlayConfig):
       else:
         t90 = float("nan")
 
+      # Commanded RANGE per joint (2026-08-28, ADR-0008 follow-up). Percentiles of the
+      # POST-clip target so they compare directly against the flight recorder. p1/p99
+      # rather than min/max: one transient excursion is not authority, sustained range is.
+      # `headroom` is the distance from the used range to the nearer bound -- the quantity
+      # that separates a clip (headroom ~0, policy still reaches the stop) from a penalty
+      # that pushed the policy inward (headroom ~ one action-sigma).
+      jl_range = {}
+      if cfg.check_joint_limits and jl_cmds:
+        allc = torch.cat(jl_cmds, dim=0).float()  # [steps*B, D]
+        p01, p50, p99 = torch.quantile(
+          allc, torch.tensor([0.01, 0.5, 0.99], device=allc.device), dim=0)
+        pin = (((allc - lim_lo).abs() < 1e-9)
+               | ((allc - lim_hi).abs() < 1e-9)).float().mean(dim=0)
+        jl_range = {n: {"p1": round(p01[i].item(), 4), "p50": round(p50[i].item(), 4),
+                        "p99": round(p99[i].item(), 4),
+                        "span": round((p99[i] - p01[i]).item(), 4),
+                        "pinned": round(pin[i].item(), 5),
+                        "headroom": round(min((lim_hi[i] - p99[i]).item(),
+                                              (p01[i] - lim_lo[i]).item()), 4)}
+                    for i, n in enumerate(lim_names)}
+
+      def _span(n): return jl_range.get(n, {}).get("span", float("nan"))  # noqa: E731
+
       seed_results.append({
         "err_vx":      _m(errs_vx),
         "err_vy":      _m(errs_vy),
@@ -628,11 +845,27 @@ def run_play(task_id: str, cfg: PlayConfig):
         "mean_ep_len": _m(ep_lens),
         "action_rate": _m(action_rates) if action_rates else float("nan"),
         "act_legs":    _m(act_legs_list) if act_legs_list else float("nan"),
+        # Ankle command SPAN (rad): the deploy-relevant authority measure, since the two
+        # rolls are what reject a lateral push. Scalars here rather than print-only so
+        # they get the per-seed line and the seed mean+-std every other metric gets.
+        "ank_roll_span_l":  _span("left_ankle_roll"),
+        "ank_roll_span_r":  _span("right_ankle_roll"),
+        "ank_pitch_span_l": _span("left_ankle_pitch"),
+        "ank_pitch_span_r": _span("right_ankle_pitch"),
         "jacc":          _m(jacc_list),
         "jacc_legs":     _m(jacc_legs_list),
         "jacc_arms":     _m(jacc_arms_list),
         "jacc_legs_p95": _p95(jacc_legs_list),
         "jacc_arms_p95": _p95(jacc_arms_list),
+        # LCP suite, legs-only, rad/s^3 (published Unitree H1 refs: action jitter 0.44 in
+        # MuJoCo, 1.11-1.20 on real ground; NOT rate-matched to our 50 Hz -- a sanity band,
+        # never a pass/fail gate).
+        "ajit_legs":     _m(ajit_list) if ajit_list else float("nan"),
+        "ajit_legs_p95": _p95(ajit_list) if ajit_list else float("nan"),
+        "qjit_legs":     _m(qjit_list) if qjit_list else float("nan"),
+        "qjit_legs_p95": _p95(qjit_list) if qjit_list else float("nan"),
+        # Commanded agitation in PHYSICAL units (rad/step): act_legs is raw action units.
+        "act_legs_rad":  _m(act_legs_rad_list) if act_legs_rad_list else float("nan"),
         "orient_dev":  _m(orient_devs),
         "height_dev":  _m(height_devs),
         "ub_pose_dev": _m(ub_pose_devs),
@@ -640,9 +873,23 @@ def run_play(task_id: str, cfg: PlayConfig):
         "mech_power_w": _m(powers) if powers else float("nan"),
         "gait_match":   _m(gait_matches) if gait_matches else float("nan"),
         "cot":          energy_eng / (dist_eng * MASS_G + 1e-6),
+        # WP1 payload pilot additions (2026-08-27): copper-loss CoT variant (metric-only,
+        # see COPPER_LOSS_K), body roll/pitch-rate wobble, and the F5-analogue cross-env
+        # vx spread under a pinned command (meaningful only with --eval-cmd-vx set).
+        "mech_power_copper_w": _m(powers_copper) if powers_copper else float("nan"),
+        "cot_copper":   energy_eng_copper / (dist_eng * MASS_G + 1e-6),
+        "omega_xy":     _m(omega_xys) if omega_xys else float("nan"),
+        "ss_vx_var":    _m(achieved_vx_vars[ss0:]) if achieved_vx_vars else float("nan"),
         "stride_period_s": (cfg.eval_steps * step_dt)
                            / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
+        # WP2: actual sampled payload (mean over envs), see the reset()-time read above.
+        "payload_kg": payload_kg,
       })
+      # WP1 payload pilot: a per-seed line, since [BENCH] below only ever prints the
+      # seed-aggregated mean+-std. The sweep CSV needs one row per (T, payload, vx, seed)
+      # for the T* seed-spread analysis, which the aggregate's std alone cannot give
+      # (fitting T* per seed, then spreading THAT, is not the same as spreading the metric).
+      print(f"[BENCH_SEED] {json.dumps({**bench_meta, 'seed': seed, **seed_results[-1]})}")
 
     # Aggregate across seeds.
     keys = list(seed_results[0].keys())
@@ -654,6 +901,61 @@ def run_play(task_id: str, cfg: PlayConfig):
 
     print()
     print("=" * 58)
+    if cfg.check_joint_limits and jl_over is not None:
+      rate = (jl_over / cfg.eval_steps).tolist()
+      mean_ex = (jl_sum / cfg.eval_steps).tolist()
+      worst = sorted(zip(lim_names, rate, jl_max.tolist(), mean_ex), key=lambda r: -r[1])
+      tot = sum(rate) / max(len(rate), 1)
+      tot_ex = sum(mean_ex)
+      print()
+      print("=" * 78)
+      print(f"  COMMANDED JOINT-LIMIT CHECK (last seed) | {cfg.eval_steps} steps x {n_envs} envs")
+      print("=" * 78)
+      print(f"  any-joint over-limit rate (mean per joint) = {tot:.5f}")
+      print(f"  TOTAL mean excess/step (the reward term's raw value) = {tot_ex:.6f} rad")
+      hit = [w for w in worst if w[1] > 0]
+      if not hit:
+        print("  no commanded target left the hardware limits")
+      for n, r, m, e in hit[:8]:
+        print(f"    {n:<20} rate {r:>8.5f}   max_over {m:>7.4f}   mean_excess {e:>8.6f} rad")
+      # ADR-0008 sizing: `action_clip`'s weight should make it contribute what
+      # `joint_pos_limits` contributes here. That target is read off this table; the
+      # numerator is the RAW total above, because a weight-0.0 term is never evaluated
+      # by RewardManager.compute and would otherwise read a misleading 0.
+      if jl_rew:
+        print("  -" * 39)
+        print(f"  reward-term shares (|contribution| per step, {cfg.eval_steps} steps)")
+        tot_r = sum(jl_rew.values()) or 1.0
+        for n, v in sorted(jl_rew.items(), key=lambda kv: -kv[1])[:10]:
+          mark = "  <-- sizing target" if n == "joint_pos_limits" else (
+                 "  <-- 0.0 weight: NOT evaluated" if n == "action_clip" else "")
+          print(f"    {n:<24} {v / cfg.eval_steps:>10.6f}  ({100 * v / tot_r:>5.2f}%){mark}")
+        jpl = jl_rew.get("joint_pos_limits", 0.0) / cfg.eval_steps
+        if tot_ex > 0:
+          print(f"  => suggested |weight| = {jpl:.6f} / {tot_ex:.6f} = {jpl / tot_ex:.4f}")
+      print("=" * 78)
+      if jl_range:
+        print("  -" * 39)
+        print("  COMMANDED RANGE, post-clip (last seed)   span = p99-p1, "
+              "headroom = gap to nearer bound")
+        for n in ("left_ankle_roll", "right_ankle_roll",
+                  "left_ankle_pitch", "right_ankle_pitch"):
+          r = jl_range.get(n)
+          if r is None:
+            continue
+          i = lim_names.index(n)
+          print(f"    {n:<20} p1 {r['p1']:>8.4f}  p99 {r['p99']:>8.4f}  "
+                f"span {r['span']:>7.4f}  headroom {r['headroom']:>7.4f}  "
+                f"pinned {r['pinned']:>8.5f}   "
+                f"bounds [{lim_lo[i].item():+.4f},{lim_hi[i].item():+.4f}]")
+      jl_json = {"total_mean_excess_rad": round(tot_ex, 6),
+                 "range": jl_range,
+                 "per_joint": {n: {"rate": round(r, 6), "max_over_rad": round(m, 4),
+                                   "mean_excess_rad": round(e, 6)}
+                               for n, r, m, e in hit},
+                 "reward_share": {n: round(v / cfg.eval_steps, 6) for n, v in jl_rew.items()}}
+      print(f"[LIMITS] {json.dumps(jl_json)}")
+
     print(f"  BENCHMARK SCORECARD  |  {cfg.eval_steps} steps x {n_envs} envs x {cfg.eval_seeds} seed(s)")
     print("=" * 58)
     print(f"  Tracking  err_vx    : {_fmt('err_vx')}")
@@ -674,8 +976,12 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  UpperBody arm_vel   : {_fmt('ub_arm_vel')}")
     print(f"  Energy    power_W   : {_fmt('mech_power_w')}")
     print(f"  Energy    CoT (norm): {_fmt('cot')}")
+    print(f"  Energy    CoT copper: {_fmt('cot_copper')}")
+    print(f"  Stability omega_xy  : {_fmt('omega_xy')}")
+    print(f"  Stability ss_vx_var : {_fmt('ss_vx_var')}")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print(f"  Gait      match     : {_fmt('gait_match')}")
+    print(f"  Env       payload_kg: {_fmt('payload_kg')}")
     if cfg.eval_cmd_vx is not None:
       print(f"  Hold      ss_err_vx : {_fmt('ss_err_vx')}  (last 2/3)")
       print(f"  Hold      ss_err_vy : {_fmt('ss_err_vy')}")
@@ -696,6 +1002,62 @@ def run_play(task_id: str, cfg: PlayConfig):
   # compares the two legs to each other or counts touchdowns per foot - this probe
   # does, plus checks whether play.py:498's stride_period_s (which divides eval time
   # by raw touchdown count) is corrupted by a double-tap inflating that count.
+  # Cadence transmission (2026-08-31): is the HL's commanded period stationary over a
+  # stride? `get_inference_policy` rewrites env.hrl_period at every HL fire under
+  # hl_cadence_source='hl' and leaves it fixed under 'random', so sampling it per step and
+  # differencing per WINDOW measures exactly the reference the LL is asked to entrain to.
+  if cfg.diagnose_cadence > 0:
+    import json
+    uenv = env.unwrapped
+    n_envs = uenv.num_envs
+    step_dt = uenv.step_dt
+    c = getattr(runner, "c", 1)
+
+    seed_results: list[dict] = []
+    for seed_idx in range(cfg.eval_seeds):
+      torch.manual_seed(42 + seed_idx)
+      with torch.inference_mode():
+        obs, _ = env.reset()
+      per_window: list[torch.Tensor] = []
+      with torch.inference_mode():
+        for k in range(cfg.diagnose_cadence):
+          actions = policy(obs)
+          # Sample AFTER the policy call so a fire's new period is already written.
+          if k % c == 0:
+            per_window.append(uenv.hrl_period.detach().clone().flatten())
+          obs, _, _, _ = env.step(actions.to(env.device))
+
+      P = torch.stack(per_window, dim=0)              # [n_windows, n_envs]
+      d = (P[1:] - P[:-1]).abs()                      # window-to-window change
+      stride = P.mean().item()
+      seed_results.append({
+        "period_mean":      stride,
+        "period_std_win":   P.std(dim=0).mean().item(),   # per-env std ACROSS windows
+        "period_cv":        (P.std(dim=0) / P.mean(dim=0).clamp(min=1e-6)).mean().item(),
+        "dperiod_abs_mean": d.mean().item(),
+        "dperiod_p95":      torch.quantile(d.flatten().float(), 0.95).item(),
+        "period_spread_env": P.mean(dim=0).std().item(),  # across-env spread of the mean
+        "windows_per_stride": stride / (c * step_dt),
+        "n_windows":        int(P.shape[0]),
+      })
+
+    keys = list(seed_results[0].keys())
+    agg = {k: sum(r[k] for r in seed_results) / len(seed_results) for k in keys}
+    print()
+    print(f"  CADENCE TRANSMISSION PROBE | {cfg.diagnose_cadence} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | c={c}, window={c * step_dt:.3f} s")
+    print(f"    source                    : {getattr(runner, 'hl_cadence_source', '?')}")
+    print(f"    commanded period (mean)   : {agg['period_mean']:.4f} s")
+    print(f"    within-episode std        : {agg['period_std_win']:.4f} s  "
+          f"(cv {agg['period_cv'] * 100:.1f}%)")
+    print(f"    |change| per window       : {agg['dperiod_abs_mean']:.4f} s  "
+          f"(p95 {agg['dperiod_p95']:.4f})")
+    print(f"    windows per stride        : {agg['windows_per_stride']:.2f}")
+    print(f"    across-env spread of mean : {agg['period_spread_env']:.4f} s")
+    print(f"  [CADDIAG] {json.dumps({**agg, 'label': str(cfg.checkpoint_file), 'num_envs': n_envs, 'eval_seeds': cfg.eval_seeds, 'source': str(getattr(runner, 'hl_cadence_source', '?'))})}")
+    env.close()
+    return
+
   if cfg.diagnose_symmetry > 0:
     import json
     uenv = env.unwrapped

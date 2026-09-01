@@ -57,6 +57,7 @@ class HighLevelTd3(HighLevel):
     ll_actor: torch.nn.Module | None = None,
     target_mode: str = "delta",
     obs_vel_dim: int = 0,
+    obs_e_dim: int = 0,
     cadence_dim: int = 0,
     cadence_period_range: tuple[float, float] = (0.35, 1.0),
     task_only_goals: bool = False,
@@ -82,6 +83,9 @@ class HighLevelTd3(HighLevel):
     # Optional extra HL input: the deployable base lin-vel estimate (vx,vy) the runner
     # writes to obs["hl_vel"]. 0 -> byte-identical to the proprio++command HL.
     self.obs_vel_dim = obs_vel_dim
+    # WP2: optional privileged environment latent e (payload/CoM/friction), the runner
+    # writes to obs["hl_e"]. 0 -> byte-identical. WP5's H-adapt Phase 1 input.
+    self.obs_e_dim = obs_e_dim
     # HIRO off-policy correction: relabel sampled goals to the goal the *current* LL is
     # most likely to have produced the stored action trace for. Needs a live LL actor.
     self.relabel = relabel != "none"
@@ -91,7 +95,9 @@ class HighLevelTd3(HighLevel):
     if self.relabel and ll_actor is None:
       raise ValueError("relabel HL needs a reference to the LL actor.")
     # HL actor/critic state = deployable HL obs (proprio ++ command [++ lin-vel est]).
-    self._state_dim = obs["policy"].shape[-1] + obs["command"].shape[-1] + obs_vel_dim
+    self._state_dim = (
+      obs["policy"].shape[-1] + obs["command"].shape[-1] + obs_vel_dim + obs_e_dim
+    )
 
     self.tau: float = cfg["tau"]
     self.policy_freq: int = cfg["policy_freq"]
@@ -147,6 +153,8 @@ class HighLevelTd3(HighLevel):
     parts = [obs["policy"], obs["command"]]
     if self.obs_vel_dim:
       parts.append(obs["hl_vel"])  # deployable base lin-vel est, written by the runner
+    if self.obs_e_dim:
+      parts.append(obs["hl_e"])  # privileged env latent e, written by the runner (WP2)
     return torch.cat(parts, dim=-1)
 
   def _actor_forward(self, net: torch.nn.Module, state: torch.Tensor) -> torch.Tensor:

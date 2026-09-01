@@ -26,6 +26,10 @@
 #                     hl-cadence-source=random (NOT hl) and hl-cot-coef=0; tags _fix0p8
 #                     in place of the cot tag
 #   LL_STAND_STILL    float (default 0.0)          -> arm 3; >0 tags _standstillXpXX
+#   STANDING_FRAC     float (default 0.05)         -> WL-S 2026-08-26 standing-gap lever:
+#                     rel_standing_envs, the FRACTION of envs commanded to stand. An
+#                     --env knob, not --agent (the twist command term); != 0.05 tags
+#                     _standingNN as a PERCENT (_standing15), matching the 08-26 run.
 #   LL_ANGMOM         float (default 0.0)          -> arm 4a; >0 tags _angmomXpXXX
 #   LL_FOOTSLIP       float (default 0.0)          -> arm 4b; >0 tags _footslipXpXX
 #   LL_FOOTCLEAR      float (default 0.0)          -> arm 4c; >0 tags _footclearXpX
@@ -99,6 +103,14 @@
 #   # (0.02 -> 0.05) bought action_rate -8.7% but cost jacc_legs_p95 +31.1%. Stop rule: if
 #   # jacc_legs_p95 > 70.55 (A0's), the lever is exhausted -- do NOT run 0.10, report closed.
 #   sbatch --job-name=a1a_ar0p07   --export=ALL,LL_ACTION_RATE=0.07 train_h1_2_a1a_LL_rewards.sh
+#   # WL-S 2026-08-26 -- the standing sweep. The gap A1-vs-A0 is 31-44x STANDING and only
+#   # 1.3-1.6x walking, and 0.05 -> 0.15 took standing ajit to 0.75x A0 at the touchdown
+#   # floor WITHOUT costing tracking (ss_err_vx 0.0528, best in batch). n=1 seed, and it
+#   # diverges A1's command distribution from A0's 0.05 -- an RQ2 call before it is a
+#   # default. Baseline arm is a plain sbatch (0.05); 15 is a re-run of the 08-26 dir.
+#   sbatch --job-name=a1a_stand10 --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.10 train_h1_2_a1a_LL_rewards.sh
+#   sbatch --job-name=a1a_stand25 --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.25 train_h1_2_a1a_LL_rewards.sh
+#   sbatch --job-name=a1a_stand15b --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.15,SEED=123 train_h1_2_a1a_LL_rewards.sh
 #   # arm 4 -- cadence family. Bounding measurements, not expected fixes: regressing all 13
 #   # battery arms' leg metrics on achieved stride period gives r=-0.33 (n=13, p~0.28), and
 #   # even extrapolated to A0's 0.593 s stride the batch lands at act_legs 0.682 -- still
@@ -151,6 +163,14 @@ if [[ "${DRY_RUN:-0}" == "0" ]]; then
   cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 fi
 
+# ⚠ BASELINE CHANGED AGAIN 2026-08-26 -- Model v3 (ADR-0008) landed, and it is not a
+# lever in this script: the commanded-target clip rides the ENV cfg
+# (config/h1_2/env_cfgs.py:99, which the A1 task inherits verbatim), the +3.5 LL mirror is
+# an rl_cfg default (ll_action_clip_coef), and the x1.20787 leg mass is in the XML. So a
+# bare `sbatch` now trains v3 and logs to h1_2_velocity_a1_v3 -- it no longer reproduces
+# `full_jacc`, and NO v2 run below is a valid comparator for anything launched now.
+# Any new sweep must carry its own v3 baseline arm.
+#
 # ⚠ BASELINE CHANGED 2026-08-25. Everything below defaults to `full_jacc`'s config, not
 # to the bare rl_cfg defaults, so a plain `sbatch` reproduces that run (the `repro` arm).
 # Consequence for provenance: a WL-D-era example like `--export=ALL,LL_ENERGY=0.05` no
@@ -291,7 +311,7 @@ fi
 
 RUN_NAME="a1a_fullmirror${CAD_TAG}${LEVER_TAGS}_s${SEED}"
 
-echo "[a1a-ll] RUN=$RUN_NAME  hl_cadence=${HL_CADENCE}  cadence_source=${CADENCE_SOURCE}  cadence_range=${CADENCE_RANGE:-<rl_cfg default>}  hl_cot=${HL_COT}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  joint_limits=${LL_JOINT_LIMITS}  soft_landing=${LL_SOFT_LANDING}  body_ang_vel=${LL_BODY_ANG_VEL}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  posture_all_joints=${POSTURE_ALL_JOINTS}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  seed=${SEED}"
+echo "[a1a-ll] RUN=$RUN_NAME  hl_cadence=${HL_CADENCE}  cadence_source=${CADENCE_SOURCE}  cadence_range=${CADENCE_RANGE:-<rl_cfg default>}  hl_cot=${HL_COT}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  joint_limits=${LL_JOINT_LIMITS}  soft_landing=${LL_SOFT_LANDING}  body_ang_vel=${LL_BODY_ANG_VEL}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  posture_all_joints=${POSTURE_ALL_JOINTS}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  rel_standing_envs=${STANDING_FRAC}  seed=${SEED}"
 
 # DRY_RUN=1 prints the command instead of running it -- check what a job will launch
 # before it burns a slot. Works off-cluster too (nothing above needs $SLURM_JOB_ID).

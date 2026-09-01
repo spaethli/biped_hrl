@@ -27,7 +27,13 @@ multiplies the raw gyro by a ~1 m lever, and the EKF does neither.**
 > (0.95% above the 9.81 used for gravity removal).
 >
 > Three A0 stand+walk sessions, scored on the verified-still segment only (45.9 / 47.2 / 70.6 s,
-> truth v = 0), **std vx | drift x in m/s | m**:
+> truth v = 0), **std vx | drift x in m/s | m**. Session IDs below are `logs/deploy_safety/
+> 2026-08-12_<id>.csv`; the same sessions' full 27-joint logs are
+> `~/ramlab_ws/trajectories/all_joints_2026-08-12_10-16-36.csv` (`10-16-41`),
+> `..._10-41-15.csv` (`10-41-08`), `..._10-44-16.csv` (`10-43-34`) — timestamps differ by a
+> few seconds/~1 min between the two loggers on the same physical run, not a mismatch. The
+> first 3.0 / 0.6 / 0.6 s of each is still set-down transient, dropped from the still segment
+> (see the correction below).
 >
 > | arm | `10-16-41` | `10-41-08` | `10-43-34` |
 > |---|---|---|---|

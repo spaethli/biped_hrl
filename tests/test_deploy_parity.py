@@ -500,3 +500,68 @@ def test_exported_high_level_onnx_carries_the_baked_goal_scale():
   )
   scale = [float(x) for x in meta["goal_scale"].split(",")]
   assert len(scale) == 7 and all(s > 0 for s in scale)
+
+
+# --- ADR-0009: the deploy-side clip is KEPT, so it stays pinned to the limit header ------
+# Model v3's TRAINING clip and its L1 excess penalty were reverted (the penalty cost 2.1-2.4x
+# of the commanded ankle roll range); the deploy yaml clip was not, because it does no harm
+# and clips before the State_RLBase hold blend rather than after it.
+
+# Explicit, not a glob: a glob that stops matching yields an empty parametrize list and
+# pytest reports zero tests for this file rather than a failure (fail-closed, same reason
+# deploy_readiness.py refuses to score a stage it could not run).
+ALL_DEPLOY_YAMLS = [
+  DEPLOY / f"config/policy/{fam}/v0/params/{cfg}.yaml"
+  for fam in ("velocity", "velocity_hrl")
+  for cfg in ("deploy", "deploy_est", "deploy_est_pin0625", "deploy_real")
+]
+
+
+class _NoDuplicateKeyLoader(yaml.SafeLoader):
+  """SafeLoader that refuses duplicate mapping keys.
+
+  Load-bearing: PyYAML silently keeps the LAST duplicate, **yaml-cpp keeps the FIRST**, so a
+  plain ``yaml.safe_load`` check reads these files the opposite way from the robot and would
+  pass while the two disagree. Three A0 hardware sessions on 2026-08-27 ran WITH the clip
+  while the config said ``clip: null``, because the override had been appended below the
+  bounds table instead of replacing it."""
+
+
+def _no_dup_mapping(loader, node, deep=False):
+  seen = set()
+  for key_node, _ in node.value:
+    key = loader.construct_object(key_node, deep=deep)
+    if key in seen:
+      raise AssertionError(
+        f"duplicate key {key!r} at line {key_node.start_mark.line + 1}: yaml-cpp would keep "
+        f"the FIRST occurrence and PyYAML the LAST, so this file means different things to "
+        f"the robot and to every Python tool. Remove the block, do not override it.")
+    seen.add(key)
+  return yaml.SafeLoader.construct_mapping(loader, node, deep=deep)
+
+
+_NoDuplicateKeyLoader.add_constructor(
+  yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _no_dup_mapping)
+
+
+@pytest.mark.parametrize("yaml_path", ALL_DEPLOY_YAMLS,
+                         ids=lambda p: p.parts[-4] + "/" + p.name)
+def test_deploy_yaml_clip_matches_the_limit_header(yaml_path, limits_header):
+  """Every deploy yaml's clip == h1_2_limits.h, in joint_ids_map order (joint_actions.h:57
+  indexes ``_clip[i]`` by action index, not by name), and no duplicate keys anywhere.
+
+  All eight configs, not just the real-robot pair: a bridge config that clips differently
+  from the robot reproduces the 2026-08-05 class of defect where sim and hardware disagree
+  invisibly because the bridge is the only thing anyone watches."""
+  cfg = yaml.load(yaml_path.read_text(), Loader=_NoDuplicateKeyLoader)
+  clip = cfg["actions"]["JointPositionAction"]["clip"]
+  assert clip is not None, f"{yaml_path.name}: clip is null, deploy would not truncate"
+  names, limits = limits_header
+  assert len(clip) == len(names) == 27
+
+  mismatched = []
+  for i, (name, (lo, hi)) in enumerate(zip(names, limits)):
+    assert len(clip[i]) == 2, f"{name}: clip[{i}] is not a [lo, hi] pair"
+    if abs(clip[i][0] - lo) > 1e-3 or abs(clip[i][1] - hi) > 1e-3:
+      mismatched.append(f"{name}: yaml {clip[i]} vs header ({lo}, {hi})")
+  assert not mismatched, f"{yaml_path.name} clip drifted:\n" + "\n".join(mismatched)

@@ -116,12 +116,43 @@ any plant — the elastic band does the stabilizing until the policy takes over.
 
 ## Deploy configs
 
+**All 8 yamls carry `actions.JointPositionAction.clip` as 27 `[lo, hi]` pairs** in
+`joint_ids_map` order, equal to `h1_2_limits.h` and pinned by
+`test_deploy_yaml_clip_matches_the_limit_header`. Applied by `joint_actions.h:54`.
+
+**It is a backstop, not a parity device (ADR-0009, 2026-08-28).** Training carries no clip: Model
+v3's training-side clip and its L1 excess penalty were reverted after the penalty cost 2.1-2.4x of
+the commanded ankle roll range. The deploy clip was **kept** because it does no harm (v2 ran
+pinned by it 14-21% of steps on 2026-08-27 and was the best-performing configuration of the day)
+and because it clips *before* the `State_RLBase` hold blend rather than after, so a safety-hold
+ramp starts from an already-legal target. At `alpha = 0` the two are identical.
+
+**The reason it bought nothing is worth keeping:** `State_RLBase.cpp:160-165` clamps every
+commanded target to `h1_2_joint_limits` **unconditionally**, and always has. The robot has never
+sent a target past a stop. The yaml clip only moved that same truncation earlier in the pipeline,
+and the two coincide at `alpha = 0`, which is normal operation. So a policy that commands past
+its stops is a *training fidelity* gap, visible in `raw_q`, not something that reaches the motors.
+
+⚠ **Two `clip` keys under one mapping is a silent trap.** yaml-cpp resolves a duplicate key to
+the **FIRST** occurrence, so appending `clip: null` below a bounds table does nothing (verified
+against the real file, plus a two-non-null-table control). PyYAML takes the **LAST**, so a
+Python-side check reads the file the opposite way from the robot. Three hardware sessions on
+2026-08-27 ran clipped while the config said `clip: null`. **Guarded since 2026-08-28**: the clip
+parity test loads all 8 configs through a `SafeLoader` that refuses duplicate mapping keys.
+
+
 - Sim: `config/policy/velocity/v0/params/deploy.yaml` (keyboard_velocity_commands)
 - Real: `config/policy/velocity/v0/params/deploy_real.yaml` (velocity_commands/joystick)
 - **Split deploy** (ADR-0005 step 3b, 2026-07-07): `hold_joint_ids: [12..26]` in the
   `deploy_real` params makes torso+arms track `default_joint_pos` instead of the policy
   action (`State_RLBase.cpp`/`State_RLHRL.cpp`, robot-local; obs still see all 27
-  joints). Absent key = full forward (sim yamls). Gains/scales in all 4 param yamls
+  joints). Absent key = full forward (sim yamls).
+  ⚠ **The hold is OFF by default since 2026-08-28**: the key is commented out in both
+  `deploy_real` yamls and a **free upper body is the shipped default**. A1 with a free
+  upper body stands as quietly as A0 (0.00165 vs 0.00117 on the settled floor) and the
+  ~20x smoothness gap exists ONLY under the hold, so holding was buying a regression.
+  Re-enable by uncommenting, and note the flight recorder's `raw_q` is logged BEFORE the
+  substitution either way, so a session carries its own held/free counterfactual. Gains/scales in all 4 param yamls
   MUST stay in lockstep with `h1_2_constants.py` (v2-final: torso 200/2.5, shoulders
   120/2, elbow+wrists 80/1, derived scales).
 
@@ -137,6 +168,20 @@ cp logs/.../policy.onnx deploy/robots/h1_2/config/policy/velocity/v0/exported/po
 `--export-onnx` is a bare flag; it calls `runner.export_policy_to_onnx()` and exits
 without the viewer. Training saves also auto-export `policy.onnx` (with metadata)
 next to each checkpoint via `VelocityOnPolicyRunner._export_policy_onnx`.
+
+**Obs-dim contract: the deploy vector is 92, and NOTHING validates it (2026-08-26).** The 7
+proprioceptive terms in `deploy_real.yaml` total `3+3+3+2+27+27+27 = 92` floats.
+`isaaclab/algorithms/algorithms.h:81` sizes the ORT input tensor from the **ONNX declared
+shape** and never compares it against the vector the observation manager actually built. A
+policy exported with extra actor observations therefore reads past the end of that vector —
+adjacent heap memory fed in as observations — instead of raising. Downstream that becomes
+erratic actions → the safety filter's tilt/fall hold ramps `alpha`→1 → commanded position =
+measured position → PD error 0 → damping-only torque, i.e. **the robot goes limp**. The
+symptom points at actuation; the cause is 187 floats upstream. Consequence: any sim-only
+actor observation (terrain `height_scan`, privileged state) must be removed from the ACTOR
+at training time — critic-only is fine. `Unitree-H1_2-Rough` is blind for exactly this
+reason (CLAUDE.md gotchas). A fail-closed length check in the runner is NOT yet implemented
+(the file is shared `deploy/include/isaaclab/`, which we keep unmodified).
 
 **A1/HRL deploy (as-built, 2026-06-18 — sim).** Two-ONNX hierarchy, all robot-local
 (no `deploy/include/isaaclab/` edits):
@@ -363,6 +408,26 @@ Parked until after the held-command blocker: goal-channel state-noise DR arm (#8
 validated, keeper trains without it).
 
 ## Safety filter + flight recorder (deploy-side, 2026-06-03)
+
+**`raw_q*` is the RAW policy intent, captured before the `hold_joint_ids` substitution**
+(`State_RLBase.cpp:169`). So on a held joint `raw_q_j - meas_q_j` is the suppressed command, and
+every session already carries its own free-vs-held counterfactual — no extra run is needed to
+measure the *dose* of the upper-body hold, only its response. Scored across sessions by
+`scripts/score_joint_hold.py` (dose split into bias vs oscillation, `g_legs`, settled floor,
+held/free ratio, dose-response). ⚠ Score the **settled floor**, not the pooled mean: `cmd == 0`
+is not proof the robot is still, and two runs of the same cell read 0.0166 vs 0.0333 purely
+because one was stopped before it settled.
+
+**Three things travel in `<base>_meta.json` because they are unrecoverable from the row:**
+`joint_offset` (encoder convention), `base_estimator` (ADR-0007), and `hold_joint_ids`
+(2026-08-26) — `raw_q` is logged for all 27 joints whether held or not, and a held joint's
+`meas_q` only *converges toward* default, so "held" and "commanded near default" are not
+separable per joint.
+
+⚠ The recorder decimates to **~500 Hz** (`log_every_ = 2`), not 1 kHz, and logs trigger ticks
+undecimated on top. Recover the 50 Hz policy steps by **change-detection on `raw_q`**, not a row
+stride: a stride of 20 rows spans 40 ms, i.e. two policy steps.
+
 
 Real-time safety filter in `State_RLBase::run()` (A0) and `State_RLHRL::run()` (A1).
 Compile switch `#define SAFETY_FILTER` in each (`State_RLBase.cpp`=1 on; `State_RLHRL.h`=0

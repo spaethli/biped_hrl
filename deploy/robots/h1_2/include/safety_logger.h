@@ -114,11 +114,20 @@ public:
     // noise (~0.03 m/s) swamps the between-arm difference. Seven sessions were left
     // unattributable. Same failure class as `joint_offset` above: recoverable only if the
     // convention travels with the data.
+    // `hold_joint_ids` names the joints driven to default_joint_pos instead of the policy
+    // action (ADR-0005 split deploy). It is UNRECOVERABLE from the row: `raw_q` is the raw
+    // policy intent for all 27 joints whether or not the joint is held, and a held joint's
+    // `meas_q` only *approaches* default, so "held" and "the policy happened to command
+    // near default" are not separable per joint. Empty = nothing held (the key absent and
+    // the key present-but-empty mean the same thing, so `[]` is unambiguous). Recorded
+    // because it is now an experimental VARIABLE, not a fixed deploy setting: the
+    // upper-body free-vs-held comparison flips it between sessions.
     void init(const std::string& base_path, const std::vector<float>& joint_ids_map,
               float tilt_limit, float fall_acc_thresh, float control_dt,
               bool with_estimator = false,
               const std::vector<float>& joint_offset = {},
-              const std::string& base_estimator = "none")
+              const std::string& base_estimator = "none",
+              const std::vector<int>& hold_joint_ids = {})
     {
         base_ = base_path;
         if (base_.empty()) return;
@@ -150,6 +159,10 @@ public:
         meta << "  \"joint_offset\": [";
         for (size_t i = 0; i < joint_offset.size(); i++)
             meta << (i ? "," : "") << joint_offset[i];
+        meta << "],\n";
+        meta << "  \"hold_joint_ids\": [";
+        for (size_t i = 0; i < hold_joint_ids.size(); i++)
+            meta << (i ? "," : "") << hold_joint_ids[i];
         meta << "],\n";
         meta << "  \"joints\": [\n";
         for (int i = 0; i < n_; i++) {

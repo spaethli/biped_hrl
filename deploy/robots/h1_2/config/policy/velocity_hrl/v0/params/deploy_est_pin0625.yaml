@@ -33,7 +33,7 @@ hrl:
   # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
   # (docs/adr/0007); the other six arms run passively and are logged only.
   # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
-  base_estimator: legodom
+  base_estimator: ekf_rot
   c: 8                                          # HL period (control steps); HL holds V* between fires
   hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
                                                 # (ignored when hl_algorithm: oracle)
@@ -73,11 +73,57 @@ commands:
     ranges:
       lin_vel_x: [-0.5, 1.0]
       lin_vel_y: [-0.5, 0.5]
-      ang_vel_z: [-0.5, 0.5]
+      # ±1.0 = the TRAINED range, deliberately NOT the older ±0.5 "tame joystick"
+      # setting (operator call, 2026-08-27): at ±0.5 the robot barely responded to
+      # small stick deflections, since the deploy range scales the command the policy
+      # sees. Matching training restored turning authority. Safe for current exports:
+      # goal_scale is baked into the HL ONNX metadata, so these ranges no longer feed
+      # the A1 scale derivation (that legacy path is pre-2026-07-16 exports only).
+      ang_vel_z: [-1.0, 1.0]
       heading: null
 actions:
   JointPositionAction:
-    clip: null
+    # Commanded-target clip, hardware position limits in joint_ids_map order. MUST equal
+    # h1_2_limits.h (pinned by tests/test_deploy_yaml_clip_matches_the_limit_header, which
+    # also rejects a duplicate `clip` key -- yaml-cpp takes the FIRST occurrence, PyYAML the
+    # LAST, so an override appended below this block is a silent no-op ON THE ROBOT ONLY).
+    # Applied by joint_actions.h:54, BEFORE the State_RLBase safety clamp, which acts on
+    # (1-alpha)*action + alpha*q_meas and so coincides with this only at alpha = 0 --
+    # clipping first means a safety-hold ramp blends from an already-legal target.
+    # ADR-0009 (2026-08-28): KEPT when Model v3 was reverted. Training carries no clip, so
+    # this is a deploy-side backstop, NOT a parity device. What was cut is the training-side
+    # L1 excess penalty, which pushed the ankle command ~1.8 action-sigma off the bound and
+    # cost 2.1-2.4x of the roll range. v2 ran pinned by this clip 14-21% of steps on
+    # 2026-08-27 and was the best-performing configuration of the day.
+    clip: [
+      [-0.43, 0.43],   # left_hip_yaw_joint
+      [-3.14, 2.5],   # left_hip_pitch_joint
+      [-0.43, 3.14],   # left_hip_roll_joint
+      [-0.12, 2.19],   # left_knee_joint
+      [-0.897334, 0.523598],   # left_ankle_pitch_joint
+      [-0.261799, 0.261799],   # left_ankle_roll_joint
+      [-0.43, 0.43],   # right_hip_yaw_joint
+      [-3.14, 2.5],   # right_hip_pitch_joint
+      [-3.14, 0.43],   # right_hip_roll_joint
+      [-0.12, 2.19],   # right_knee_joint
+      [-0.897334, 0.523598],   # right_ankle_pitch_joint
+      [-0.261799, 0.261799],   # right_ankle_roll_joint
+      [-2.35, 2.35],   # torso_joint
+      [-3.14, 1.57],   # left_shoulder_pitch_joint
+      [-0.38, 3.4],   # left_shoulder_roll_joint
+      [-2.66, 3.01],   # left_shoulder_yaw_joint
+      [-0.95, 3.18],   # left_elbow_joint
+      [-3.01, 2.75],   # left_wrist_roll_joint
+      [-0.4625, 0.4625],   # left_wrist_pitch_joint
+      [-1.27, 1.27],   # left_wrist_yaw_joint
+      [-3.14, 1.57],   # right_shoulder_pitch_joint
+      [-3.4, 0.38],   # right_shoulder_roll_joint
+      [-3.01, 2.66],   # right_shoulder_yaw_joint
+      [-0.95, 3.18],   # right_elbow_joint
+      [-2.75, 3.01],   # right_wrist_roll_joint
+      [-0.4625, 0.4625],   # right_wrist_pitch_joint
+      [-1.27, 1.27],   # right_wrist_yaw_joint
+    ]
     joint_names: [.*]
     # v2 scale = 0.25*effort/kp: legs 0.25, torso 0.166667, shoulder p/r 0.083333,
     # shoulder_yaw 0.0375, elbow+wrists 0.05625.
