@@ -2,7 +2,9 @@
 
 **Status:** accepted (premise validated 2026-07-02; S1c machinery implemented + tested
 2026-07-02: `hl_cadence_source="hl"` gives the TD3 HL the period as +1 action dim, CoT enters
-the HL window reward via `hl_cot_coef` — see `doc/hrl/A1a_plan.md`; S3 = first learned-HL run)
+the HL window reward via `hl_cot_coef` — see `doc/hrl/A1a_plan.md`; S3 = first learned-HL run).
+⚠ **The S4/S5 gate verdicts below were scored on a CoT denominator that changed 2026-07-10 and
+are retired — see the Amendment at the end. S4's A1a half PASSES at `hl_cot_coef=5`.**
 
 ## Context
 
@@ -122,10 +124,69 @@ speed > 0.1, training floor), `stride_period_s` (measured same-foot touchdown in
   `cot` at A0-level tracking and fall_rate, **and** A0+energy regresses tracking to buy its CoT
   cut. *Honest disconfirmer:* if A0+energy matches A1a on both, the hierarchy did not help for
   in-sim efficiency, and we report that.
+  ⚠ **Amended 2026-09-01:** the 🔴 verdict is retired (old denominator). A1a half PASSES at
+  `hl_cot_coef=5` — CoT −23% vs A0 at 0.61x its velocity error, 1 seed. A0/A0+energy controls
+  still not built.
 - **S5 weight guard.** Sweep `hl_cot_coef`; fall_rate must stay flat (rising fall_rate = CoT
   beating tracking = the suicide attractor; cap the weight below that point).
+  ⚠ **Amended 2026-09-01:** the cap is between 5 and 10, not below 0.5, and `fall_rate` alone
+  does NOT detect the failure (coef 10/20 walk smoothly at ~5x A0's `err_vx` without falling).
+  Pair the guard with a tracking floor.
 - **S6 OOD proxy (secondary).** Narrow -> Wide DR / push / terrain. Exploratory: a large
   survival edge is not expected until A2 supplies dynamics adaptation; S4 is the load-bearing
   A1a result.
 
 Two data-set knobs: `cadence_period_range` (from S0), `hl_cot_coef` (bounded by S5).
+
+## Amendment 2026-09-01 — the S4/S5 verdicts were scored on a superseded CoT denominator
+
+**The S4 and S5 gates above were failed on a reward that no longer exists, and both verdicts
+are retired.** The CoT denominator changed from the UNDIRECTED speed integral to the SIGNED
+projection onto the commanded direction (`hrl_runner.py`, "HL-reward distance"). Both sweeps
+that scored these gates predate that change:
+
+| date | event | denominator |
+|---|---|---|
+| 2026-07-04 | S5 sweep `hl_cot_coef` {2,4,8} -> "raising the coef makes cadence *shorter*, collapses entrainment (gait_match 0.9->0.5), degrades tracking" | undirected |
+| 2026-07-09 | co-train {0.2, 0.5} -> 0.2 kept, 0.5 "past the boundary" | undirected |
+| **2026-07-10** | **denominator -> signed projection, explicitly "to promote longer strides"** | **changed** |
+| 07-10 -> 09-01 | ~40 runs, all at `hl_cot_coef=0.2` | projected — never re-swept |
+
+With an undirected denominator any motion earns distance, so a larger weight rewarded
+displacement-per-joule in *any* direction — thrashing and sideways motion, hence a shorter
+cadence. The projection closes that path; only forward progress earns distance.
+
+**Re-sweep on the current reward (2026-09-01, `rse 0.10`, range 0.35-1.0, `src=hl`, 1 seed):**
+
+| `hl_cot_coef` | 0.2 | 0.3 | 0.5 | 2 | 5 | 10 | 20 |
+|---|---|---|---|---|---|---|---|
+| HL commanded period (s) | ~0.35 | 0.359 | 0.369 | 0.358 | **0.775** | 0.918 | 0.998 |
+| `err_vx` | 0.198 | 0.073 | 0.064 | 0.076 | **0.054** | 0.480 | 0.437 |
+| `gait_match` | 0.934 | 0.934 | 0.940 | 0.958 | 0.956 | 0.951 | 0.959 |
+
+1. **The sign flipped: a larger coefficient now LENGTHENS the stride**, with no entrainment
+   collapse at any weight (`gait_match` 0.93-0.96 throughout).
+2. **The response is threshold-like, not graded** — 0.2 to 2 is a tenfold change that moves the
+   period not at all; between 2 and 5 it flips. The old "0.5 is past the boundary" reading was
+   measuring a different reward's boundary; on the current one 0.5 is still inert.
+3. **S4's primary criterion is MET at `hl_cot_coef=5`** ("A1a `cot` < A0 `cot` at A0-level
+   tracking and fall_rate"): CoT **0.391 vs A0's 0.507 (-23%)** at `err_vx` 0.0542 vs 0.0893
+   (0.61x) and `fall_rate` 0, plus `act_legs` 0.96x / `ajit` 0.91x / mech power 0.91x A0.
+   Run `2026-09-01_03-38-52_a1a_fullmirror_per0p35-1p0_cot5_standing10_s42`.
+   ⚠ **S4's other half — the A0+energy control that must regress tracking to buy its CoT cut —
+   is still not built, so this is a pass on the A1a half only, at 1 seed.**
+4. **S5's cap is real but sits between 5 and 10**, not below 0.5: `cot` 10/20 hold `gait_match`
+   and `fall_rate` yet drive `err_vx` to ~5x A0. **`fall_rate` alone does not detect this** —
+   the arm walks smoothly and slowly rather than falling, so S5's stated guard would have
+   passed it. Pair the weight guard with a tracking floor (`err_vx` / `ss_err_vx`).
+5. Standing at `cot 5` (`rse 0.10`) is NOT scoreable: td 220 sits inside that cell's same-seed
+   replicate band (130-2620). Re-run at `rse 0.20`, the only standing setting that reaches the
+   touchdown floor on both seeds.
+
+**Rule this generalizes:** a coefficient is calibrated against a *reward*, not a task. When a
+reward term is reformulated, every weight tuned against it — and every sweep that ruled out
+neighbouring weights — reverts to unvalidated.
+
+Instrument: `python scripts/play.py <TaskID> --checkpoint-file <pt> --num-envs 64
+--diagnose-cadence 600 --eval-cmd-vx 0.5` reports the HL's commanded period, its within-episode
+std across windows, and windows-per-stride (`[CADDIAG] {json}`).

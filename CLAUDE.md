@@ -40,6 +40,13 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   the per-seed line + seed mean±std). **`headroom` is the diagnostic**: ~0 with `pinned` > 0 means
   a clamp truncating an overshoot, ~1 action-sigma means a penalty pushed the policy off the
   bound. Validated against hardware `raw_q` to a few percent (ADR-0009).
+- Cadence-transmission probe: `python scripts/play.py <TaskID> --checkpoint-file <pt>
+  --num-envs 64 --diagnose-cadence 600 --eval-cmd-vx 0.5` — the HL's COMMANDED stride period at
+  every fire (mean, within-episode std across windows, windows-per-stride). `[CADDIAG] {json}`.
+  The HL's period is near-BINARY in the command (**0.905 s at cmd 0, ~0.37 s walking**), so
+  training-time `hl/period_mean` is a standing/walking MIXTURE, not a policy property — compare
+  commanded vs realized at the SAME command or the comparison is meaningless. The LL entrains at
+  0.96-0.98 either way; there is no transmission loss.
 - A1 goal probe (HL-vs-LL error decomposition): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --diagnose-goals 600 --eval-seeds 2 --num-envs 64` (defaults to
   1 env without the flag; pre-2026-07-15 probes on cadence ckpts ran frozen-phase — see
@@ -101,7 +108,7 @@ goal decode, reward-term direction/gating, the warm-start column map, deploy/tra
 config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
 change to those. New tests must be proven able to fail:
 `python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
-it is caught (96 tests, 37/37 mutations). A test that restates the logic it guards cannot
+it is caught (160 tests as of 2026-09-01, 37/37 mutations). A test that restates the logic it guards cannot
 fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
 
 **Deploy readiness (2026-08-04): one command, one verdict.**
@@ -218,6 +225,18 @@ analysis and the proposed change first.
   to 2048 envs at stock ccd. Play sets `nconmax=512`
   because play draws random tiles and the **initial-pose** contact count reaches ~195;
   steady-state demand is only 38, so training's 48 is correct and was never dropping contacts.
+- **`hl_cot_coef` was calibrated on a superseded reward (2026-09-01, `docs/adr/0004`
+  Amendment).** The CoT denominator changed 2026-07-10 from the UNDIRECTED speed integral to the
+  SIGNED projection on the commanded direction ("to promote longer strides"); the 0.2 keeper and
+  the sweep that ruled out higher values BOTH predate it, and it then rode ~40 runs unchanged.
+  On the current reward the sign is **flipped** (larger coef = LONGER stride) and the response is
+  **threshold-like**: 0.2→2 inert, 2→5 flips. **`hl_cot_coef=5` beats A0 on 9/10 walking metrics
+  (CoT −23% at 0.61x its `err_vx`, 0 falls)** and clears ADR-0004 S4's A1a half. Cap is 5–10:
+  coef 10/20 keep `fall_rate` 0 while running ~5x A0 `err_vx`, so **a fall-rate guard cannot see
+  this failure — always pair a smoothness/energy weight guard with a tracking floor.** General
+  rule: a coefficient is calibrated against a REWARD, not a task; reformulating a reward term
+  reverts every weight tuned against it, and every sweep that ruled out neighbours, to
+  unvalidated.
 - **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
   derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid.
   Replays need the constants the checkpoint trained with (env-side scales).

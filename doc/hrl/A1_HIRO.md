@@ -128,10 +128,18 @@ is already near it** — that metric is informative only when failing.
   `jacc_legs_p95`, 8.6–11.4× on commanded `ajit_legs_p95`** (at `cmd 0` the mean sits *above*
   the p95 — the set-down transient carries it). On the *aggregate* `jacc_legs_p95` every A1
   arm beats A0 (0.48–0.92×) while sitting 1.0–1.8× above on the mean.
-  ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking:** pinning
-  `cadence_period_range=(0.625,0.625)` matches A0 (`act_legs` 1.00×) and beats it on CoT —
-  A1 had been stepping at ~0.345 s vs A0's 0.578 s; costs `err_vy`. The combination is
-  untested. Numbers + 16-arm tables → the A1a experiment journal (research KB), 2026-08-28.
+  ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking — SOLVED 2026-09-01 by
+  `hl_cot_coef=5`, not by the cadence range.** A1 had been stepping at ~0.35 s vs A0's 0.578 s
+  because the HL commands the range floor at `hl_cot_coef=0.2`; the CoT weight was calibrated
+  on a denominator that changed 2026-07-10 (`docs/adr/0004` Amendment). At coef 5 the HL picks
+  an interior 0.775 s and the arm beats A0 on **9 of 10** walking metrics — `act_legs` 0.96×,
+  `ajit` 0.91×/`p95` 0.50×, `jacc_p95` 0.55×, `err_vx` 0.61×, `err_vy` 0.86×, **CoT 0.77×**,
+  power 0.91×, 0 falls (only `jacc` mean is above, 1.36×). 1 seed. This also clears
+  **ADR-0004 S4's A1a half**. Imposing the period instead (`(0.625,0.625)` pin or a 0.5–1.0
+  draw) matches A0 on `act_legs` but costs `err_vy` 1.38–1.50×, which the HL-chosen period does
+  not. Standing at coef 5 is unscoreable (ran at `rse 0.10`, inside that cell's 130–2620
+  replicate band) — the open arm is coef 5 + `rse 0.20` + `jacc 1e-7`. Numbers + 39-arm tables
+  → the A1a experiment journal (research KB), 2026-08-31 / 2026-09-01.
 - **Absolute-necessity ablation — DONE** (`a1_td3_delta_hltrack_5k`): tracking reward alone
   (delta) reaches 0.14/0.11/0.20 → absolute not strictly necessary, just a refinement (see
   Attribution above).
@@ -143,10 +151,12 @@ is already near it** — that metric is informative only when failing.
   relabeled over a broader goal distribution than A0's command curriculum → may generalize
   better to OOD commands / push perturbations. If A1 holds where A0 degrades = a real hierarchy
   benefit; else a clean negative. (The decisive test is still A2's M3 sim2real drop.)
-- **Planned — small `action_rate` penalty, weighted ≪ A0's −0.05:** targets the smoothness gap
-  (act_rate ~1.7 vs A0 0.66). Must enter as a **direct reward term, not the goal/intrinsic
-  channel** — action smoothness isn't a goal-space state, so HIRO's intrinsic goal-distance
-  reward structurally can't encode it (non-observable → not canonical goal structure).
+- **`action_rate` penalty — SUPERSEDED, not run.** Its premise (`act_rate` ~1.7 vs A0 0.66)
+  was the aggregate number WL-S retired, and both regimes now have fixes that work
+  (`hl_cot_coef` walking, `rel_standing_envs` standing). The structural point stands and still
+  constrains any future smoothness term: it must enter as a **direct reward term, not the
+  goal/intrinsic channel** — action smoothness isn't a goal-space state, so HIRO's intrinsic
+  goal-distance reward structurally can't encode it.
 - **Reserve variant (not implemented):** LL observes the **absolute** target `V*` instead of
   the delta `V*−s_i`. Two payoffs: matches A0's absolute-command format, AND removes A1's
   runtime base-velocity dependency — the delta needs current vx/vy to build `s`, so deploy must

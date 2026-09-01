@@ -75,6 +75,18 @@ class PlayConfig:
   play.py's own stride_period_s metric (which divides by raw touchdown count) is
   corrupted by double-taps vs an alternation-based estimate. Sibling to ``eval_steps``;
   reuses ``eval_seeds``."""
+  diagnose_cadence: int = 0
+  """Cadence-transmission probe (2026-08-31): if > 0, run this many deterministic steps and
+  report the HL's COMMANDED stride period (``env.hrl_period``) sampled at every HL fire --
+  its within-episode mean, the per-env std ACROSS windows, and the mean absolute
+  window-to-window step. Motivation: across 17 co-trained arms the commanded period spans
+  0.387-0.505 s while the realized stride sits at 0.3487 +- 0.0044 s (slope +0.010,
+  r=+0.085), i.e. the LL does not follow the HL's period at all, while it follows a HELD
+  random period with slope +0.839 (r=+0.996). The two candidate causes -- a period that
+  jitters faster than a stride vs an LL that ignores a steady command -- imply opposite
+  fixes, and only the within-episode jitter separates them. ``hl_cadence_source='random'``
+  is the built-in control: it draws once per episode, so its std must read ~0. Sibling to
+  ``eval_steps``; reuses ``eval_seeds``."""
   diagnose_action_rate: int = 0
   """Action-rate decomposition: if > 0, run this many deterministic steps and split the
   whole-body action rate ||a_t - a_{t-1}|| by (1) position within the HL window (bin
@@ -318,7 +330,8 @@ def run_play(task_id: str, cfg: PlayConfig):
   # silently produced non-comparable numbers twice (the 2026-07-15 goal probe, then the
   # 2026-08-09 jacc benches), so eval paths default to 64 while interactive play stays at 1.
   _eval_mode = (cfg.eval_steps > 0 or cfg.diagnose_goals > 0 or cfg.diagnose_symmetry > 0
-                or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0)
+                or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0
+                or cfg.diagnose_cadence > 0)
   if cfg.num_envs is not None:
     env_cfg.scene.num_envs = cfg.num_envs
   elif _eval_mode:
@@ -989,6 +1002,62 @@ def run_play(task_id: str, cfg: PlayConfig):
   # compares the two legs to each other or counts touchdowns per foot - this probe
   # does, plus checks whether play.py:498's stride_period_s (which divides eval time
   # by raw touchdown count) is corrupted by a double-tap inflating that count.
+  # Cadence transmission (2026-08-31): is the HL's commanded period stationary over a
+  # stride? `get_inference_policy` rewrites env.hrl_period at every HL fire under
+  # hl_cadence_source='hl' and leaves it fixed under 'random', so sampling it per step and
+  # differencing per WINDOW measures exactly the reference the LL is asked to entrain to.
+  if cfg.diagnose_cadence > 0:
+    import json
+    uenv = env.unwrapped
+    n_envs = uenv.num_envs
+    step_dt = uenv.step_dt
+    c = getattr(runner, "c", 1)
+
+    seed_results: list[dict] = []
+    for seed_idx in range(cfg.eval_seeds):
+      torch.manual_seed(42 + seed_idx)
+      with torch.inference_mode():
+        obs, _ = env.reset()
+      per_window: list[torch.Tensor] = []
+      with torch.inference_mode():
+        for k in range(cfg.diagnose_cadence):
+          actions = policy(obs)
+          # Sample AFTER the policy call so a fire's new period is already written.
+          if k % c == 0:
+            per_window.append(uenv.hrl_period.detach().clone().flatten())
+          obs, _, _, _ = env.step(actions.to(env.device))
+
+      P = torch.stack(per_window, dim=0)              # [n_windows, n_envs]
+      d = (P[1:] - P[:-1]).abs()                      # window-to-window change
+      stride = P.mean().item()
+      seed_results.append({
+        "period_mean":      stride,
+        "period_std_win":   P.std(dim=0).mean().item(),   # per-env std ACROSS windows
+        "period_cv":        (P.std(dim=0) / P.mean(dim=0).clamp(min=1e-6)).mean().item(),
+        "dperiod_abs_mean": d.mean().item(),
+        "dperiod_p95":      torch.quantile(d.flatten().float(), 0.95).item(),
+        "period_spread_env": P.mean(dim=0).std().item(),  # across-env spread of the mean
+        "windows_per_stride": stride / (c * step_dt),
+        "n_windows":        int(P.shape[0]),
+      })
+
+    keys = list(seed_results[0].keys())
+    agg = {k: sum(r[k] for r in seed_results) / len(seed_results) for k in keys}
+    print()
+    print(f"  CADENCE TRANSMISSION PROBE | {cfg.diagnose_cadence} steps x {n_envs} envs "
+          f"x {cfg.eval_seeds} seed(s) | c={c}, window={c * step_dt:.3f} s")
+    print(f"    source                    : {getattr(runner, 'hl_cadence_source', '?')}")
+    print(f"    commanded period (mean)   : {agg['period_mean']:.4f} s")
+    print(f"    within-episode std        : {agg['period_std_win']:.4f} s  "
+          f"(cv {agg['period_cv'] * 100:.1f}%)")
+    print(f"    |change| per window       : {agg['dperiod_abs_mean']:.4f} s  "
+          f"(p95 {agg['dperiod_p95']:.4f})")
+    print(f"    windows per stride        : {agg['windows_per_stride']:.2f}")
+    print(f"    across-env spread of mean : {agg['period_spread_env']:.4f} s")
+    print(f"  [CADDIAG] {json.dumps({**agg, 'label': str(cfg.checkpoint_file), 'num_envs': n_envs, 'eval_seeds': cfg.eval_seeds, 'source': str(getattr(runner, 'hl_cadence_source', '?'))})}")
+    env.close()
+    return
+
   if cfg.diagnose_symmetry > 0:
     import json
     uenv = env.unwrapped
