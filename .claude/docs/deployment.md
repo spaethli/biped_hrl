@@ -180,8 +180,37 @@ measured position → PD error 0 → damping-only torque, i.e. **the robot goes 
 symptom points at actuation; the cause is 187 floats upstream. Consequence: any sim-only
 actor observation (terrain `height_scan`, privileged state) must be removed from the ACTOR
 at training time — critic-only is fine. `Unitree-H1_2-Rough` is blind for exactly this
-reason (CLAUDE.md gotchas). A fail-closed length check in the runner is NOT yet implemented
-(the file is shared `deploy/include/isaaclab/`, which we keep unmodified).
+reason (CLAUDE.md gotchas).
+
+**✅ FAIL-CLOSED LENGTH CHECK IMPLEMENTED for the HRL state (WP5d, 2026-09-02).**
+`deploy/include/isaaclab/` still stays unmodified (it is upstream's, and `OrtRunner` keeps
+`input_sizes` private), so the check is robot-local in `State_RLHRL`, in two layers:
+- **Load time** (`ensure_models_loaded`, before the policy thread exists): each of the three
+  sessions' ONNX-declared input dim vs the length this state will build — `low_level` =
+  `policy+goal_dim`, `high_level` = `policy+command+2·hl_obs_vel+z_dim·hl_obs_e`,
+  `adapt_encoder` = `H·D` from its own baked metadata. **Throws.** Complete on its own,
+  because all three lengths are structurally fixed once config and ONNX are known.
+- **Per call** (`check_input`, immediately before every `act()`): built vs declared, else
+  **latch `dim_fault_` and bounce to Passive** through a registered check.
+
+⚠ The runtime layer must **not** throw: the policy thread is a bare `std::thread` with no
+handler, so an escaping exception is `std::terminate` — the process dies, `lowcmd` stops
+publishing, and the robot is left to the DDS timeout. That is fail-*dark*, not fail-closed.
+Throwing is correct only at load, where nothing has started.
+`tests/test_adapt_encoder_contract.py` pins both properties (every `act()` is guarded; the
+guard does not throw), so a fourth session added without a guard fails the suite.
+**A0 (`State_RLBase`) is NOT covered** — it still runs one unchecked session.
+
+**Third ONNX session (WP5d, 2026-09-02): `adapt_encoder.onnx`, opt-in.** Under
+`hrl.hl_obs_e` the HL input grows by the estimated env latent, `policy ++ command ++
+(vx,vy) ++ z_hat(5)` = **99** where the keeper is 94. `phi`'s per-step input is
+**`obs["policy"] ++ obs["command"]` = 92 floats** — the leading columns of the HL's own
+vector — over a **50-frame, control-rate (50 Hz), dense, oldest-first** window flattened
+row-major `[1,50,92]` = 4600 floats. ⚠ The A0 flat observation is the same 92 floats with
+`command` mid-vector at cols 6:9, so **no length check separates the two permutations**: the
+layout travels as the baked string `phi_input_layout` and is compared literally at load.
+Absent/false flag ⇒ no session, no buffer, byte-identical to the two-ONNX path.
+Full contract → `doc/hrl/A1a_deploy_plan.md` "WP5d".
 
 **A1/HRL deploy (as-built, 2026-06-18 — sim).** Two-ONNX hierarchy, all robot-local
 (no `deploy/include/isaaclab/` edits):

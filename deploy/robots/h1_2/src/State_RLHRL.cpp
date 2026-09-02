@@ -62,6 +62,9 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
     // Keeper structure (2026-07-14): velocity-goals-only HL, HL lin-vel input, HL-owned
     // cadence. All default off -> pre-velgoal checkpoints run byte-identical.
     hl_obs_vel_ = hrl["hl_obs_vel"] && hrl["hl_obs_vel"].as<bool>();
+    // WP5d: the HL additionally reads z_hat = phi(history) from adapt_encoder.onnx. Absent
+    // key = false = byte-identical to the pre-WP5d path (no third session, no history).
+    hl_obs_e_ = hrl["hl_obs_e"] && hrl["hl_obs_e"].as<bool>();
     velgoal_ = hrl["hl_velocity_goals_only"] && hrl["hl_velocity_goals_only"].as<bool>();
     const bool cadence = hrl["hl_cadence"] && hrl["hl_cadence"].as<bool>();
     const std::string cad_src =
@@ -291,6 +294,16 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
             FSMStringMap.right.at("Passive")
         )
     );
+    // WP5d Layer 2. policy_step() latches this if a vector it built ever disagrees with the
+    // ONNX-declared input size, instead of letting algorithms.h read past the end of it.
+    // Bouncing to Passive rather than throwing is deliberate: the policy thread has no
+    // exception handler, so a throw would kill the process and stop lowcmd entirely.
+    this->registered_checks.emplace_back(
+        std::make_pair(
+            [&]()->bool{ return dim_fault_; },
+            FSMStringMap.right.at("Passive")
+        )
+    );
 }
 
 // One-time probe of an ONNX file's flattened input dim. OrtRunner::act builds its input
@@ -329,6 +342,55 @@ static std::vector<float> onnx_metadata_floats(const std::filesystem::path& path
     return out;
 }
 
+// Scalar convenience over onnx_metadata_floats (the HL's hl_obs_e / hl_e_dim). `dflt` is
+// returned when the key is absent, which is how a pre-WP5d export identifies itself.
+static float onnx_metadata_float1(const std::filesystem::path& path, const char* key,
+                                  float dflt)
+{
+    const auto v = onnx_metadata_floats(path, key);
+    return v.empty() ? dflt : v[0];
+}
+
+// phi's entire baked contract, read through ONE session rather than eleven: the helpers above
+// open a throwaway Ort::Session per key, which is fine for the HL's two but not for this.
+// Load path only.
+static hrl::AdaptEncoderMeta read_encoder_meta(const std::filesystem::path& path)
+{
+    Ort::Env ort_env(ORT_LOGGING_LEVEL_ERROR, "hrl_enc_meta");
+    Ort::SessionOptions so;
+    Ort::Session session(ort_env, path.c_str(), so);
+    Ort::AllocatorWithDefaultOptions alloc;
+    auto md = session.GetModelMetadata();
+    auto str = [&](const char* key) -> std::string {
+        auto v = md.LookupCustomMetadataMapAllocated(key, alloc);
+        return v ? std::string(v.get()) : std::string();
+    };
+    auto vec = [&](const char* key) {
+        std::vector<float> out;
+        std::stringstream ss(str(key));
+        std::string tok;
+        while (std::getline(ss, tok, ',')) if (!tok.empty()) out.push_back(std::stof(tok));
+        return out;
+    };
+    auto num = [&](const char* key) {
+        const auto v = vec(key);
+        return v.empty() ? -1 : (int)v[0];
+    };
+    hrl::AdaptEncoderMeta m;
+    m.history_len  = num("phi_history_len");
+    m.input_dim    = num("phi_input_dim");
+    m.z_dim        = num("z_dim");
+    m.time_order   = str("phi_time_order");
+    m.input_layout = str("phi_input_layout");
+    m.z_names      = str("z_names");
+    m.scale        = vec("z_scale");
+    m.center       = vec("z_center");
+    m.clip_lo      = vec("z_clip_lo");
+    m.clip_hi      = vec("z_clip_hi");
+    m.cold         = vec("z_cold");
+    return m;
+}
+
 void State_RLHRL::ensure_models_loaded()
 {
     if (ll_runner_) return;  // already loaded (entered before)
@@ -348,6 +410,7 @@ void State_RLHRL::ensure_models_loaded()
     const int policy_dim = (int)obs.at("policy").size();
     const int command_dim = (int)obs.at("command").size();
     const int64_t ll_in = onnx_input_dim(ll_path);
+    ll_in_dim_ = ll_in;  // Layer-2 guard compares the BUILT vector against this every step
     if (ll_in != policy_dim + goal_space_->dim()) {
         throw std::runtime_error(
             "[HRL] low_level.onnx input dim " + std::to_string(ll_in) + " != policy(" +
@@ -356,6 +419,11 @@ void State_RLHRL::ensure_models_loaded()
     }
 
     if (oracle_) {
+        if (hl_obs_e_)
+            throw std::runtime_error(
+                "[HRL] hrl.hl_obs_e is set with hl_algorithm: oracle. The oracle computes V* "
+                "analytically and has no network to read a latent -- phi would be loaded and "
+                "never consumed. Pick one.");
         spdlog::info("[HRL] Oracle HL (analytic V*); loaded low_level.onnx from {}",
                      exported_dir_.string());
         return;
@@ -368,13 +436,76 @@ void State_RLHRL::ensure_models_loaded()
     }
     hl_runner_ = std::make_unique<isaaclab::OrtRunner>(hl_path.string());
 
+    // --- WP5d: the adaptation encoder, loaded and validated BEFORE the HL dim check, since
+    // its z_dim is a term in that check. Everything geometric travels in phi's own metadata;
+    // deploy.yaml contributes exactly one boolean.
+    int z_dim = 0;
+    if (hl_obs_e_) {
+        const std::filesystem::path enc_path = exported_dir_ / "adapt_encoder.onnx";
+        if (!std::filesystem::exists(enc_path)) {
+            throw std::runtime_error("[HRL] hrl.hl_obs_e is set but '" + enc_path.string() +
+                                     "' is missing. The H-adapt HL reads z_hat = phi(history) "
+                                     "and cannot run without phi (or clear hrl.hl_obs_e).");
+        }
+        enc_meta_ = read_encoder_meta(enc_path);
+        enc_runner_ = std::make_unique<isaaclab::OrtRunner>(enc_path.string());
+        enc_in_dim_ = onnx_input_dim(enc_path);
+        // The whole load-time decision is one pure function in hrl/adapt_encoder.h, so it can
+        // be exercised offline (test/adapt_encoder_test.cpp) rather than only on a robot.
+        const std::string bad = hrl::check_deploy_contract(
+            enc_meta_, policy_dim, command_dim, enc_in_dim_,
+            (long long)enc_runner_->get_action().size());
+        if (!bad.empty()) {
+            throw std::runtime_error(
+                "[HRL] adapt_encoder.onnx: " + bad + ". phi's geometry and scales are POLICY "
+                "properties and must travel baked into the export, never be re-derived at "
+                "inference -- same rule as goal_scale, and for the same reason.");
+        }
+        z_dim = enc_meta_.z_dim;
+        hist_.configure(enc_meta_.history_len, enc_meta_.input_dim);
+        z_hat_ = enc_meta_.cold;
+        std::ostringstream zs;
+        for (size_t i = 0; i < enc_meta_.cold.size(); ++i)
+            zs << (i ? ", " : "") << enc_meta_.cold[i];
+        spdlog::info("[HRL] H-adapt ON: adapt_encoder.onnx H={} D={} -> z_hat({}) [{}]; "
+                     "cold-start prior [{}] held for the first {:.2f} s of each entry.",
+                     enc_meta_.history_len, enc_meta_.input_dim, z_dim, enc_meta_.z_names,
+                     zs.str(), enc_meta_.history_len * env->step_dt);
+    }
+
+    // The HL's own metadata declares whether it was TRAINED to read a latent, so a yaml flag
+    // that disagrees with the checkpoint is caught here rather than trusted. Unlike
+    // goal_scale there is no legacy fallback: a pre-WP5d export simply must not be run with
+    // the flag on, and a WP5d export must not be run with it off.
+    const float meta_obs_e = onnx_metadata_float1(hl_path, "hl_obs_e", -1.0f);
+    if (meta_obs_e >= 0.0f && ((meta_obs_e > 0.5f) != hl_obs_e_)) {
+        throw std::runtime_error(
+            std::string("[HRL] high_level.onnx was exported with hl_obs_e=") +
+            (meta_obs_e > 0.5f ? "true" : "false") + " but deploy yaml says hrl.hl_obs_e: " +
+            (hl_obs_e_ ? "true" : "false") + ". The checkpoint decides whether it reads a "
+            "latent; fix the yaml.");
+    }
+    if (hl_obs_e_) {
+        const int meta_z = (int)onnx_metadata_float1(hl_path, "hl_e_dim", -1.0f);
+        if (meta_z > 0 && meta_z != z_dim) {
+            throw std::runtime_error(
+                "[HRL] high_level.onnx expects a latent of " + std::to_string(meta_z) +
+                " dims but adapt_encoder.onnx emits " + std::to_string(z_dim) +
+                " — the HL and phi come from different runs.");
+        }
+    }
+
     const int64_t hl_in = onnx_input_dim(hl_path);
-    const int hl_in_expect = policy_dim + command_dim + (hl_obs_vel_ ? 2 : 0);
+    const int hl_in_expect =
+        policy_dim + command_dim + (hl_obs_vel_ ? 2 : 0) + (hl_obs_e_ ? z_dim : 0);
+    hl_in_dim_ = hl_in;  // Layer-2 guard compares the BUILT vector against this at each fire
     if (hl_in != hl_in_expect) {
         throw std::runtime_error(
             "[HRL] high_level.onnx input dim " + std::to_string(hl_in) + " != policy+" +
-            "command" + (hl_obs_vel_ ? "+hl_vel(2)" : "") + " = " +
-            std::to_string(hl_in_expect) + " — check hrl.hl_obs_vel in deploy yaml.");
+            "command" + (hl_obs_vel_ ? "+hl_vel(2)" : "") +
+            (hl_obs_e_ ? "+z_hat(" + std::to_string(z_dim) + ")" : "") + " = " +
+            std::to_string(hl_in_expect) +
+            " — check hrl.hl_obs_vel / hrl.hl_obs_e in deploy yaml.");
     }
 
     // The exported HL emits the learned goal cols (all, or velocity-only) + the
@@ -429,6 +560,14 @@ void State_RLHRL::policy_step()
     auto obs = env->observation_manager->compute();
     const auto& policy = obs.at("policy");    // proprio (command removed)
     const auto& command = obs.at("command");  // twist command (HL input only)
+    const auto t_step0 = std::chrono::steady_clock::now();
+
+    // WP5d: one history frame per CONTROL step (50 Hz), not per HL fire. phi's window is the
+    // last H frames of `policy ++ command` -- the first H*D columns of the HL's own input --
+    // pushed BEFORE the fire below, so the window ends on the current frame inclusive. The
+    // sim-side Phase-2 rollout must slice its windows the same way; the layout and time order
+    // are asserted against phi's metadata at load. No-op with the flag off.
+    if (hl_obs_e_) hist_.push(policy, command);
 
     // Goal-space state s: base lin vel (world->body via the IMU quat) + ang_vel/orientation
     // (IMU) + height (sim HighState). frame_vel is published in the WORLD frame; rotate it.
@@ -556,6 +695,43 @@ void State_RLHRL::policy_step()
                 const float vy = hl_vel_from_leg_odom_ ? hl_vel_lo_.y() : s[1];
                 hl_in.push_back(vx); hl_in.push_back(vy);
             }
+            // WP5d: z_hat = phi(history), at the HL rate (every c steps, 6.25 Hz) -- never in
+            // run(), which does not sustain 1 kHz. Until the buffer has filled, window()
+            // refuses and z_hat_ stays at the baked cold-start prior; that refusal is what
+            // makes "phi is never called on a partial buffer" executable rather than a
+            // code-reading exercise.
+            if (hl_obs_e_) {
+                if (hist_.window(hist_win_)) {
+                    if (!check_input("adapt_encoder.onnx", hist_win_.size(), enc_in_dim_))
+                        return;
+                    const auto t_phi0 = std::chrono::steady_clock::now();
+                    const auto raw = enc_runner_->act({{"obs", hist_win_}});
+                    const double phi_us = std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - t_phi0).count();
+                    bucket(phi_hist_, phi_us);
+                    if (phi_us > phi_max_us_) phi_max_us_ = phi_us;
+                    phi_count_++;
+                    z_clipped_last_ = hrl::decode_latent(enc_meta_, raw, z_hat_);
+                    z_clip_events_ += z_clipped_last_;
+                    if (!z_valid_) {
+                        z_valid_ = true;
+                        spdlog::info("[WP5d] history full -> z_hat live after {:.2f} s "
+                                     "(was holding the cold-start prior).",
+                                     hist_.size() * (float)env->step_dt);
+                    }
+                } else if (!z_cold_cmd_warned_
+                           && Eigen::Vector3f(command[0], command[1], command[2]).norm() > 0.1f) {
+                    // Deliberately a warning and NOT a command block: refusing the operator's
+                    // stick is a new failure mode on a live robot, and the WP7 protocol opens
+                    // every cell with a 60 s stand, so the fill normally completes untouched.
+                    z_cold_cmd_warned_ = true;
+                    spdlog::warn("[WP5d] command given while the phi history is still filling "
+                                 "({}/{} frames): the HL is running on the cold-start prior, "
+                                 "not an estimate.", hist_.size(), enc_meta_.history_len);
+                }
+                hl_in.insert(hl_in.end(), z_hat_.begin(), z_hat_.end());
+            }
+            if (!check_input("high_level.onnx", hl_in.size(), hl_in_dim_)) return;
             const auto g_vec = hl_runner_->act({{"obs", hl_in}});
             const int gd = velgoal_ ? goal_space_->task_dim() : goal_space_->dim();
             const Eigen::VectorXf g = Eigen::Map<const Eigen::VectorXf>(g_vec.data(), gd);
@@ -576,6 +752,7 @@ void State_RLHRL::policy_step()
     const Eigen::VectorXf delta = target_ - s;
     std::vector<float> ll_in = policy;
     ll_in.insert(ll_in.end(), delta.data(), delta.data() + delta.size());
+    if (!check_input("low_level.onnx", ll_in.size(), ll_in_dim_)) return;
     const auto action = ll_runner_->act({{"obs", ll_in}});
     env->action_manager->process_action(action);
 
@@ -608,7 +785,18 @@ void State_RLHRL::policy_step()
         const float lo[4] = { hl_vel_lo_.x(), hl_vel_lo_.y(), v_gt_p.x(), v_gt_p.y() };
         telemetry_.record(step_ * (float)env->step_dt, command.data(), s, target_, period,
                           env->robot->data.joint_pos[1], env->robot->data.joint_pos[7], ar,
-                          est, gt, lo);
+                          est, gt, lo,
+                          hl_obs_e_ ? z_hat_.data() : nullptr, z_valid_, z_clipped_last_);
+    }
+
+    // [WP5d] policy-thread budget. The [T5] counters all bucket inside run(), so nothing
+    // measured THIS loop -- the one that actually runs the networks -- until now.
+    {
+        const double step_us = std::chrono::duration<double, std::micro>(
+            std::chrono::steady_clock::now() - t_step0).count();
+        bucket(step_hist_, step_us, kStepBucketUs);
+        if (step_us > step_max_us_) step_max_us_ = step_us;
+        step_count_++;
     }
 }
 

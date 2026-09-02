@@ -743,6 +743,243 @@ correlated obs-noise) are already specced as targeted reactive fixes. Margin for
 attempt comes from the G3 protocol (harness, spotter, E-stop rehearsal, abort-on-filter-
 engagement), not from pre-inflating training DR on a guess.
 
+## WP5d — the hardware deploy path for H-adapt's `phi` (2026-09-02)
+
+Spec grilled and approved before any code (CLAUDE.md). WP0 owns `deploy/` and signed off.
+Phase 1's privileged HL reads an `e` that exists only in the simulator
+(`mdp/observations.py` reads `body_mass`/`body_ipos`/`geom_friction`), so it is permanently
+undeployable by construction; this WP ships the `z_hat = phi(history)` path that replaces it.
+**The critic-side `e` exposure is untouched** — it is non-adaptive and is what makes F-mem
+and H-mem the strongest baselines.
+
+Built and validated against a DUMMY encoder, deliberately: WP5 Phase 2 has not run, and the
+whole path (third session, buffer, cold start, fail-closed checks) is testable without it.
+
+### The pinned contract
+
+`phi`'s per-step vector is **exactly `obs["policy"] ++ obs["command"]` = 92 floats** — the
+leading columns of the HL's own input vector, not a new assembly:
+
+| cols | term (training / deploy yaml) | dim |
+|---|---|---|
+| 0:3 | `base_ang_vel` | 3 |
+| 3:6 | `projected_gravity` | 3 |
+| 6:8 | `phase` / `gait_phase_cmd` | 2 |
+| 8:35 | `joint_pos` / `joint_pos_rel` | 27 |
+| 35:62 | `joint_vel` / `joint_vel_rel` | 27 |
+| 62:89 | `actions` / `last_action` | 27 |
+| 89:92 | `command` / `keyboard_velocity_commands` | 3 |
+
+Derived from both sides, not chosen: `velocity_env_cfg.py` declares `actor_terms` in that
+order, `config/h1_2_a1/env_cfgs.py:36-52` pops `command` out order-preserved, and
+`td3.py:152` concatenates `[policy, command, hl_vel?, hl_e?]`. Deploy builds the same in
+`State_RLHRL.cpp`.
+
+| property | value |
+|---|---|
+| history `H` | 50 frames, **dense**, at the **control rate** (50 Hz) = 1.0 s |
+| window | `x_{t-49..t}`, current frame **inclusive**; pushed before the fire |
+| flat layout | row-major `[1, H, D]`, **oldest first**, `buf[t*92 + d]` = 4600 floats (18.4 kB) |
+| `phi` runs | at the HL rate (every `c`=8 steps, 6.25 Hz), on the **policy thread** — never in `run()` |
+| output | `e = (payload_kg, com_dx, com_dy, com_dz, friction)` ∈ ℝ⁵ (`mdp.E_NAMES`) |
+
+⚠ **The A0 flat observation is the same 92 floats with `command` mid-vector at cols 6:9.**
+No length check can tell the two permutations apart, which is why the layout travels as a
+string (`phi_input_layout`) and is compared literally at load.
+
+**Binding on WP5 Phase 2:** the offline rollout must slice its windows this way. If Phase 2
+stores `_state_vec` output (94/99 dims) and slices differently, sim and hardware feed
+different vectors. The exporter bakes the layout and the deploy asserts it, so a divergence
+fails at load instead of degrading silently.
+
+### Cold start — 1.0 s of nominal `z`, and why it is safe
+
+`phi` does not run until the buffer is full; until then the HL reads a baked `z_cold`,
+**`(0, 0, 0, 0, 0.95)`** (owner's call 2026-09-02: physically nominal payload and CoM,
+friction at the DR midpoint). The buffer is cleared on every FSM entry, alongside
+`dv_`/`lo_sum_`/`est_bank_` and for the same reason.
+
+⚠ **A zero vector is NOT a nominal latent.** Payload and CoM read as *deltas* (zero is
+nominal) but friction reads as an *absolute* coefficient with support 0.3-1.6, so a zero
+fill hands the HL a **frictionless floor** — off-distribution in the worst direction, for the
+whole second. A mixed-semantics latent has no safe zero, which is why the prior is baked per
+component rather than defaulted in code. Pinned by test and refused by the exporter.
+
+Safe for four reasons, all properties of this hierarchy rather than assertions:
+
+1. **The latent's only actuated channel is the commanded stride period, and that period is
+   near-binary in the command** (0.905 s at cmd 0, ~0.37 s walking). The fill happens with the
+   stick at zero, where the latent has almost no authority: a wrong `z` there buys a wrong
+   *standing* cadence.
+2. **The switch is phase-continuous by construction.** The gait clock integrates
+   `global_phase += dt/period`, so writing a new period changes the rate and never the phase —
+   a step in `z_hat` cannot break a stride. This is also why it holds-then-switches instead of
+   ramping: a ramp buys nothing and adds a second undeclared time constant.
+3. `z_cold` is in-distribution, so the HL is never evaluated off its support during the fill.
+4. The alternatives are worse: zero-padding the window feeds `phi` an input shape it never
+   saw in training, whose output is unknowable in advance — the confidently-wrong estimate
+   this design exists to avoid. Holding is the only option whose output is known beforehand.
+
+**Residual, stated:** commanding motion inside the first second walks on the prior for ≤1 s.
+Warned, **not blocked** — refusing the operator's stick is a new failure mode on a live robot,
+and the WP7 protocol opens every cell with a 60 s stand.
+
+### FAIL-CLOSED dimension validation (was documented as NOT IMPLEMENTED)
+
+`algorithms.h:81` sizes the ORT input tensor from the **ONNX declared shape** and never
+compares it against the built vector, so a short vector reads adjacent heap as observations →
+erratic actions → the safety hold ramps `alpha`→1 → PD error 0 → **the robot goes limp**, with
+a symptom pointing at actuation and a cause ~100 floats upstream. Now checked in two layers,
+both robot-local (`deploy/include/isaaclab/` stays unmodified):
+
+- **Layer 1, load time** (`ensure_models_loaded`, before the policy thread exists): every
+  session's declared input vs the length this state will build. Complete, because all three
+  lengths are structurally fixed once config and ONNX are known. Reuses the existing
+  `onnx_input_dim()` probe. This makes the new flag self-validating: `hl_obs_e: true` against a
+  94-dim HL throws and names the key.
+- **Layer 2, per call**: `built.size() == declared`, else **latch `dim_fault_` and bounce to
+  Passive** via the registered check — the `base_state_dead_` pattern.
+
+⚠ **Layer 2 must not throw.** The policy thread is a bare `std::thread` with no handler, so an
+escaping exception is `std::terminate`: the process dies, `lowcmd` stops publishing and the
+robot is left to the DDS timeout. That is fail-**dark**. Throwing is correct only at load.
+
+### `z`-scale travels with the policy
+
+Same rule and reason as `goal_scale`: it defines what `z_hat` *means* to the HL, so it is a
+policy property and re-deriving it at inference is the bug class behind a family of phantom
+eval results. **`deploy.yaml` gets exactly one boolean, `hrl.hl_obs_e`** (absent/false ⇒
+byte-identical to pre-WP5d), placed inside the existing `hrl:` block in all four HRL yamls —
+yaml-cpp keeps the FIRST duplicate key while PyYAML keeps the LAST, so a key appended below
+the block is a silent no-op on the robot AND reads as active from Python.
+
+Baked into `adapt_encoder.onnx` and asserted at load: `phi_history_len`, `phi_input_dim`,
+`phi_input_layout`, `phi_time_order`, `z_dim`, `z_names`, `z_scale`, `z_center`, `z_clip_lo`,
+`z_clip_hi`, `z_cold`. Baked into `high_level.onnx`: `hl_obs_e`, `hl_e_dim`, so the
+**checkpoint** declares whether it reads a latent and a disagreeing yaml throws.
+
+⚠ **Metadata floats serialise at 3 decimals** (`list_to_csv_str`). A normalisation scale of
+4e-4 would be written `0.000` and silently mute that latent component while every dimension
+check still passed. The exporter now refuses it. (Note for the record: `goal_scale` rides the
+same formatter.)
+
+### `z_hat` sanity bound
+
+Per-component clamp to the baked training support (`z_clip_lo/hi`, read from the live payload
+DR cfg, not retyped). It cannot make a wrong estimate right; it guarantees a wrong estimate is
+never **out-of-distribution** wrong, so the HL is always evaluated on inputs it was trained on.
+Clamp bites are counted, logged per fire, and reported from `exit()` — sustained clipping is
+the readout that says "`phi` does not transfer", in the data rather than in the robot's
+behaviour.
+
+**The dominant hardware bias, named.** `phi` has no torque channel, so payload is observable
+only through the PD error — and both halves of it are in the vector (`last_action` and
+`joint_pos_rel`, `tau ≈ kp(a·scale + q_def − q) − kd·q̇`). That makes the estimate a function
+of the **encoder zero**, whose null point moves 0.040 → 0.054-0.076 rad between sessions. An
+encoder drift is therefore indistinguishable from a payload/CoM change to `phi`.
+Consequences: `joint_offset` (ADR-0006) is applied before frames enter the buffer (it already
+is, at the articulation) and is now load-bearing for a second reason; and **WP7 should read
+`z_hat` on a known 0 kg stand at the start of each session**, which makes the per-session
+offset measurable instead of confounding the payload effect. Within-session comparison, already
+mandatory in WP7, cancels the term.
+
+✅ The 42-inconsistent-dims concern does **not** apply: WP0's 2026-08-27 decision runs the
+upper body FREE and `hold_joint_ids` is commented out in every deploy yaml, so `last_action`
+and `joint_pos_rel` describe the same joints on both sides. Re-confirmed by the owner
+2026-09-02. If the hold is ever reinstated, `phi` must be retrained or its held columns
+dropped — `phi_input_layout` is the key that would then change.
+
+### Timing — MEASURED
+
+`phi`'s ONNX inference, through the same `OrtRunner` the deploy uses, on an **RMA-shaped
+1D-CNN** (per-frame MLP 92→128→32, three `Conv1d(32,32)` k8/s4 + k5 + k5, linear head) at the
+real `[1,50,92]` input — i.e. a graph of realistic SIZE, since a constant dummy measures only
+call overhead:
+
+| encoder | p50 | p99 | max | of the 20 ms step |
+|---|---|---|---|---|
+| RMA-shaped 1D-CNN (3 uncontended repeats) | **23.1 µs** | **27.4 µs** | 1.0–2.8 ms | **p99 = 0.14 %** |
+| constant dummy (ORT call-overhead floor) | 1.9 µs | 2.0 µs | 12 µs | 0.01 % |
+
+**It fits, with ~700x headroom at p99**, and it fires only every 8th step. The `max` column is
+a desktop scheduler outlier, not compute.
+
+⚠ **Measure it uncontended.** The same benchmark taken while the mutation harness was
+saturating the CPU read **p99 1275 µs — 47x worse** — with an unchanged p50. Same lesson as
+WP1b's GPU-contention finding: a contended tail is a measurement of the machine, not the code.
+
+Reproduce (out-of-tree, needs only `algorithms.h` + onnxruntime):
+`g++ -std=c++17 -O2 phi_bench.cpp -Ideploy/include -I<ort>/include <ort>/lib/libonnxruntime.so.1.22.0`
+
+⚠ **The [T5] loop-budget instrumentation could not see `phi`**: `work_hist_`/`est_hist_`/
+`period_hist_` all bucket inside `run()`, and `policy_step()` — the 50 Hz thread that actually
+runs the networks — was **entirely uninstrumented**. Reporting `phi` against the existing
+budget would have reported it against the wrong loop. Added `phi_hist_` and `step_hist_` using
+the same `bucket()`/`pct()` machinery (extended with a bucket-width argument so the 20 ms step
+budget fits the same 41 buckets), reported from `exit()` as `[WP5d]`. This also closes a
+pre-existing blind spot: nothing measured the policy thread's margin before.
+
+### What was built
+
+| file | change |
+|---|---|
+| `deploy/robots/h1_2/include/hrl/adapt_encoder.h` | **new** — `AdaptEncoderMeta` (+`validate()`), `HistoryBuffer`, `decode_latent()`. Header-only, dependency-free, so it is unit-testable without a robot |
+| `include/FSM/State_RLHRL.h` | `enc_runner_`, `hl_obs_e_`, buffer/latent state, `check_input()`, `dim_fault_`, policy-thread budget, per-entry cold-start reset |
+| `src/State_RLHRL.cpp` | yaml flag, `read_encoder_meta()` (one session, not eleven), Layer-1 checks for all three sessions, HL-metadata cross-check, history push, `phi` fire + clamp, Layer-2 guards, registered check |
+| `include/hrl/hrl_telemetry.h` | `z0..z4`, `z_valid`, `z_clipped` columns (opt-in via `z_dim`) |
+| 4 × `velocity_hrl/v0/params/deploy*.yaml` | `hrl.hl_obs_e: false`, inside the `hrl:` block |
+| `hrl_runner.py` | `export_adapt_encoder_onnx()` (the single writer of the contract); `hl_obs_e`/`hl_e_dim` on the HL export |
+| `mdp/observations.py` | `E_NAMES` — the latent's component order, in one place |
+| `scripts/export_dummy_phi.py` | **new** — dummy encoder + six `--break` variants for the fail-closed probes |
+| `tests/test_adapt_encoder_contract.py` | **new**, 19 tests |
+| `test/adapt_encoder_test.cpp` | **new**, 28 C++ assertions (ring buffer, order, wrap, reset, clamp, and all 7 load-time refusals) |
+
+### Validation
+
+| check | result |
+|---|---|
+| `pytest` | **185 passed, 2 skipped** (was 166 + 2) |
+| `check_test_sensitivity.py` | **85/85** (13 new mutations, one per new guard) |
+| C++ unit test | **28/28 PASS**, built out-of-tree |
+| full controller build | clean, **no errors or warnings**, out-of-tree |
+| flag-off equivalence | commanded joint targets **bit-identical**: no third session, no buffer push, no latent appended. ⚠ Not literally zero added work — the flag-off path gains **2 `steady_clock::now()` reads + 2 integer compares per 20 ms step** (the policy-thread budget counters and the Layer-2 guards, both unconditional by design). Sub-microsecond, and stated rather than glossed. |
+
+⚠ **Protocol finding: the staged ONNX is not what the manifest claims.**
+`deploy_provenance.py --check` reports `high_level.onnx` md5 `79fb9406d258` and
+`low_level.onnx` `78ba16fecdf8`, both from **`2026-09-01_12-21-39_..._cot7_standing10_s42`**,
+while `PROVENANCE.json` claims `9befcbc37184`/`10fcb8c4a53e` from the **cot5** run
+`2026-09-01_03-38-52_...`. A manual swap after staging — the documented
+"provenance cannot prove what ran" defect, live. **Re-stage before any byte-identity
+baseline**, or the control arm is a different policy than its label.
+
+### End-to-end confirmation on the real Phase-1 checkpoint
+
+`play.py --export-onnx` on
+`2026-09-01_20-25-30_a1a_hadapt_e_cot5_cadhl_standing15_rs8_s42/model_10000.pt` (the
+`hl_obs_e=True` Phase-1 policy) produces a **99-dim** `high_level.onnx` (= 89 + 3 + 2 + 5),
+output 4, carrying `hl_obs_e = 1.0` and `hl_e_dim = 5`. That is exactly what the deploy's
+Layer-1 formula computes with `hrl.hl_obs_e: true`, and 94 ≠ 99 with it false — so the flag
+is self-validating in both directions against a real checkpoint, not a mock. **Nothing was
+staged into `exported/`** (checkpoint staging is out of scope for this WP).
+
+### What was NOT validated, and why
+
+- **The bridge stage of `deploy_readiness.py` was not run.** It requires detaching the elastic
+  band by hand in a focused viewer, or the run is invalid — it is not an unattended step. The
+  flag-off byte-identity and flag-on load probes belong in the next attended bridge session.
+- **The six deliberately-broken encoders** (`--break history|dim|layout|order|zdim|cold`)
+  exist as fixtures for that session's load probe. The *decision* they would exercise is
+  already unit-tested offline against the real code (`check_deploy_contract`, 7 refusal cases);
+  what the fixtures add is proof that the ONNX metadata *reader* wires into it correctly.
+- **A0 (`State_RLBase`) is still unchecked.** WP5d scoped the fail-closed check to the HRL
+  state; A0 runs one unvalidated session and would still read heap on a wrong export.
+
+### Left for WP5 Phase 2
+
+Swap the real `phi` in through `export_adapt_encoder_onnx` (no C++ change), set
+`hrl.hl_obs_e: true`, re-run `deploy_readiness.py` with the A0 control arm. Phase 2 must
+build its windows to the layout above.
+
 ## Rollback rules
 
 Any hardware anomaly: flight-recorder CSV first, then reproduce in the bridge in

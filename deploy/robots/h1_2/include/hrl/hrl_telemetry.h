@@ -33,11 +33,13 @@ public:
     // silently overwritten (2026-07-17 finding). Each row also carries an `entry` id,
     // since `t` alone (only advances while actively in this state) won't show a gap
     // between separate attempts.
-    void init(const std::string& base, int goal_dim)
+    // z_dim > 0 (WP5d) appends the H-adapt latent columns; 0 keeps the pre-WP5d header.
+    void init(const std::string& base, int goal_dim, int z_dim = 0)
     {
         bool first_entry = path_.empty() || path_ != base + "_hrl.csv";
         path_ = base + "_hrl.csv";
         goal_dim_ = goal_dim;
+        z_dim_ = z_dim;
         rows_.clear();
         rows_.reserve(FLUSH_ROWS);
         entry_++;
@@ -66,17 +68,27 @@ public:
         // score it on FIRE rows: the est_vx==0 rows, whose modal gap is c). gt_a* is the
         // matching ABSOLUTE pelvis-frame ground truth -- gt_vx/gt_vy above are within-window
         // INCREMENTS and cannot score an absolute estimator. Both read 0 on real hardware.
-        std::fprintf(f, ",lo_vx,lo_vy,gt_avx,gt_avy\n");
+        std::fprintf(f, ",lo_vx,lo_vy,gt_avx,gt_avy");
+        // WP5d: what the HL actually read for the env latent, per fire, plus whether it was
+        // an estimate at all (z_valid 0 = still on the cold-start prior) and how many
+        // components the sanity clamp bit. With the payload KNOWN per WP7 cell, these columns
+        // ARE the mechanism check -- and they make "phi does not transfer" a reading in the
+        // data rather than an inference from the robot's behaviour.
+        for (int i = 0; i < z_dim_; ++i) std::fprintf(f, ",z%d", i);
+        if (z_dim_) std::fprintf(f, ",z_valid,z_clipped");
+        std::fprintf(f, "\n");
         std::fclose(f);
     }
 
     bool enabled() const { return enabled_; }
 
     // est/gt: {vx, vy, h}; lo: {lo_vx, lo_vy, gt_avx, gt_avy} — see the header note in init().
+    // z/z_valid/z_clipped are ignored unless init() was given z_dim > 0.
     void record(float t, const float* cmd, const Eigen::VectorXf& s,
                 const Eigen::VectorXf& target, float period,
                 float hip_pitch_l, float hip_pitch_r, float act_rate,
-                const float est[3], const float gt[3], const float lo[4])
+                const float est[3], const float gt[3], const float lo[4],
+                const float* z = nullptr, bool z_valid = false, int z_clipped = 0)
     {
         if (!enabled_) return;
         std::vector<float> row;
@@ -93,6 +105,11 @@ public:
         row.insert(row.end(), est, est + 3);
         row.insert(row.end(), gt, gt + 3);
         row.insert(row.end(), lo, lo + 4);
+        if (z_dim_) {
+            for (int i = 0; i < z_dim_; ++i) row.push_back(z ? z[i] : 0.0f);
+            row.push_back(z_valid ? 1.0f : 0.0f);
+            row.push_back((float)z_clipped);
+        }
         rows_.push_back(std::move(row));
         if (rows_.size() >= FLUSH_ROWS) flush();
     }
@@ -115,6 +132,7 @@ private:
     bool enabled_{false};
     std::string path_;
     int goal_dim_{0};
+    int z_dim_{0};
     int entry_{-1};  // pre-incremented in init() -> first entry logs as 0
     std::vector<std::vector<float>> rows_;
 };

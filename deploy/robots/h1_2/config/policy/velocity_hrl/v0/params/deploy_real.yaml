@@ -44,6 +44,13 @@ hrl:
   goal_components: [velocity, orientation, height]
   nominal_root_height: 1.3076
   hl_obs_vel: true
+  # WP5d (H-adapt): the HL additionally reads z_hat = phi(history) from
+  # exported/adapt_encoder.onnx, replacing the privileged env latent `e` that only exists
+  # in sim. FALSE / absent = the pre-WP5d path, byte-identical (no third ONNX session, no
+  # history buffer). Everything else about phi -- history length, per-frame layout, latent
+  # width, scales, clamp bounds, cold-start prior -- is baked into adapt_encoder.onnx and
+  # is deliberately NOT settable here: those are POLICY properties, same rule as goal_scale.
+  hl_obs_e: false
   hl_velocity_goals_only: true
   hl_cadence: true
   hl_cadence_source: hl

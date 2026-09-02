@@ -1,0 +1,113 @@
+{
+ "control_dt": 0.001,
+ "joints": [
+  {
+   "slot": 0,
+   "hw_id": 0,
+   "name": "left_hip_yaw",
+   "min": -0.43,
+   "max": 0.43,
+   "tau_trip": 230,
+   "dq_trip": 10
+  },
+  {
+   "slot": 1,
+   "hw_id": 1,
+   "name": "left_hip_pitch",
+   "min": -3.14,
+   "max": 2.5,
+   "tau_trip": 200,
+   "dq_trip": 9.5
+  },
+  {
+   "slot": 2,
+   "hw_id": 2,
+   "name": "left_hip_roll",
+   "min": -0.43,
+   "max": 3.14,
+   "tau_trip": 265,
+   "dq_trip": 11
+  },
+  {
+   "slot": 3,
+   "hw_id": 3,
+   "name": "left_knee",
+   "min": -0.12,
+   "max": 2.19,
+   "tau_trip": 385,
+   "dq_trip": 21
+  },
+  {
+   "slot": 4,
+   "hw_id": 4,
+   "name": "left_ankle_pitch",
+   "min": -0.8973,
+   "max": 0.5236,
+   "tau_trip": 125,
+   "dq_trip": 28
+  },
+  {
+   "slot": 5,
+   "hw_id": 5,
+   "name": "left_ankle_roll",
+   "min": -0.2618,
+   "max": 0.2618,
+   "tau_trip": 45,
+   "dq_trip": 27
+  },
+  {
+   "slot": 6,
+   "hw_id": 6,
+   "name": "right_hip_yaw",
+   "min": -0.43,
+   "max": 0.43,
+   "tau_trip": 230,
+   "dq_trip": 10
+  },
+  {
+   "slot": 7,
+   "hw_id": 7,
+   "name": "right_hip_pitch",
+   "min": -3.14,
+   "max": 2.5,
+   "tau_trip": 200,
+   "dq_trip": 9.5
+  },
+  {
+   "slot": 8,
+   "hw_id": 8,
+   "name": "right_hip_roll",
+   "min": -3.14,
+   "max": 0.43,
+   "tau_trip": 265,
+   "dq_trip": 11
+  },
+  {
+   "slot": 9,
+   "hw_id": 9,
+   "name": "right_knee",
+   "min": -0.12,
+   "max": 2.19,
+   "tau_trip": 385,
+   "dq_trip": 21
+  },
+  {
+   "slot": 10,
+   "hw_id": 10,
+   "name": "right_ankle_pitch",
+   "min": -0.8973,
+   "max": 0.5236,
+   "tau_trip": 125,
+   "dq_trip": 28
+  },
+  {
+   "slot": 11,
+   "hw_id": 11,
+   "name": "right_ankle_roll",
+   "min": -0.2618,
+   "max": 0.2618,
+   "tau_trip": 45,
+   "dq_trip": 27
+  }
+ ]
+}

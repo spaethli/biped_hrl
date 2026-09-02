@@ -108,7 +108,7 @@ goal decode, reward-term direction/gating, the warm-start column map, deploy/tra
 config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
 change to those. New tests must be proven able to fail:
 `python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
-it is caught (160 tests as of 2026-09-01, 37/37 mutations). A test that restates the logic it guards cannot
+it is caught (185 tests as of 2026-09-02, 85/85 mutations). A test that restates the logic it guards cannot
 fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
 
 **Deploy readiness (2026-08-04): one command, one verdict.**
@@ -237,6 +237,25 @@ analysis and the proposed change first.
   rule: a coefficient is calibrated against a REWARD, not a task; reformulating a reward term
   reverts every weight tuned against it, and every sweep that ruled out neighbours, to
   unvalidated.
+- **The deploy obs-dim contract is FAIL-CLOSED for the HRL state (WP5d, 2026-09-02).**
+  `algorithms.h:81` still sizes the ORT input tensor from the ONNX declared shape and never
+  compares it to the vector that was built (a mismatch reads adjacent HEAP -> erratic actions
+  -> safety hold -> **limp robot**), but `State_RLHRL` now checks all three sessions: a
+  **load-time throw**, plus a per-call guard that **latches `dim_fault_` -> Passive**.
+  ⚠ The runtime layer must NEVER throw — the policy thread is a bare `std::thread` with no
+  handler, so an escaping exception is `std::terminate`: the process dies, `lowcmd` stops
+  publishing, and the robot is left to the DDS timeout, i.e. fail-**dark**. Throwing is
+  correct only at load. **A0 (`State_RLBase`) is still unchecked.** The optional third
+  session (`hrl.hl_obs_e` -> `adapt_encoder.onnx`, H-adapt's `phi`) takes the HL input
+  94 -> 99; `phi` consumes `obs["policy"] ++ obs["command"]` = **92 floats** over a 50-frame,
+  control-rate, oldest-first window. ⚠ **The A0 flat observation is the SAME 92 floats with
+  `command` mid-vector at cols 6:9** — no length check separates the permutations, so the
+  layout travels as baked ONNX metadata (`phi_input_layout`) and is compared literally.
+  Absent flag = byte-identical. Everything about `phi` (H, layout, `z` scale/bounds/cold-start
+  prior) is baked into the ONNX, never the yaml — same rule as `goal_scale`.
+  ⚠ **A zero vector is not a nominal latent**: payload/CoM read as deltas but friction reads
+  as an ABSOLUTE coefficient (support 0.3–1.6), so a zero fill is a frictionless floor.
+  Details -> `doc/hrl/A1a_deploy_plan.md` "WP5d".
 - **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
   derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid.
   Replays need the constants the checkpoint trained with (env-side scales).

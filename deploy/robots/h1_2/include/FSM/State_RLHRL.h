@@ -14,6 +14,7 @@
 #include "hrl/base_state.h"
 #include "hrl/base_estimators.h"
 #include "hrl/goal_space.h"
+#include "hrl/adapt_encoder.h"
 #include "hrl/hrl_telemetry.h"
 
 #include <unitree/dds_wrapper/robots/go2/go2.h>  // go2::subscription::SportModeState
@@ -98,8 +99,34 @@ public:
 
         // Deploy-gate telemetry (W3); same output base as the flight recorder.
         if (const char* sp = std::getenv("H1_2_SAFETY_LOG"))
-            telemetry_.init(sp, goal_space_->dim());
+            telemetry_.init(sp, goal_space_->dim(), hl_obs_e_ ? enc_meta_.z_dim : 0);
         last_action_.clear();
+
+        // WP5d cold start. The history is dropped on every entry (see HistoryBuffer::reset)
+        // and phi does not run until it has refilled, so for the first H control steps
+        // (1.0 s at H=50) the HL reads the baked prior z_cold instead of an estimate that
+        // does not exist yet. Safe, for reasons that are properties of THIS hierarchy:
+        //   * the latent's only actuated channel is the commanded stride period, and that
+        //     period is near-BINARY in the command (0.905 s at cmd 0 vs ~0.37 s walking).
+        //     The buffer fills while the operator's stick is at zero -- the regime where the
+        //     latent has almost no authority -- so a wrong z there buys a wrong STANDING
+        //     cadence, which is the case that matters least.
+        //   * the switch to the real estimate is phase-CONTINUOUS by construction: the gait
+        //     clock integrates global_phase += dt/period, so writing a new period changes the
+        //     rate and never the phase. A step in z_hat therefore cannot break a stride. That
+        //     is also why this holds-then-switches rather than ramping: a ramp buys nothing
+        //     here and adds a second, undeclared time constant.
+        //   * z_cold is the training-distribution prior, so the HL is never evaluated off
+        //     its support during the fill. Zero-padding the window and running phi anyway
+        //     would instead feed phi an input shape it never saw in training, whose output
+        //     is unknowable in advance -- the confidently-wrong estimate this design is
+        //     trying to avoid.
+        // Not silenced: policy_step() warns if a non-zero command arrives while !z_valid_.
+        hist_.reset();
+        z_valid_ = false;
+        z_clip_events_ = 0;
+        z_cold_cmd_warned_ = false;
+        if (hl_obs_e_) z_hat_ = enc_meta_.cold;
 
         // [2026-08-05] Liveness gate on the SportModeState path. The construction check in
         // State_RLHRL.cpp refuses a real-robot CONFIG that omits the estimator keys; this
@@ -197,6 +224,9 @@ private:
     std::unique_ptr<isaaclab::ManagerBasedRLEnv> env;
     std::unique_ptr<isaaclab::OrtRunner> hl_runner_;  // high_level.onnx: policy++command -> g
     std::unique_ptr<isaaclab::OrtRunner> ll_runner_;  // low_level.onnx:  policy++delta   -> action
+    // adapt_encoder.onnx: H x D history -> z_hat. Present only under hrl.hl_obs_e (WP5d);
+    // absent flag => never constructed and the HL input is byte-identical to pre-WP5d.
+    std::unique_ptr<isaaclab::OrtRunner> enc_runner_;
     std::unique_ptr<hrl::GoalSpace> goal_space_;
     std::shared_ptr<unitree::robot::go2::subscription::SportModeState> highstate_;
 
@@ -206,6 +236,11 @@ private:
     // Keeper-structure knobs (deploy.yaml `hrl:` block; absent key = old behavior, so
     // pre-velgoal 7-dim checkpoints run unchanged). Mirror config/h1_2_a1/rl_cfg.py names.
     bool hl_obs_vel_{false};   // HL input = policy ++ command ++ (vx,vy estimate)
+    // hl_obs_e (WP5d): HL input additionally carries the estimated env latent z_hat, so the
+    // HL trained in WP5 Phase 1 against the privileged `e` has something to read on hardware.
+    // Mirrors hl_obs_vel_ exactly -- absent key = false = the pre-WP5d path, byte-identical
+    // (no third session loaded, no history pushed, no extra branch in the fire path).
+    bool hl_obs_e_{false};
     bool velgoal_{false};      // hl_velocity_goals_only: HL emits the velocity goal cols only
     int cadence_dim_{0};       // 1 = HL owns the stride period (hl_cadence, source=hl, learned)
     float period_lo_{0.35f}, period_hi_{1.0f};  // cadence_period_range (tanh affine map)
@@ -226,6 +261,50 @@ private:
     // H1_2_SAFETY_LOG is set (independent of SAFETY_FILTER). Flushed in exit().
     hrl::Telemetry telemetry_;
     std::vector<float> last_action_;  // for the logged action-rate scalar
+
+    // --- WP5d: H-adapt latent path (policy thread only; no lock, see HistoryBuffer) -----
+    hrl::AdaptEncoderMeta enc_meta_;   // phi's baked contract (geometry + scales + bounds)
+    hrl::HistoryBuffer hist_;          // last H frames of (policy ++ command)
+    std::vector<float> hist_win_;      // scratch for the flattened [1,H,D] window
+    std::vector<float> z_hat_;         // what the HL reads: z_cold, then phi's clamped output
+    bool z_valid_{false};              // false while the buffer is still filling
+    long z_clip_events_{0};            // clamp bites, reported from exit()
+    int z_clipped_last_{0};            // components clamped at the last fire (telemetry)
+    bool z_cold_cmd_warned_{false};    // one warning per entry, not one per step
+
+    // --- FAIL-CLOSED INPUT-LENGTH CONTRACT (WP5d) --------------------------------------
+    // isaaclab/algorithms/algorithms.h sizes the ORT input tensor from the ONNX DECLARED
+    // SHAPE and never compares it against the vector the observation manager actually built,
+    // so a short vector is read past its end -- adjacent heap memory enters as observations.
+    // Downstream that is erratic actions -> the safety filter's tilt/fall hold ramps alpha->1
+    // -> commanded position = measured position -> PD error 0 -> damping-only torque, i.e.
+    // the robot goes LIMP, with a symptom that points at actuation and a cause ~100 floats
+    // upstream. That shared header stays unmodified (it is upstream's, and OrtRunner keeps
+    // input_sizes private), so the check lives here, in two layers:
+    //   Layer 1, ensure_models_loaded(): every session's declared input dim vs the length
+    //     this state will build, THROWN before the policy thread exists. Complete, because
+    //     all three lengths are structurally fixed once config + ONNX are known.
+    //   Layer 2, right before each act(): built.size() == expected, else LATCH and bounce to
+    //     Passive. It must not throw -- the policy thread is a bare std::thread with no
+    //     handler, so an escaping exception is std::terminate: the process dies, lowcmd stops
+    //     publishing and the robot is left to the DDS timeout. That is fail-DARK. Throwing is
+    //     correct only at load, where nothing has started; at run time the fail-closed action
+    //     is the latched bounce that base_state_dead_ already implements.
+    int64_t hl_in_dim_{0}, ll_in_dim_{0}, enc_in_dim_{0};
+    bool dim_fault_{false};            // latched by policy_step(); registered check -> Passive
+    bool check_input(const char* who, size_t built, int64_t want)
+    {
+        if ((int64_t)built == want) return true;
+        if (!dim_fault_) {
+            dim_fault_ = true;
+            spdlog::critical("[HRL] REFUSING TO COMMAND: built a {}-float input for {} but "
+                             "its ONNX declares {}. ONNX would read {} floats of ADJACENT "
+                             "HEAP as observations; the robot would go limp via the safety "
+                             "hold rather than error. Bouncing to Passive.",
+                             built, who, want, want - (int64_t)built);
+        }
+        return false;
+    }
 
     // Cached for the SafetyLogger CSV (2026-07-21, WL-B0): computed in policy_step() at
     // step_dt cadence, read by run() at the 1kHz control loop, same split as last_action_.
@@ -297,6 +376,15 @@ private:
     // Two clock reads and an increment per tick, reported once from exit().
     static constexpr int kBudgetBuckets = 41;     // 25 us each to 1 ms, last = overrun
     unsigned long work_hist_[kBudgetBuckets] = {0};
+    // [WP5d] The three histograms above/below all bucket inside run(). policy_step() -- the
+    // 50 Hz thread that actually runs the networks -- was entirely UNINSTRUMENTED, so
+    // reporting phi against the existing budget would report it against the wrong loop.
+    // These two close that blind spot: phi's own inference (fires only every c steps) and
+    // the whole policy step, both against a 20 ms budget. Same bucket()/pct() machinery.
+    unsigned long phi_hist_[kBudgetBuckets] = {0};
+    unsigned long step_hist_[kBudgetBuckets] = {0};
+    unsigned long phi_count_{0}, step_count_{0};
+    double phi_max_us_{0.0}, step_max_us_{0.0};
     unsigned long period_hist_[kBudgetBuckets] = {0};
     unsigned long est_hist_[kBudgetBuckets] = {0};
     unsigned long tick_count_{0}, overrun_count_{0};
@@ -304,26 +392,32 @@ private:
     std::chrono::steady_clock::time_point last_tick_{};
     bool have_last_tick_{false};
 
-    static void bucket(unsigned long* h, double us)
+    // `w` is the bucket width in us. Defaults to the original 25 us (41 buckets -> 1 ms),
+    // which is the right resolution for the 1 kHz loop; the 50 Hz policy step passes a
+    // coarser width so its 20 ms budget fits the same 41 buckets. Callers must pass the
+    // SAME width to bucket() and pct() for one histogram.
+    static void bucket(unsigned long* h, double us, double w = 25.0)
     {
-        int i = (int)(us / 25.0);
+        int i = (int)(us / w);
         if (i < 0) i = 0;
         if (i >= kBudgetBuckets) i = kBudgetBuckets - 1;
         h[i]++;
     }
-    static double pct(const unsigned long* h, unsigned long n, double q)
+    static double pct(const unsigned long* h, unsigned long n, double q, double w = 25.0)
     {
         if (!n) return 0.0;
         unsigned long want = (unsigned long)(q * n), acc = 0;
         for (int i = 0; i < kBudgetBuckets; ++i) {
             acc += h[i];
-            if (acc >= want) return (i + 1) * 25.0;   // upper edge of the bucket
+            if (acc >= want) return (i + 1) * w;   // upper edge of the bucket
         }
-        return kBudgetBuckets * 25.0;
+        return kBudgetBuckets * w;
     }
+    static constexpr double kStepBucketUs = 500.0;  // 41 x 500 us = 20.5 ms, the step budget
     void report_loop_budget()
     {
-        if (!tick_count_) return;
+        if (!tick_count_ && !step_count_) return;
+        if (tick_count_)
         spdlog::info("[T5] run() ticks={} | work p50<={:.0f}us p99<={:.0f}us max={:.1f}us "
                      "| estimator p50<={:.0f}us p99<={:.0f}us max={:.1f}us "
                      "| period p50<={:.0f}us p99<={:.0f}us | overruns(>800us)={} ({:.3f}%)",
@@ -335,6 +429,19 @@ private:
                      pct(period_hist_, tick_count_, 0.50), pct(period_hist_, tick_count_, 0.99),
                      overrun_count_,
                      100.0 * (double)overrun_count_ / (double)tick_count_);
+        // [WP5d] the 50 Hz policy thread, which run()'s counters never covered.
+        if (step_count_)
+            spdlog::info("[WP5d] policy_step() n={} | step p50<={:.0f}us p99<={:.0f}us "
+                         "max={:.1f}us (budget {:.0f}us)",
+                         step_count_,
+                         pct(step_hist_, step_count_, 0.50, kStepBucketUs),
+                         pct(step_hist_, step_count_, 0.99, kStepBucketUs),
+                         step_max_us_, 1e6 * env->step_dt);
+        if (phi_count_)
+            spdlog::info("[WP5d] phi n={} fires | p50<={:.0f}us p99<={:.0f}us max={:.1f}us "
+                         "| z_hat clamp bites={}",
+                         phi_count_, pct(phi_hist_, phi_count_, 0.50),
+                         pct(phi_hist_, phi_count_, 0.99), phi_max_us_, z_clip_events_);
     }
 #if SAFETY_FILTER
     // run()-thread only: the snapshot the estimator block above just read, held so the

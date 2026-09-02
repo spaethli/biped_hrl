@@ -418,14 +418,27 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     """Load a converged A1 LL (actor+critic, full) and freeze it.
 
     Unlike ``_warm_start_low_level`` (A0->A1 gap-aware partial copy), the source is an
-    A1 LL with the same goal space as this run, so it's a plain strict load — a shape
-    mismatch (wrong goal space) raises here, loudly. The LL then acts as a fixed
-    deterministic policy; only the HL learns (see :meth:`learn`)."""
+    A1 LL with the same goal space as this run, so the ACTOR is a plain strict load — a
+    shape mismatch (wrong goal space) raises here, loudly. The LL then acts as a fixed
+    deterministic policy; only the HL learns (see :meth:`learn`).
+
+    The CRITIC is best-effort. When the LL is frozen it is never evaluated and never
+    updated (:meth:`learn` guards ``process_env_step``/``compute_returns``/``update`` on
+    ``not self.freeze_ll``), so a critic-shape mismatch must not block the run. WP2's
+    privileged ``env_latent_e`` term widened the critic obs group (114 -> 119 on h1_2),
+    which every pre-WP2 A1 checkpoint predates — including the LLs WP5 Phase 1 freezes."""
     ck = torch.load(path, map_location=self.device, weights_only=False)
     actor = getattr(self.alg, "_raw_actor", self.alg.actor)
     critic = getattr(self.alg, "_raw_critic", self.alg.critic)
     actor.load_state_dict(ck["actor_state_dict"], strict=True)
-    critic.load_state_dict(ck["critic_state_dict"], strict=True)
+    try:
+      critic.load_state_dict(ck["critic_state_dict"], strict=True)
+    except RuntimeError:
+      print("[HRL] WARNING: LL critic NOT loaded (shape mismatch vs this env's critic obs "
+            "group, e.g. a pre-WP2 checkpoint under the privileged env_latent_e term). "
+            "Harmless while the LL is frozen — the critic is never read — but a checkpoint "
+            "saved by THIS run carries an UNTRAINED LL critic and must not be resumed as "
+            "an unfrozen run.")
     print(f"[HRL] Loaded + FROZE LL from A1 checkpoint: {path} (LL will not learn).")
 
   @staticmethod
@@ -964,6 +977,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           # happened in the rollout.
           if self.hl_obs_vel:
             obs["hl_vel"] = self._hl_vel(uenv, achieved + noise_off, fire=False)
+          if self.hl_obs_e:
+            obs["hl_e"] = env_latent_e(uenv, self._e_torso_cfg, self._e_foot_cfg)  
 
           if not self.freeze_ll:
             self.alg.process_env_step(obs, r_lo, dones, extras)
@@ -1136,6 +1151,89 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     print(f"[HRL] Exported high_level.onnx (hl_algorithm={self.hl_algorithm}, "
           f"hl_target_mode={self.hl_target_mode}, goal_dim={self.goal_dim})")
 
+  @staticmethod
+  def export_adapt_encoder_onnx(
+    module,
+    onnx_path: str,
+    *,
+    history_len: int,
+    input_dim: int,
+    z_names: tuple[str, ...],
+    z_clip_lo: list[float],
+    z_clip_hi: list[float],
+    z_cold: list[float],
+    policy_dim: int,
+    command_dim: int,
+    z_scale: list[float] | None = None,
+    z_center: list[float] | None = None,
+  ) -> None:
+    """Export WP5d's adaptation module phi and bake its whole contract into the ONNX.
+
+    ``module`` maps a ``[1, history_len, input_dim]`` float tensor to ``[1, len(z_names)]``.
+    The deploy (``State_RLHRL::ensure_models_loaded``) reads every key below and REFUSES to
+    run if any is missing or inconsistent, so this function is the single writer of the
+    contract -- the WP5d dummy encoder and WP5 Phase 2's real one go through it, which is
+    what makes testing against the dummy meaningful.
+
+    Why none of this lives in ``deploy.yaml``: these are POLICY properties, not env
+    properties. ``z_scale``/``z_center`` define what ``z_hat`` MEANS to the HL, exactly as
+    ``goal_scale`` defines what ``g`` means, and re-deriving a policy quantity at inference
+    from an operator-editable file is the bug class that produced a whole family of phantom
+    eval results (CLAUDE.md, WL-C). The deploy yaml gets one boolean and nothing else.
+    """
+    n = len(z_names)
+    if not (len(z_clip_lo) == len(z_clip_hi) == len(z_cold) == n):
+      raise ValueError(f"z bounds/cold must each carry {n} entries (z_names)")
+    if input_dim != policy_dim + command_dim:
+      raise ValueError(
+        f"phi input_dim {input_dim} != policy({policy_dim}) + command({command_dim}): phi's "
+        "per-step vector is obs['policy'] ++ obs['command'], the first columns of the HL's "
+        "own input vector"
+      )
+    for i, (lo, hi, c) in enumerate(zip(z_clip_lo, z_clip_hi, z_cold)):
+      if not lo <= c <= hi:
+        raise ValueError(
+          f"z_cold[{i}]={c} outside [{lo}, {hi}]: the cold-start prior the HL holds while "
+          "the history fills must itself lie in the training support"
+        )
+    # ``attach_metadata_to_onnx`` serialises float lists at THREE decimals. That is fine for
+    # physical-unit bounds (payload 12.000, friction 0.300) but silently annihilates a small
+    # normalisation scale: 0.0004 would be written "0.000" and the latent channel would go
+    # dead on the robot while every dimension check still passed. Refuse rather than truncate.
+    _scale = list(z_scale if z_scale is not None else [1.0] * n)
+    for i, v in enumerate(_scale):
+      if v != 0.0 and round(v, 3) == 0.0:
+        raise ValueError(
+          f"z_scale[{i}]={v} rounds to 0.000 at the metadata's 3-decimal precision, which "
+          "would silently mute that latent component on deploy. Rescale phi's output so its "
+          "scale is representable, e.g. have phi emit raw physical units (scale 1)."
+        )
+    module = module.to("cpu").eval()
+    os.makedirs(os.path.dirname(onnx_path) or ".", exist_ok=True)
+    torch.onnx.export(
+      module, (torch.zeros(1, history_len, input_dim),), onnx_path, export_params=True,
+      opset_version=18, verbose=False, input_names=["obs"], output_names=["z"],
+      dynamic_axes={}, dynamo=False,
+    )
+    attach_metadata_to_onnx(onnx_path, {
+      "phi_history_len": float(history_len),
+      "phi_input_dim": float(input_dim),
+      # The ONLY thing that distinguishes the A1 HL column order (command LAST) from the A0
+      # flat one (command mid-vector at cols 6:9). Both are the same LENGTH, so no dimension
+      # check can separate them -- hence a string the deploy compares literally.
+      "phi_input_layout": f"policy{policy_dim}+command{command_dim}",
+      # A reversed time axis is a perfectly valid tensor of the right size that returns
+      # garbage. Deploy flattens row-major [1, H, D] with index 0 = OLDEST frame.
+      "phi_time_order": "oldest_first",
+      "z_dim": float(n),
+      "z_names": ",".join(z_names),
+      "z_scale": _scale,
+      "z_center": list(z_center if z_center is not None else [0.0] * n),
+      "z_clip_lo": list(z_clip_lo),
+      "z_clip_hi": list(z_clip_hi),
+      "z_cold": list(z_cold),
+    })
+
   def _attach_hrl_metadata(self, onnx_path: str) -> None:
     """Base export metadata (joint names/gains/scale + observation_names from the current
     ``actor`` alias) plus the HRL structure fields the deploy reads."""
@@ -1165,6 +1263,14 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Deploy must know the HL output layout: velocity-only HL emits task_dim(+period)
     # values and C++ fills orientation/height targets with their nominals.
     metadata["hl_velocity_goals_only"] = self.hl_velocity_goals_only
+    # WP5d: whether this HL was TRAINED to read the env latent, and how wide it is. The
+    # deploy compares these against its `hrl.hl_obs_e` yaml flag and against
+    # adapt_encoder.onnx's z_dim, so a yaml that disagrees with the checkpoint -- or an HL
+    # and a phi from different runs -- throws at load instead of being trusted. Written as
+    # 1.0/0.0, NOT True/False: the C++ side parses metadata numerically (std::stof), so a
+    # Python bool would serialise to "True" and throw in the reader.
+    metadata["hl_obs_e"] = 1.0 if self.hl_obs_e else 0.0
+    metadata["hl_e_dim"] = self._hl_e_dim
     if self.hl_cadence:
       # S1c: deploy must map the HL's extra tanh dim -> stride period over this range
       # (source='hl'), or run the fixed/mid-range clock (source='random').

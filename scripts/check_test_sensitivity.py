@@ -35,6 +35,11 @@ REAL_YML = REPO / "deploy/robots/h1_2/config/policy/velocity_hrl/v0/params/deplo
 DGA = REPO / "scripts/deploy_gate_analyzer.py"
 PRV = REPO / "scripts/deploy_provenance.py"
 BSN = REPO / "scripts/bridge_session.py"
+PPS = REPO / "scripts/period_payload_stats.py"
+BFR = REPO / "scripts/bench_flight_recorder.py"
+SJH = REPO / "scripts/score_joint_hold.py"
+HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
+ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -364,6 +369,160 @@ MUTATIONS = [
    "obs[\"policy\"].shape[-1] + obs[\"command\"].shape[-1] + obs_vel_dim + obs_e_dim",
    "obs[\"policy\"].shape[-1] + obs[\"command\"].shape[-1] + obs_vel_dim",
    "test_obs_e_dim_appends_hl_e_and_changes_state_dim"),
+
+  # WP5 (2026-08-31): freezing an LL under WP2's widened critic obs group. The fix is
+  # narrow and has an over-fix on BOTH sides -- reverting it blocks Phase 1 entirely,
+  # while skipping the ACTOR silently freezes a random LL that still trains and scores.
+  ("frozen-LL critic load back to strict (blocks WP5 Phase 1 on any pre-WP2 checkpoint)", HR,
+   '    try:\n      critic.load_state_dict(ck["critic_state_dict"], strict=True)\n    except RuntimeError:',
+   '    if True:\n      critic.load_state_dict(ck["critic_state_dict"], strict=True)\n    if False:',
+   "test_frozen_ll_loads_actor_even_when_critic_obs_widened"),
+
+  ("frozen-LL ACTOR load skipped -- freezes a randomly-initialised LL, silently", HR,
+   '    actor.load_state_dict(ck["actor_state_dict"], strict=True)',
+   '    pass  # MUTATION: actor never loaded',
+   "test_frozen_ll_still_raises_on_actor_mismatch"),
+
+  ("frozen-LL critic blanket-skipped even when shapes agree (over-fix)", HR,
+   '      critic.load_state_dict(ck["critic_state_dict"], strict=True)',
+   '      pass  # MUTATION: critic never loaded',
+   "test_frozen_ll_loads_critic_when_shapes_agree"),
+
+  # bench_flight_recorder (2026-09-01): scoring a hardware flight recorder into the sim
+  # [BENCH] schema. Each defect below either silently changes what a key MEANS while it
+  # keeps a sim name, or breaks the rate/alignment every derived number rests on.
+  ("commanded span back to min..max (one transient excursion read as authority)", BFR,
+   "        p1, p50, p99 = np.percentile(x, [1, 50, 99])",
+   "        p1, p50, p99 = x.min(), np.median(x), x.max()",
+   "test_ankle_roll_span_reproduces_adr_0009"),
+
+  ("headroom measured to the FARTHER bound (inverts the clip-vs-penalty verdict)", BFR,
+   '"headroom": round(float(min(j["max"] - p99, p1 - j["min"])), 4),',
+   '"headroom": round(float(max(j["max"] - p99, p1 - j["min"])), 4),',
+   "test_headroom_is_distance_to_the_nearer_bound"),
+
+  ("pinned_any becomes a per-joint MEAN (~3x smaller, reads as a different robot)", BFR,
+   "    return float((((np.abs(x - lo) < 1e-9) | (np.abs(x - hi) < 1e-9)).any(axis=1)).mean())",
+   "    return float((((np.abs(x - lo) < 1e-9) | (np.abs(x - hi) < 1e-9))).mean())",
+   "test_pinned_any_leg_is_a_union_not_a_mean"),
+
+  ("regime gate back to a 3-vector norm (pure-yaw walking misread as standing)", BFR,
+   "    total_command = np.linalg.norm(cmd[:, :2], axis=1) + np.abs(cmd[:, 2])",
+   "    total_command = np.linalg.norm(cmd, axis=1)",
+   "test_regime_gate_matches_the_reward_command_threshold"),
+
+  ("regime gate back to score_joint_hold's 1e-6 stillness gate (a different question)", BFR,
+   "CMD_THRESHOLD = 0.1 ", "CMD_THRESHOLD = 1e-6 ",
+   "test_regime_gate_matches_the_reward_command_threshold"),
+
+  ("alignment drops the clock-RATE term (constant offset: 40 steps off over 308 s)", BFR,
+   "        m, b = np.polyfit(ts[keep], ls[keep], 1, w=cs[keep])",
+   "        m, b = 0.0, float(np.average(ls[keep], weights=cs[keep]))",
+   "test_affine_alignment_recovers_an_injected_clock_skew"),
+
+  ("policy-step decode back to a fixed row stride (a stride of 20 spans TWO steps)", SJH,
+   "    changed = np.any(np.diff(raw, axis=0) != 0.0, axis=1)\n    idx = np.flatnonzero(np.concatenate(([True], changed)))",
+   "    idx = np.arange(0, len(raw), 10)",
+   "test_policy_step_decode_tracks_changes_not_a_row_count"),
+
+  ("a BENCH key silently dropped from the partition (neither emitted nor documented)", BFR,
+   '    "height_dev": "body_height is in the dead sportmodestate block (identically zero)",\n',
+   "",
+   "test_every_bench_key_is_emitted_renamed_or_documented_as_omitted"),
+
+
+  # WP5 (2026-09-01): the Bar B statistic itself. None of these crash -- each returns a
+  # plausible number and the thesis verdict is read off it.
+  ("Bar B pools by WINDOW not by ENV (inflates n ~150x, shrinks every interval)", PPS,
+   '    "period_sd_env": round(Te.std(unbiased=True).item(), 5),',
+   '    "period_sd_env": round(per_w[keep_w].std(unbiased=True).item(), 5),',
+   "test_aggregation_unit_is_the_env_not_the_window"),
+
+  ("Bar B ignores the keep mask (reset-contaminated windows enter the per-env mean)", PPS,
+   "  kf = keep_w.float()",
+   "  kf = torch.ones_like(keep_w, dtype=torch.float)",
+   "test_keep_mask_excludes_contaminated_windows"),
+
+  ("Bar B reports r=0.0 instead of NaN when a regressor has no variance", PPS,
+   '    return float("nan") if d < 1e-12 else round((xc @ yc).item() / d, 4)',
+   '    return 0.0 if d < 1e-12 else round((xc @ yc).item() / d, 4)',
+   "test_no_payload_variance_gives_nan_not_zero"),
+
+  ("Bar B mis-slices e: com_dz reads the friction column, so the partial regression "
+   "attributes the HL's response to the wrong physical cause", PPS,
+   '                "com_dz": [round(v, 5) for v in com[ok, 2].tolist()]},',
+   '                "com_dz": [round(v, 5) for v in fric[ok].tolist()]},',
+   "test_per_env_com_columns_carry_the_right_latent_slots"),
+
+  ("Bar B leaves the CoM columns UNMASKED, so per-env rows de-align from payload/period "
+   "and every partial regression silently pairs the wrong envs", PPS,
+   '                "com_dx": [round(v, 5) for v in com[ok, 0].tolist()],',
+   '                "com_dx": [round(v, 5) for v in com[:, 0].tolist()],',
+   "test_per_env_com_columns_carry_the_right_latent_slots"),
+
+  # --- WP5d: H-adapt's deploy path (2026-09-02) --------------------------------------
+  # phi's contract crosses two languages with no runtime error if the two sides disagree:
+  # algorithms.h sizes the ORT input from the ONNX shape and never compares it against the
+  # vector that was built, so a mismatch reads adjacent HEAP and the robot goes limp via the
+  # safety hold. Each mutation below is one way that agreement can silently rot.
+
+  ("a duplicate hl_obs_e appended below the hrl: block (yaml-cpp keeps the FIRST)", YML,
+   "  hl_obs_e: false", "  hl_obs_e: false\nhl_obs_e: true",
+   "test_hl_obs_e_appears_exactly_once"),
+
+  ("hl_obs_e ships ON by default (a pre-WP5d checkpoint would then refuse to load)", YML,
+   "  hl_obs_e: false", "  hl_obs_e: true",
+   "test_hl_obs_e_is_inside_the_hrl_block_and_defaults_off"),
+
+  ("phi's layout string swaps the policy/command widths", HR,
+   'f"policy{policy_dim}+command{command_dim}"', 'f"policy{command_dim}+command{policy_dim}"',
+   "test_phi_frame_is_the_deploy_policy_and_command_widths"),
+
+  ("E_NAMES drifts from the order env_latent_e concatenates", OBS,
+   'E_NAMES = ("payload_kg", "com_dx", "com_dy", "com_dz", "friction")',
+   'E_NAMES = ("payload_kg", "friction", "com_dx", "com_dy", "com_dz")',
+   "test_e_names_match_the_latent_the_env_actually_builds"),
+
+  ("the exporter stops writing a key the deploy loader reads (z_cold)", HR,
+   '      "z_cold": list(z_cold),\n', "",
+   "test_export_writes_every_metadata_key_the_deploy_reads"),
+
+  ("the cold-start prior is no longer checked against the clamp (friction 0 = frictionless)", HR,
+   "      if not lo <= c <= hi:", "      if False:",
+   "test_export_refuses_a_cold_start_prior_outside_the_clamp"),
+
+  ("phi's input width is no longer tied to policy+command", HR,
+   "    if input_dim != policy_dim + command_dim:", "    if False:",
+   "test_export_refuses_an_input_dim_that_is_not_policy_plus_command"),
+
+  ("a normalisation scale that rounds to 0.000 is written anyway (mutes the channel)", HR,
+   "      if v != 0.0 and round(v, 3) == 0.0:", "      if False:",
+   "test_export_refuses_a_scale_that_the_metadata_cannot_represent"),
+
+  ("z bounds no longer have to cover every latent component", HR,
+   "    if not (len(z_clip_lo) == len(z_clip_hi) == len(z_cold) == n):", "    if False:",
+   "test_export_refuses_bounds_that_do_not_cover_every_component"),
+
+  ("the encoder session runs unguarded (heap read -> limp robot)", HRLC,
+   '                    if (!check_input("adapt_encoder.onnx", hist_win_.size(), enc_in_dim_))\n'
+   "                        return;\n", "",
+   "test_every_ort_session_is_length_checked_before_it_runs"),
+
+  ("the runtime dimension guard THROWS from the policy thread (std::terminate = fail-dark)", HRLH,
+   "        if (!dim_fault_) {\n            dim_fault_ = true;",
+   "        if (!dim_fault_) {\n            throw std::runtime_error(\"dim\");",
+   "test_the_runtime_guard_latches_instead_of_throwing"),
+
+  ("the load-time contract check degrades to a warning instead of refusing", HRLC,
+   "            throw std::runtime_error(\n"
+   '                "[HRL] adapt_encoder.onnx: " + bad',
+   '            spdlog::warn("[HRL] adapt_encoder.onnx: {}", bad); if (false) throw std::runtime_error(\n'
+   '                "[HRL] adapt_encoder.onnx: " + bad',
+   "test_the_load_time_contract_check_is_actually_called"),
+
+  ("phi runs on a partially filled history (an input shape it never saw in training)", ENCH,
+   "        if (!full()) return false;\n", "",
+   "test_window_refuses_a_partial_buffer"),
 ]
 
 

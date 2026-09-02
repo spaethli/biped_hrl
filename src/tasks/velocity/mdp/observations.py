@@ -59,6 +59,13 @@ def hrl_goal(env: ManagerBasedRlEnv, dim: int = 3) -> torch.Tensor:
   return goal
 
 
+# The latent's component ORDER, in one place. Consumed by the WP5d deploy export (it is
+# baked into adapt_encoder.onnx as `z_names` so a reordering between the estimator and the
+# HL fails loudly at load) and by the tests that pin the two sides together. Changing this
+# tuple without re-exporting both nets silently re-labels the latent.
+E_NAMES = ("payload_kg", "com_dx", "com_dy", "com_dz", "friction")
+
+
 def env_latent_e(
   env: ManagerBasedRlEnv,
   torso_cfg: SceneEntityCfg,
