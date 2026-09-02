@@ -479,3 +479,397 @@ unnecessary. Verification data →
 **Conclusion: the WP1b T\* directions stand on the v2 plant** — mech CoT shortens
 under load, copper CoT lengthens, both above the floor. The real robot's heavier
 legs remain a separate sim-to-real gap (WP0/WP7), not a WP1b confound.
+
+## WP5 — H-adapt: spec, pre-flight, and Bar A re-confirmation (2026-08-31/09-01)
+
+Thesis core. Governing plan: `thesis_plan_8weeks.md` §4 (RMA phase order, the 2x2) and
+WP5. Spec grilled and approved before any code, per CLAUDE.md. **Phase 1 not yet run** —
+this section records the spec, the pre-flight that changed it, and the Bar A
+re-confirmation. Exploratory narrative belongs in the KB, not here.
+
+### Agreed spec (decisions taken in the grilling session)
+
+| Item | Decision |
+|---|---|
+| Frozen LL | `2026-08-28_08-27-45_a1a_fullmirror_standing15_rs8_s42/model_10000.pt` (post-ADR-0009). **Never retrained.** |
+| Env | `Unitree-H1_2-Flat-A1-Payload`, `--agent.hl-obs-e True`, explicit `resampling_time_range (3.0, 8.0)` |
+| Latent | **No `mu`/`z`.** Raw `e ∈ ℝ⁵` into the TD3 state vector (WP2 plumbing). HL obs = 94+5 = **99** |
+| `hl_cot_coef` | **5** — see "coef selection" below. Binds **H-mem identically**, or the 2x2's interaction term is confounded |
+| Phase 2 | Fresh offline rollout of the frozen Phase-1 policy; raw obs stored ONCE in a ring buffer, H=50 windows by index (~300 MB, not 9 GB). phi input **92 dims/step** (89 proprio+past actions + 3 command) |
+| Held-out | **Split by ENV** (stratified over payload) **plus a separate fresh-run test**. `mode="startup"` DR fixes `e` per env for the whole run, so the env is the independent unit |
+| Bar B readout | `corr(commanded T, payload)` primary + **counterfactual-`e` sensitivity** to separate "module unused" (fatal) from "wrong readout" (survivable) |
+| Compute | Train on SLURM (`num_envs` 4096, 2 seeds, identical across all four arms); **score on one idle GPU** |
+
+### Blocking fix — `_load_frozen_ll` could not load ANY existing checkpoint
+
+WP2 added `env_latent_e` unconditionally to the `critic` obs group, taking h1_2's critic
+obs **114 → 119**. `_load_frozen_ll` strict-loaded the critic, so WP5 Phase 1 crashed
+before iteration 0 on every A1 checkpoint on disk. Fixed: the **actor** stays a strict
+load (a wrong-shape actor is a real goal-space error and must still raise); the
+**critic** is best-effort, because `learn()` guards `process_env_step`/`compute_returns`/
+`update` on `not self.freeze_ll` — a frozen LL never reads it. A checkpoint saved by a
+frozen-LL run therefore carries an UNTRAINED LL critic and must not be resumed unfrozen
+(warned at load). Tests: `tests/test_freeze_ll_load.py` (3), pinning the fix and **both**
+over-fixes — skipping the actor would silently freeze a randomly-initialised LL that
+still trains and scores healthily.
+
+⚠ **Generalisable:** WP2's inertness proof was thorough and could not have caught this,
+because it verified through `play.py`, which never strict-loads the critic. **An
+asymmetric actor-critic change is invisible on the eval path and fatal on the train path
+— it needs a train-side smoke.**
+
+### Pre-flight — the cadence is SATURATED at hl_cot_coef=0.2
+
+Bar B asks for `|r| ≥ 0.5` between commanded stride period and payload. Measured on the
+keeper (`--diagnose-goals 600`, 64 envs, 2 seeds, vx=0.5 pinned, 150 windows/env):
+
+| payload | mean T | **sigma_e** (sd of per-env mean) | within-env sd |
+|---|---|---|---|
+| 0 kg | 0.35255 | 0.00084 | 0.0202 |
+| 6 kg | 0.35275 | 0.00089 | 0.0218 |
+| 12 kg | 0.35292 | 0.00087 | 0.0228 |
+
+Commanded T is pinned at **0.3527** against a range floor of 0.35 (tanh ≈ **−0.992**),
+and moves **0.0004 s** across the full 0→12 kg sweep. ⚠ **That tiny `sigma_e` is an
+artifact of the clamp, not a property of the policy** — a clamped variable has no
+variance. At vx=0.2 the cadence comes off the bound (0.370) and `sigma_e` jumps **12x**
+to 0.0105. **0.0105 is the number to use for Bar B feasibility.**
+
+Cause, reconstructed from WP1b's grid at zero GPU cost: the HL objective is
+`R = sum_{k=1..8}[track_lin + track_ang] − hl_cot_coef·CoT`, and **tracking's span across
+T is 36–71x the CoT penalty's**, so the objective's optimum in T sits at the cadence
+floor for every payload. Giving the HL the latent cannot move T when the optimal T does
+not depend on payload.
+
+### Bar A re-confirmation on the frozen LL — direction NOT resolvable
+
+`T*(payload)` is a property of plant **x LL**, and Phase 1 freezes a different LL than
+WP1b measured. Re-run: same protocol (vx=0.5, T ∈ {0.40..0.70/0.05} x payload {0,4,8,12},
+R=8 independent processes, 1200 steps, 64 envs, one continuous uncontended run, drift
+probe every 12 cells). 224 rows, 83.6 min. Drift `cot` CV **0.34%** (inside WP1b's 0.43%
+floor); ⚠ `err_vx` rose monotonically **+1.8%** across the run.
+
+**The mech-CoT `T*` direction flips with the fit window:**
+
+| window | 0 kg | 4 kg | 8 kg | 12 kg | dT*/12kg |
+|---|---|---|---|---|---|
+| 3-pt local | 0.5988 | 0.5973 | 0.5973 | 0.5908 | **−0.0080 DOWN** |
+| 5-pt (WP1b's) | 0.5751 | 0.5808 | 0.5805 | 0.5820 | **+0.0070 UP** |
+| 7-pt full | 0.5605 | 0.5714 | 0.5730 | 0.5778 | **+0.0173 UP** |
+
+Window-to-window spread at payload 0 is 0.038 s against an effect of 0.008–0.017 s — the
+**systematic is 2–5x the signal**. Cause: the CoT bowl rises steeply past T=0.65, and the
+arm is steeper at 0 kg than at 12 kg, so a wide window drags the vertex left more at low
+payload and manufactures a shift. **On this LL, `T*(payload)` is not resolvable, and the
+Bar B sign cannot be taken from it.**
+
+**WP1b itself was re-checked and STANDS** (`data/2026-08-31-wp5-barA-reconfirm/scripts/
+wp1b_fitcheck` route): mech CoT DOWN in **3/3** windows (−0.0425 / −0.0321 / −0.0122) and
+copper CoT UP in **3/3** (+0.0304 / +0.0371 / +0.0547). Direction robust; ⚠ **magnitude is
+window-dependent (3.5x for mech)**, and WP1b's "|span|/CI 16x" is a bootstrap over
+repeats that does NOT include fit-method systematic — quote the direction, caveat the
+number. WP1b survives because its effect is ~4x larger and its bowls deeper (local depth
+1.5–4.1% vs this LL's 0.86–1.96%).
+
+### Coef selection — and the mechanism that replaces `T*`
+
+`T*_HL(payload)` of the ACTUAL objective, both fit windows, on the rs8st15 grid:
+
+| coef | 3-pt span / b | 5-pt span / b | verdict |
+|---|---|---|---|
+| 0.2–2 | 0.000 / +0.00000 | 0.000 / +0.00000 | pinned; Bar B impossible |
+| **5** | **0.114 / +0.01060** | **0.110 / +0.00948** | **robust, monotonic** |
+| 7 | 0.131 / +0.01178 | 0.134 / +0.01174 | robust, monotonic |
+| 10 | 0.147 / +0.01155 | 0.149 / +0.01166 | robust, monotonic |
+| 15 | 0.026 / −0.00219 | 0.013 / +0.00040 | collapsed, sign unstable |
+| 20 | 0.020 / −0.00180 | 0.009 / +0.00057 | collapsed, sign unstable |
+
+**Chosen: 5** (owner's call, from the training cot sweep — at 10 tracking already
+regressed materially; a coef-7 arm is running). ⚠ **20 is past the peak**: span collapses
+~7x and the sign is unstable between fit methods.
+
+**The Bar B mechanism at coef 5–10 does NOT require the CoT bowl to move.** It is a
+balance-point shift: the **tracking surface flattens under load** (span across T falls
+0.917 → 0.486 from 0 to 12 kg), so the CoT term — whose optimum ~0.59 sits well above
+tracking's edge at 0.40 — wins more ground as payload rises. That is a sturdier mechanism
+than `T*(payload)`, and it is what survives the fit-window check.
+
+### Pre-registered Bar B prediction (declared BEFORE Phase 1 is scored)
+
+**SIGN: POSITIVE** — commanded T *increases* with payload. This **contradicts the WP5
+brief's pre-registered negative**, which was taken from WP1b's keeper mech-CoT `T*`; the
+mechanism above is a different (and more robust) one. Independently corroborated by the
+parallel `hl_cot` training sweep (CLAUDE.md / `docs/adr/0004` Amendment 2026-09-01):
+"larger coef = LONGER stride", threshold-like with 0.2→2 inert and 2→5 flipping — the
+same sign, the same threshold location, from a training run rather than a grid.
+
+⚠ **Scored on the REWARD's CoT, not the bench metric.** The HL reward's CoT denominator is
+the SIGNED projection on the commanded direction (`hrl_runner.py:955-957`, `_d_par`),
+while `play.py`'s `cot` metric keeps the UNDIRECTED norm (`_d_step`, `play.py:779`). The
+correction is 1/cos(theta) = 1.007–1.056 here, small but enough to leave 8 kg floored at
+coef 5. Predictions below use the signed form.
+
+At coef 5 (signed): `T*` = 0.400 / 0.400 / 0.400 / 0.509 over 0/4/8/12 kg — **3/4 floored
+at the cadence edge**, so the whole response is carried by the top third of the payload
+range. Monte-Carlo on that real piecewise shape, payload ~ U(0,12), 64 envs,
+`sigma_e` = 0.0105: **predicted r = +0.737** (5th pct +0.647), `P(|r| ≥ 0.5) = 1.000`.
+(Undirected CoT would have said +0.939 — a 0.2 overstatement, hence the caveat.) Coef 7
+signed gives +0.939 with 2/4 floored, i.e. Bar B margin is the price paid for coef 5's
+better tracking.
+
+⚠ **What this does NOT establish.** The grid is a frozen-LL **pinned-T** sweep: it says
+where the optimum sits, not that a trained TD3 HL finds it, nor what tracking a trained
+policy achieves. `sigma_e` for the Phase-1 policy at its own unsaturated operating point
+remains **unmeasured** until Phase 1 runs. Also, at vx=0.5 the longer stride *improves*
+`err_vx` at high payload (−4.0% at 8 kg, −5.1% at 12 kg), so this sweep is structurally
+blind to the tracking regression the training sweep sees — WP1b showed the optimal stride
+falls below the grid floor by vx=0.7, so the coef's tracking cost is **speed-dependent**.
+
+### Instrumentation added
+
+- `scripts/period_payload_stats.py` — the Bar B statistic (per-ENV mean commanded T vs
+  per-env latent, Pearson r + slope, per-component reads). Its own module because
+  `play.py` imports the mjlab env stack at module scope and would break the test suite's
+  CPU-only contract. `play.py` prints `[PERIODDIAG] {json}` from it.
+- `tests/test_period_payload_stats.py` (4) — pins the **env-not-window** aggregation unit
+  (pooling by window inflates n ~150x and shrinks every interval while leaving the point
+  estimate roughly right), the keep mask, and NaN-not-0.0 on a constant regressor.
+
+Raw data + analysis → `data/2026-08-31-wp5-barA-reconfirm/`.
+
+## WP5 Phase 1 — RESULTS and the Bar B verdict (2026-09-01/02)
+
+Two seeds, 10001 iters, 4096 envs, `Unitree-H1_2-Flat-A1-Payload`, LL frozen at
+`2026-08-28_08-27-45_a1a_fullmirror_standing15_rs8_s42/model_10000.pt` (never retrained),
+`hl_obs_e=True`, `hl_cot_coef=5.0`, `rel_standing_envs 0.15`, `resampling_time_range
+(3.0,8.0)`. Runs: `2026-09-01_20-25-30_..._cadhl_..._s42` and `2026-09-01_23-18-56_..._s123`.
+
+### ⚠ A first Phase-1 run was discarded — `hl_cadence` silently defaulted False
+
+`rl_cfg.py:572` still defaults `hl_cadence=False` and `:614` `hl_cadence_source="random"`,
+while `train_h1_2_a1a_LL_rewards.sh` defaults them True/`hl`. The launch was hand-built
+(the script exposes no `HL_OBS_E`/`FREEZE_LL` knob), so both silently reverted. Result: the
+HL actor was **99→3**, velocity goals only, **no commanded period column**, and
+`env.hrl_period`/`hrl_phase` were never created (`hrl_runner.py:340`) so `mdp.phase` ran its
+own fixed `period: 0.6` clock. `corr(commanded T, payload)` was then undefined *by
+construction*, not by policy failure. Cost ~3 h.
+**The tell was a bench scalar**: `stride_period_s` read 0.588, i.e. the fixed clock.
+Marked in-place as `BROKEN_no_cadence_channel.txt`; bench archived for the record.
+⚠ That run also incidentally reproduced the **cadence-pin** result (`act_legs` 0.6016 vs
+A0's 0.5960, 1.01x) — a fixed clock IS a cadence pin, so do not read it as a latent effect.
+**Rule: verify the HL action dim (4, not 3) on the smoke checkpoint before committing GPU.**
+
+### Policy bar — PASSES on both seeds
+
+| | s42 | s123 | bar |
+|---|---|---|---|
+| `err_vx` | **0.1142** | **0.1067** | < 0.1219 ✓ |
+| `act_legs` | 0.7027 | 0.6939 | < 0.8363 ✓ (A0 0.5960) |
+| `fall_rate` | 0.0 | 0.0 | ✓ |
+| `stride_period_s` | 0.4024 | 0.4067 | off the 0.35 floor ✓ |
+| `gait_match` | 0.8768→0.9275 | 0.9320 | |
+
+`hl_cot_coef=5` did what the pre-flight predicted: the commanded period sits at **0.402 s**,
+off the cadence floor, against the pre-flight's saturated 0.3527 at coef 0.2. The grid
+predicted T* ≈ 0.400 — an independent confirmation of the objective reconstruction.
+
+### BAR B — **FAIL on both seeds**
+
+7 pinned payloads x 64 envs x 2 eval seeds = 448 envs, command pinned vx=0.5
+(period is near-binary in the command, so a random-command average is a standing/walking
+mixture, not a policy property).
+
+| seed | slope `b` | **r** | verdict |
+|---|---|---|---|
+| 42 | +0.00086 s/kg | **+0.089** | FAIL |
+| 123 | +0.00265 s/kg | **+0.268** | FAIL |
+
+![Bar B](../../data/2026-09-02-wp5-phase1-barB/fig1_bar_b.png)
+
+*`fig1_bar_b.png` — the gate and why it fails. The payload trend is real on both seeds (and
+POSITIVE, as pre-registered), but the shaded per-env spread `sigma_eps` it must beat is an
+order of magnitude wider. The two seeds also settled at different cadences (~0.40 s vs
+~0.49 s); the verdict is FAIL on both regardless.*
+
+Stable across seeds despite a 3.1x spread in the payload slope itself. Sign is POSITIVE as
+pre-registered (T rises with payload), so the pre-flight's sign call stands; the magnitude
+does not. Predicted was +0.737 — **the prediction was wrong, and by a mechanism worth
+recording**: it came from a frozen-LL pinned-T grid, which cannot say where a trained TD3 HL
+actually settles, and the pre-flight flagged exactly this ("`sigma_e` for the Phase-1 policy
+at its own unsaturated operating point is still UNMEASURED"). Measured `sigma_eps` is
+**0.033**, 3.2x the 0.0105 the prediction used.
+
+### But the HL DOES use the latent — counterfactually proven, both seeds
+
+New `play.py` flags `--cf-e-col` / `--cf-e-val` falsify one column of the `e` the HL READS
+while every body/geom property stays as sampled. All envs get the same forced value, so the
+true per-env spread is identical noise in each arm and the between-arm contrast is clean.
+This is the one manipulation the pinned sweep structurally cannot make — pinning moves
+physics and observation together, so it can never separate "reads `e`" from "feels `e`".
+
+Physics pinned at 6 kg in every arm. `read%` = counterfactual / observational:
+
+| component | obs ΔT | cf ΔT | read% | | obs ΔT | cf ΔT | read% |
+|---|---|---|---|---|---|---|---|
+| | **s42** | | | | **s123** | | |
+| com_dx | −0.0839 | **−0.0702** | 84% (15.4 SE) | | −0.0716 | −0.0120 | **17%** (2.9 SE) |
+| friction | +0.0485 | **+0.0363** | 75% (7.9 SE) | | +0.0703 | **+0.0684** | 97% (16.4 SE) |
+| payload | +0.0098 | +0.0048 | 49% (1.1 SE) | | +0.0305 | **+0.0406** | 133% (9.7 SE) |
+
+![read decomposition](../../data/2026-09-02-wp5-phase1-barB/fig2_read_decomposition.png)
+
+*`fig2_read_decomposition.png` — the headline. Grey = observational (physics and observation
+move together), colour = counterfactual (observation ONLY). `read%` is suppressed as `n.s.`
+where the counterfactual sits inside the ±2 SE band, because a ratio of two near-zero numbers
+says nothing about the read path.*
+
+![counterfactual dose-response](../../data/2026-09-02-wp5-phase1-barB/fig3_cf_dose_response.png)
+
+*`fig3_cf_dose_response.png` — the causal evidence. Physics pinned at 6 kg in every arm and
+every body/geom property identical, so all movement is caused by the observation alone.
+Dotted lines are the unfalsified `truth` arm.*
+
+**The core WP5 claim PASSES**: falsifying an observation alone moves the commanded stride
+period by **0.070 s / 0.068 s** (15.4 / 16.4 SE) — 14-17% of baseline. The HL reads `e`.
+
+**Which channel carries it is SEED-DEPENDENT, and only `friction` is read on both.**
+`com_dx` is read on s42 (84%) and essentially not on s123 (17%) — s123's large *observational*
+com_dx coefficient (t = −26.8) is therefore mostly **proprioceptive**, the HL feeling the
+consequences rather than reading the value. Payload is the mirror image: inert on s42
+(1.1 SE) but genuinely read on s123 (9.7 SE).
+
+### Two seeds were load-bearing — do not report single-seed component claims
+
+`com_dy` looked like a solid third channel on s42 (t = **−17.0**, ΔT −0.041 s) and is
+**t = −1.16** on s123; `com_dz` **flips sign** (−2.27 / +5.05). Both would have been written
+up as findings from s42 alone. Only `com_dx` (ratio 0.85) and `friction` (1.45) reproduce
+observationally with t > 20 on both.
+
+![seed reproducibility](../../data/2026-09-02-wp5-phase1-barB/fig4_seed_reproducibility.png)
+
+*`fig4_seed_reproducibility.png` — which components survive a second seed. Dashed lines
+mark |t| = 2.*
+
+### ⚠ Bar B is under-powered BY CONSTRUCTION — a methodological finding
+
+Its denominator carries the other four latent components' variation as "noise". On s123 the
+HL **demonstrably reads payload** (counterfactual 9.7 SE, ΔT +0.041 s) and the pre-registered
+r is still only +0.268. Three estimators, same data:
+
+| estimator | s42 | s123 |
+|---|---|---|
+| pre-registered (simple, payload) | +0.089 | +0.268 |
+| post-hoc: partial, other four removed | +0.187 | +0.485 |
+| post-hoc: counterfactual slope | +0.093 | +0.595 |
+
+The two post-hoc rows are **diagnostics, not a rescue** — they were chosen after seeing the
+data and cannot re-adjudicate the gate. The verdict is FAIL. But the design lesson stands:
+**a correlation gate on ONE component of a multi-component latent must partial the others
+out, or it can fail while the mechanism it tests is present.**
+
+### Why payload is the wrong component (mechanism)
+
+Stride period for an inverted-pendulum walker is set by pendulum **geometry** — CoM height
+and leg length — not total mass: adding 12 kg at the torso scales gravitational and inertial
+terms together and largely cancels out of the natural frequency. Shifting CoM *position*
+changes that geometry and the pitch moment the swing leg must catch. A policy commanding
+cadence off `com_dx`/`friction` and ignoring `payload_kg` is the physically literate one.
+Bar B pre-registered the component with almost no cadence response to give.
+⚠ Hypothesis, n=2, NOT a finding: s42 sits 0.05 s above the cadence floor and s123 0.14 s,
+and the seed with more headroom shows the larger payload response.
+
+### Instrumentation added / fixed
+
+- **`play.py --cf-e-col / --cf-e-val`** — the counterfactual-`e` disambiguator (above).
+  Guarded: requires `--diagnose-goals`, a col in 0..4, and a value; stamped into
+  `[PERIODDIAG]` so a falsified run's JSON is distinguishable from a true one.
+- **BUG FIXED — `--diagnose-goals` was unusable on ANY `hl_obs_e` checkpoint.** It calls
+  `runner.hl.act_inference()` directly, bypassing both places the runner writes
+  `obs["hl_e"]` (`hrl_runner.py:565`/`:719`), so `td3._state_vec` raised
+  `KeyError('hl_e')`. ⚠ **Same bug class hit the training launch.** `obs["hl_e"]` is written
+  by *callers*, so all three fire paths must independently remember it; the bench only
+  passed because it routes through `get_inference_policy`. A more robust shape would have
+  `_state_vec` fetch the latent, or one `fire_obs()` helper — not done, it is a design
+  change WP5 does not own.
+- `period_payload_stats.py` now emits per-env `com_dx/dy/dz` (+ `r_period_comdy/comdz`);
+  without them the partial regression above is impossible. `tests/` 166 pass,
+  `check_test_sensitivity.py` **72/72** (2 new: mis-sliced CoM column, unmasked CoM column).
+- ⚠ **No CPU-only regression test guards the `play.py` fixes** — it imports the mjlab env
+  stack at module scope. Verified by execution only.
+
+Raw data (33 JSON), `analyze_barB.py` (re-derives every number above) and `plot_barB.py`
+(regenerates all four figures) → `data/2026-09-02-wp5-phase1-barB/`. Both read only
+`raw/*.json`: no GPU, no mjlab import.
+
+### ⚠ AMENDMENT (2026-09-02, owner input): payload and CoM are COUPLED on the robot
+
+The deployment condition is **a weighted backpack mounted in FRONT of the torso, at torso
+height** — so payload never arrives without a CoM shift. Owner also reports independent
+hardware corroboration for the payload-only null: removing the head did not change policy
+behaviour, and the heavier-leg model mismatch is negligible (consistent with `docs/adr/0009`,
+where the leg mass was found inert).
+
+**The DR cannot represent that.** `base_mass` and `base_com` are *independent* startup events
+on the same `torso_link` (`env_cfgs.py:336-365`): the sim adds up to 12 kg without moving the
+CoM and moves the CoM without adding mass. A regression on that DR therefore recovers
+**partial** derivatives — the response to mass with CoM held fixed — which is a counterfactual
+the hardware cannot realize. The deployment-relevant quantity is the **directional** derivative
+along a 1-D ray fixed by mount geometry: `dx = m*d/(M_torso + m)`, `M_torso` = **17.789 kg**
+(`h1_2.xml`), `d` = horizontal offset from the torso CoM to the loaded pack's CoM.
+
+⚠ **RANGE INCONSISTENCY — ACTIONABLE BEFORE THE MOUNT IS FABRICATED.** The trained `base_com`
+span (±0.05 m) does not cover what the payload DR's own 0-12 kg would physically produce:
+
+| `d` | `dx` at 12 kg | inside ±0.05? | max in-range payload |
+|---|---|---|---|
+| 0.10 m | 0.040 | yes | 17.8 kg |
+| 0.15 m | 0.060 | **no** | 8.9 kg |
+| 0.20 m | 0.081 | **no** | 5.9 kg |
+| 0.25 m | 0.101 | **no** | 4.4 kg |
+
+Past `d ~ 0.10 m` a full 12 kg drives the policy outside its trained CoM support. Either widen
+`base_com` to cover `m*d/(M+m)` at full load, or constrain the mount so 12 kg stays inside.
+
+### Coupled-ray result — Bar B still FAILS, and the seeds disagree in SIGN
+
+Measured directly (not inferred), via multi-column falsification (`--cf-e-col 0,1`), physics
+pinned at 6 kg in every arm, both seeds. Ray A pins `com_dx=0`; rays B/C let it track payload.
+
+| ray | s42 dT/dm | s123 dT/dm | Bar B s42 | Bar B s123 |
+|---|---|---|---|---|
+| A payload only (`com_dx`=0) | +0.00033 | +0.00374 | +0.040 | +0.424 |
+| B coupled, d=0.10 m | **−0.00171** | +0.00378 | −0.203 | +0.427 |
+| C coupled, d=0.20 m | **−0.00375** | +0.00370 | −0.415 | +0.420 |
+
+**FAIL on every ray**, and on the coupled rays the two seeds have **opposite signs**. Seed 42
+responds to the coupling (slope turns negative); seed 123's three rays are nearly identical
+because **it does not read `com_dx`** (17% read, 2.9 SE) — internally consistent with the
+counterfactual decomposition above, from a completely separate measurement.
+
+![coupled ray](../../data/2026-09-02-wp5-phase1-barB/fig5_coupled_ray.png)
+
+*`fig5_coupled_ray.png` — seed 42's rays fan out under coupling; seed 123's overlap.*
+
+### ⚠ RETRACTED: an additive recombination predicted a PASS. It was wrong.
+
+Combining the fitted partials as `dT/dm = dT/dpayload + dT/dcom_dx * d/M` predicted **−0.0086 /
+−0.0055 s/kg** at d=0.20 and a Bar B of **−0.723 / −0.567 (PASS both)**. Measured: **−0.00375 /
++0.00370, FAIL both.** Two compounding errors, both worth generalising:
+
+1. **Observational partials cannot predict a counterfactual.** A falsification exercises only
+   the READ path; the observational `beta` also contains the proprioceptive path. Seed 123's
+   observational `com_dx` coefficient is large (t = −26.8) but it barely reads the value, so
+   coupling changed nothing for it.
+2. **The read-path response to `com_dx` is strongly ASYMMETRIC, so a single linearization is
+   invalid.** Seed 42: **−1.010 s/m** backward vs **−0.395 s/m** forward, a **2.56x** ratio.
+   The coupled ray only explores the forward side; the prediction used a slope fitted across
+   both.
+
+Correcting both — read-path slope, forward side only — predicts **−0.00182** vs measured
+**−0.00171** for s42 (6% agreement) and +0.00239 vs +0.00361 for s123.
+**Rule: to predict a counterfactual, use counterfactual coefficients, taken over the interval
+the manipulation actually traverses.**
+
+⚠ Design note (n=2, do NOT act on alone): a FRONT mount sits on the shallow side of seed 42's
+`com_dx` response (2.56x shallower than backward). Seed 123's asymmetry runs the other way
+(0.35) but its `com_dx` response is 2-16x smaller in absolute terms throughout.

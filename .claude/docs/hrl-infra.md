@@ -472,6 +472,120 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   oracle/learned switch, `state_noise` test knob, and the sim2real noise finding in
   `deployment.md`.
 
+## Frozen LL (`freeze_ll_path`) — WP5
+
+`_load_frozen_ll` loads the **actor strict** and the **critic best-effort**. The asymmetry
+is deliberate: a wrong-shape actor means a mismatched goal space and must raise loudly,
+while the critic is never evaluated or updated when the LL is frozen (`learn()` guards
+`process_env_step` / `compute_returns` / `update` on `not self.freeze_ll`). This is what
+lets a pre-WP2 checkpoint (critic obs **114**) be frozen inside the post-WP2 env (critic
+obs **119**, the unconditional privileged `env_latent_e` term). ⚠ A checkpoint saved by a
+frozen-LL run therefore carries an **untrained LL critic** and must not be resumed as an
+unfrozen run — warned at load.
+
+⚠ **Generalisable, and it cost WP5 a blocked launch:** WP2's inertness proof was thorough
+and still could not have caught this, because it verified through `play.py`, which never
+strict-loads the critic. **An asymmetric actor-critic change is invisible on the eval path
+and fatal on the train path — score it with a train-side smoke, not a play/bench run.**
+
+## Bar B statistic (`scripts/period_payload_stats.py`, `[PERIODDIAG]`)
+
+`period_payload_stats(per_w, keep_w, e)` → per-env mean commanded stride period vs the
+per-env latent: Pearson `r` + slope against payload, plus per-component reads (friction,
+CoM). Printed by `play.py --diagnose-goals` as `[PERIODDIAG] {json}`.
+
+- **The independent unit is the ENV, not the window.** `mode="startup"` DR fires at
+  construction and never on reset, so every window from env *i* carries the identical
+  label. Pooling by window inflates *n* ~150x and shrinks every interval **while leaving
+  the point estimate roughly right** — it fails silently. The same fact makes a
+  random-window train/test split leak: hold out **envs**.
+- Correlations return **NaN, never 0.0**, when a regressor has no variance (the
+  fixed-payload probe case).
+- Its own module because `play.py` imports the whole mjlab env stack at module scope; a
+  test importing `play.py` would pull MuJoCo in and break the suite's CPU-only contract.
+- ⚠ **A saturated cadence has no variance.** `sigma_e` measured while the commanded period
+  sits on the `cadence_period_range` bound (e.g. 0.00087 s at `hl_cot_coef=0.2`) is a
+  property of the clamp, not the policy — off the bound it is **~12x larger** (0.0105 s).
+  Never quote a Bar B noise floor from a pinned operating point.
+- ⚠ **Score the objective on the REWARD's CoT, not the bench metric.** The HL reward's CoT
+  denominator is the SIGNED projection on the commanded direction (`hrl_runner.py:955-957`);
+  `play.py`'s `cot` (`play.py:779`) is the UNDIRECTED norm. Ratio 1.007-1.056 at vx=0.5 —
+  small, but it moved a predicted Bar B `r` from +0.939 to +0.737.
+- Overlaps `--diagnose-cadence`'s `[CADDIAG]` on three aggregates (`period_mean`,
+  `period_std_win`, `period_spread_env` = `sigma_e`); `[CADDIAG]` owns transmission /
+  entrainment, `[PERIODDIAG]` owns the latent correlation. **Consolidation candidate:**
+  have `--diagnose-cadence` call this module rather than recomputing.
+- Emits per-env `payload / period / friction / com_dx / com_dy / com_dz`, all masked to the
+  same envs so a caller's regression stays row-aligned. **You need the CoM columns**: a
+  payload-only correlation buries the other four components in its residual (below).
+
+## Counterfactual `e`: separating "reads the latent" from "feels it" (WP5, 2026-09-02)
+
+`play.py --cf-e-col <0..4> --cf-e-val <x>` forces one column of the latent **the HL reads**
+to a constant — `e` = (0 payload, 1 com_dx, 2 com_dy, 3 com_dz, 4 friction) — while every
+body/geom property stays exactly as sampled. Requires `--diagnose-goals` (the only path that
+writes `obs["hl_e"]` itself); the forced value is stamped into `[PERIODDIAG]` so a falsified
+run's JSON is distinguishable from a true one. Keep the value inside the trained DR support
+(payload 0-12, com_d\* ±0.05, friction 0.3-1.6) or you measure extrapolation, not sensitivity.
+
+**Why it is necessary, and what a pinned sweep cannot do.** `--eval-payload-kg` moves physics
+and observation *together*, so `corr(commanded T, true latent)` is reproduced exactly by a
+policy that reads nothing and merely responds proprioceptively to how the robot is moving.
+The falsification breaks that tie. All envs get the SAME forced value, so their true per-env
+spread becomes identical noise in every arm and the between-arm contrast is clean.
+
+**Read it as `read%` = counterfactual ΔT / observational ΔT**: ~100% means the response runs
+through the observation, ~0% means the HL is feeling the physics. Measured on Phase 1
+(2 seeds, physics pinned 6 kg): the observation alone moves commanded T by **0.070 / 0.068 s**
+(15.4 / 16.4 SE), but **`read%` is seed-dependent** — `com_dx` 84% on s42 vs **17%** on s123
+despite an observational t of −26.8 on *both*. ⚠ **A large observational coefficient is not
+evidence the policy reads the value**; only `friction` was read on both seeds (75/97%).
+
+## ⚠ A correlation gate on ONE component of a multi-component latent is under-powered
+
+Bar B pre-registered `corr(commanded T, payload) >= 0.5`. Its denominator carries the other
+four components' variation as "noise", so it can **fail while the mechanism it tests is
+present**: on Phase-1 seed 123 the HL demonstrably reads payload (counterfactual 9.7 SE,
+ΔT +0.041 s) and the gate still read **+0.268**. Partialling the other four out gives +0.485;
+the counterfactual slope gives +0.595. Partial the other components out **when you write the
+gate**, not after seeing the data — post-hoc estimators are diagnostics, never a rescue.
+
+## ⚠ Observational partials cannot predict a counterfactual (WP5, 2026-09-02)
+
+Two traps, both hit while predicting a coupled-ray response from a fitted regression:
+
+1. A regression `beta` mixes the **read path** and the **proprioceptive path**; a falsification
+   exercises only the read path. A component with a large observational `t` may be barely read
+   (WP5 seed 123: `com_dx` t = −26.8, read% **17**), so recombining `beta`s over-predicts.
+   **Predict a counterfactual with counterfactual coefficients.**
+2. The read-path response can be strongly **asymmetric** about 0 — WP5 `com_dx`: −1.010 s/m
+   backward vs −0.395 s/m forward, **2.56x** — so a slope fitted across the full DR range is
+   wrong for a manipulation that traverses only one side. **Fit over the interval the
+   manipulation actually covers.** Correcting both took a 2.3x over-prediction to 6%.
+
+## ⚠ Independent DR events can make a deployment direction unrepresentable (WP5, 2026-09-02)
+
+`base_mass` and `base_com` are separate `mode="startup"` events on the same `torso_link`, so the
+sim can add 12 kg without moving the CoM. Hardware cannot: a pack of mass `m` at offset `d` from
+the torso CoM shifts it by `dx = m*d/(M_torso + m)`, `M_torso` = **17.789 kg** (`h1_2.xml`). Two
+consequences. **(a)** A regression over that DR yields *partial* derivatives — the deployment
+quantity is the *directional* derivative along the realizable ray, and when the partials have
+opposite signs the two point in different directions. **(b) Check the ranges are mutually
+consistent**: `base_com`'s ±0.05 m does not cover what `base_mass`'s own 0-12 kg physically
+implies past `d ~ 0.10 m` (at `d`=0.20 m only **5.9 kg** stays in support). Falsify several
+columns together with `--cf-e-col 0,1 --cf-e-val <m>,<dx>` to measure the ray directly.
+
+## T\* fits are fit-window-sensitive (WP5, 2026-09-01)
+
+A local quadratic vertex on a CoT bowl with a **steep, payload-dependent far arm** is
+biased: a wider window drags the vertex toward the shallower side, and if that asymmetry
+varies with payload it *manufactures* a `T*(payload)` shift. Measured on the rs8st15 LL:
+3-pt −0.0080 (DOWN) vs 5-pt +0.0070 (UP) vs 7-pt +0.0173 (UP) — the **window systematic
+(0.038 s) is 2-5x the effect**. WP1b's keeper result survives the same check (mech DOWN
+3/3 windows, copper UP 3/3) because its effect is ~4x larger and its bowls deeper, but its
+**magnitude spans 3.5x across windows**. **Report `T*` direction with all three windows;
+a bootstrap CI over repeats does NOT include this systematic and will read far too tight.**
+
 ## Gotchas (apply to all HRL arches)
 - **The run-to-run floor is REGIME-DEPENDENT — 4x at standing, ~10% at walking.** Measured
   2026-08-27 on two config-identical, same-seed-42 replicate pairs: walking `act_legs`/`ajit`/

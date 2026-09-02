@@ -23,6 +23,9 @@ from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from src.tasks.velocity.mdp.observations import env_latent_e
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from period_payload_stats import period_payload_stats  # noqa: E402
+
 
 @dataclass(frozen=True)
 class PlayConfig:
@@ -154,6 +157,31 @@ class PlayConfig:
   (default) -> no event added, byte-identical to current behavior. The checkpoint under test
   was NOT trained with payload DR, so this is a zero-shot generalization probe: does the
   optimal stride period shift with an injected payload the policy never saw."""
+  cf_e_col: str | None = None
+  """WP5 counterfactual-e disambiguator (2026-09-02). Index into the privileged latent
+  ``e`` = (0 payload, 1 com_dx, 2 com_dy, 3 com_dz, 4 friction) whose value fed to the HL
+  is FALSIFIED, leaving the physics untouched. Requires --cf-e-val and --diagnose-goals.
+
+  Why this exists: the pinned-payload sweep measures corr(commanded T, true latent), which
+  a memoryless policy responding proprioceptively to how the robot actually moves would
+  reproduce exactly. It cannot tell "the HL reads e" from "the HL feels the consequences
+  of e". Forcing a wrong value into the column the HL READS, while every body/geom
+  property stays as sampled, separates them: if T moves, the HL is using the observation;
+  if T does not, the correlation was proprioceptive and the privileged latent is inert.
+  All envs are forced to the SAME value, so the true per-env spread becomes identical
+  noise in every arm and the between-arm contrast stays clean."""
+  cf_e_val: str | None = None
+  """Value(s) forced into --cf-e-col of the HL's e observation. Physics UNCHANGED.
+  Stay inside the trained DR range (payload 0-12 kg, com_d* +-0.05 m, friction 0.3-1.6):
+  the HL's obs normalizer was fitted on that support, so an out-of-range value measures
+  extrapolation, not sensitivity.
+
+  Both flags accept a COMMA-SEPARATED list of equal length, which falsifies several
+  columns at once (2026-09-02). That is required whenever the deployment couples two
+  components: a backpack of mass m at horizontal offset d from the torso CoM shifts it
+  by ``dx = m*d/(M_torso + m)`` (``M_torso`` = 17.789 kg), so payload and com_dx move
+  TOGETHER on the robot and never independently as the two DR events sample them.
+  Falsifying payload alone measures a direction the hardware cannot realize."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -207,6 +235,24 @@ def run_play(task_id: str, cfg: PlayConfig):
   # WP1 payload pilot: pin an exact torso payload for the whole eval rollout (see
   # --eval-payload-kg docstring). Reuses dr.body_mass with a degenerate range instead of
   # adding a parallel mass mechanism.
+  _cf_cols: list[int] = []
+  _cf_vals: list[float] = []
+  if cfg.cf_e_col is not None:
+    if cfg.cf_e_val is None:
+      raise SystemExit("--cf-e-col requires --cf-e-val (the value(s) to falsify it to).")
+    _cf_cols = [int(c) for c in str(cfg.cf_e_col).split(",")]
+    _cf_vals = [float(v) for v in str(cfg.cf_e_val).split(",")]
+    if len(_cf_cols) != len(_cf_vals):
+      raise SystemExit(f"--cf-e-col has {len(_cf_cols)} entries but --cf-e-val has "
+                       f"{len(_cf_vals)}; they must pair up.")
+    if len(set(_cf_cols)) != len(_cf_cols):
+      raise SystemExit("--cf-e-col repeats a column; the last write would silently win.")
+    if not all(0 <= c <= 4 for c in _cf_cols):
+      raise SystemExit("--cf-e-col must index e = (0 payload, 1 com_dx, 2 com_dy, "
+                       "3 com_dz, 4 friction).")
+    if cfg.diagnose_goals <= 0:
+      raise SystemExit("--cf-e-col only applies to the --diagnose-goals probe (the one "
+                       "path that writes obs['hl_e'] itself).")
   if cfg.eval_payload_kg is not None:
     if "base_com" not in env_cfg.events:
       raise SystemExit("--eval-payload-kg: task has no 'base_com' event to borrow the "
@@ -1349,6 +1395,15 @@ def run_play(task_id: str, cfg: PlayConfig):
           s_fire = gs.extract(uenv)                          # [B, D]
           if getattr(runner, "hl_obs_vel", False):
             obs["hl_vel"] = s_fire[:, 0:2]  # clean lin-vel for the noise-free probe
+          # WP5: the probe calls act_inference directly, so it must write the privileged
+          # latent itself -- get_inference_policy/learn do it at their own fire steps
+          # (hrl_runner.py:565/719) and this path bypasses both. Without it td3._state_vec
+          # raises KeyError('hl_e') on every hl_obs_e checkpoint.
+          if getattr(runner, "hl_obs_e", False):
+            obs["hl_e"] = env_latent_e(uenv, runner._e_torso_cfg, runner._e_foot_cfg)
+            if cfg.cf_e_col is not None:
+              for _c, _v in zip(_cf_cols, _cf_vals):
+                obs["hl_e"][:, _c] = _v
           v_star = runner.hl.act_inference(uenv, obs, s_fire)  # [B, D]
           scale = gs.scale(uenv)                             # [D]
           g_raw = ((v_star - s_fire) / scale).abs()         # [B, D] recovered |g|
@@ -1454,6 +1509,32 @@ def run_play(task_id: str, cfg: PlayConfig):
               + " ".join(f"{v:+.2f}" for v in traj_a[:12].tolist()))
         print(f"[HOLDDIAG] {nm} goal_vx/win: "
               + " ".join(f"{v:+.2f}" for v in traj_g[:12].tolist()))
+
+    # WP5 pre-flight / Bar B: commanded stride period vs the privileged latent e.
+    # `e` is drawn by mode="startup" DR (fires at construction, NOT on reset), so each
+    # env's payload/CoM/friction is constant for the whole process and per-env pairing
+    # across seeds is valid. Bar B correlates the PER-ENV MEAN commanded T against the
+    # per-env true payload; the spread of that mean at fixed payload is its noise floor.
+    per_w = torch.stack(period_a)                  # [W_total, B] commanded T at each fire
+    keep_w = torch.stack(keep_a)                   # [W_total, B] reset-free window mask
+    if per_w.abs().sum() > 0:
+      e_cfg = uenv.observation_manager.get_term_cfg("critic", "env_latent_e").params
+      e = env_latent_e(uenv, e_cfg["torso_cfg"], e_cfg["foot_cfg"]).cpu()      # [B, 5]
+      pdiag = period_payload_stats(per_w, keep_w, e)
+      # Stamp the falsification into the record: `e` here is the TRUE latent, so a
+      # counterfactual run's per-env columns describe physics the HL never saw. Without
+      # this the two arms' JSON is indistinguishable.
+      pdiag["cf_e_col"] = cfg.cf_e_col
+      pdiag["cf_e_val"] = cfg.cf_e_val
+      if cfg.cf_e_col is not None:
+        print(f"  [CF] HL read e[:, {_cf_cols}] = {_cf_vals} (FALSIFIED); physics unchanged.")
+      print(f"  Period    mean {pdiag['period_mean']:.4f}s  sd_env {pdiag['period_sd_env']:.4f}  "
+            f"sd_win {pdiag['period_sd_win']:.4f}  p5-p95 [{pdiag['period_p5']:.4f}, "
+            f"{pdiag['period_p95']:.4f}]")
+      print(f"  Bar B     r(T, payload) = {pdiag['r_period_payload']}  "
+            f"slope {pdiag['slope_period_payload']} s/kg  "
+            f"(payload {pdiag['payload_mean']:.2f} +- {pdiag['payload_sd']:.2f} kg)")
+      print(f"[PERIODDIAG] {json.dumps(pdiag)}")
 
     diag_out = {"label": str(resume_path) if resume_path is not None else "unknown",
                 "c": c, "kept_windows": int(keep.sum()), "total_windows": int(keep.numel())}

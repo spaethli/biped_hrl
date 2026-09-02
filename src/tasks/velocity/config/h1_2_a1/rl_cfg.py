@@ -569,7 +569,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   scratch diagnostic, ep_len 13 after 10k it). Size it above the competent-policy per-step
   intrinsic magnitude (goal_rew ~-2.5) so walking is net positive while flailing (~-12)
   stays negative. 0 disables (all warm-started baselines)."""
-  hl_cadence: bool = False
+  hl_cadence: bool = True
   """A1a (ADR-0004): give the HL a gait-cadence channel. The HL commands a stride ``period``
   (s) in ``cadence_period_range``; the LL observes the resulting phase clock (``mdp.phase``)
   and entrains via the ``feet_gait`` intrinsic term. A *gait reference*, not a goal-space
@@ -611,16 +611,16 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   the floor below 0.5 demands RUNNING at short periods, which also needs ~2 m/s commands
   (Froude 0.5), a height-goal/termination tolerance review, and an LL retrain — not just this
   knob."""
-  hl_cadence_source: Literal["random", "hl"] = "random"
-  """A1a S1c (ADR-0004): where the commanded stride period comes from. ``random`` (default):
+  hl_cadence_source: Literal["random", "hl"] = "hl"
+  """A1a S1c (ADR-0004): where the commanded stride period comes from. ``random``:
   held per episode, resampled uniformly from ``cadence_period_range`` on reset (the S2 setup,
-  and what every pre-S1c checkpoint saved). ``hl``: the TD3 HL emits the period as one extra
+  and what every pre-S1c checkpoint saved). ``hl`` (default): the TD3 HL emits the period as one extra
   tanh action dim (HL action = goal_dim+1; the critics see it, so Q can rank periods for the
   CoT term), mapped affinely from [-1,1] to ``cadence_period_range`` and held for the window
   (phase integrates incrementally, so a period change never jumps the clock). Requires
   ``hl_cadence=True`` and ``hl_algorithm='td3'`` (loud error otherwise). Old checkpoints
   restore as ``random`` and keep their goal_dim-sized HL nets."""
-  hl_cot_coef: float = 0.0
+  hl_cot_coef: float = 7.0
   """A1a (ADR-0004): weight on the (negative) dimensionless cost-of-transport penalty added
   to the HL *window* reward (window energy / (m g window walked-distance), each step gated by
   commanded linear speed > 0.1; a distance floor keeps stuck-under-command windows expensive

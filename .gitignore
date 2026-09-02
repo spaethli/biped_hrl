@@ -2,7 +2,7 @@
 .idea
 outputs
 COLCON_IGNORE
-data9
+data
 logs
 wandb
 MUJOCO_LOG.TXT

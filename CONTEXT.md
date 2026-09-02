@@ -149,9 +149,15 @@ opposed to _Leg odometry_, which is instantaneous and unfiltered. Covers the com
 filter and every EKF variant alike. The distinction is load-bearing because the two classes
 fail in opposite directions: _Leg odometry_ is noisy but unbiased, a fused estimate trades
 that noise for bias (see _Contact-transition loss_).
-_Avoid_: "the estimator" (already flagged as ambiguous under _Leg odometry_); "EKF" (a
-complementary filter is fused and is not an EKF); "filtered odometry" (the fusion adds the
-IMU, it does not merely smooth the leg signal).
+A tracking error scored against one of these, rather than against ground truth, is a
+different quantity from the sim metric of the same name and is named with an `_est` suffix,
+carrying the reference it was scored against alongside it. The suffix names the *class*
+because the reference is expected to change (WL-G ships B for A1 and carries C to A2), so
+the specific arm belongs in the payload, never in the key.
+_Avoid_: "the estimator" *in prose* (already flagged as ambiguous under _Leg odometry_ --
+the `_est` suffix above is a key-naming convention, and is unambiguous only because the
+reference travels with it); "EKF" (a complementary filter is fused and is not an EKF);
+"filtered odometry" (the fusion adds the IMU, it does not merely smooth the leg signal).
 
 **Contact-transition loss**:
 The roughly fixed displacement a _Fused base velocity_ loses per step, because the
@@ -227,3 +233,31 @@ across all 12 leg joints, so the conversion is a constant ×0.25), but whole-bod
 physically over-weight the arms by 3-6.7x and are invalid across the Model v2 PD-gain
 restructure.
 _Avoid_: whole-body `action_rate` in any cross-policy claim.
+
+**Flight recorder**:
+The deploy-side per-tick CSV written by the C++ `SafetyLogger` to `logs/deploy_safety/`,
+carrying the *commanded* side of a hardware run: raw policy intent `raw_q`, the operator
+command, measured `q`/`dq`, IMU, the passive base-estimator bank and the safety triggers.
+Decimated to ~500 Hz, so its rows are not policy steps. The only log that records what the
+policy *asked for*.
+_Avoid_: "the hardware log" (ambiguous with the _Joint telemetry log_, which carries
+different columns from a different process); "the safety log" (the triggers are one block
+of many); "the deploy CSV".
+
+**Joint telemetry log**:
+The ROS-side CSV written by `read_all_joints` to `~/ramlab_ws/trajectories/`, sampled on a
+clean undecimated 50 Hz grid. Uniquely carries **`tau_est`**, the measured joint torque,
+which exists in no other log and is what makes a hardware _Cost of transport_ a measurement
+rather than a PD-law estimate. Its `vel_*`, `pos_*`, `body_height`, `foot_force_*` and
+`foot_raise_height` columns are the dead `sportmodestate` block and are identically zero.
+_Avoid_: "all_joints" bare, "the trajectory log" (nothing is a trajectory here);
+"the estimator log" (its estimator columns are the dead ones).
+
+**Session pair**:
+One hardware run's _Flight recorder_ and _Joint telemetry log_, matched and time-aligned so
+the commanded side and the torque can be read on the same clock. Matching is proposed by
+filename timestamp and *confirmed* by cross-correlating a shared measured joint, because the
+filename timestamp is not the first-sample time and carries no alignment information. The
+two clocks differ in RATE (measured -2600 to -3067 ppm), so the alignment is affine in time,
+never a constant offset: over a 308 s session a constant offset is wrong by 40 policy steps.
+_Avoid_: "sync", "the offset" (both imply a single constant, which is the defect).
