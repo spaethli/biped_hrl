@@ -22,6 +22,8 @@ from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from src.tasks.velocity.mdp.observations import env_latent_e
+from src.tasks.velocity.mdp.payload_inertia import (
+  MOUNT_D_MEAN, eval_pin_params, payload_mount)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from period_payload_stats import period_payload_stats  # noqa: E402
@@ -257,16 +259,21 @@ def run_play(task_id: str, cfg: PlayConfig):
     if "base_com" not in env_cfg.events:
       raise SystemExit("--eval-payload-kg: task has no 'base_com' event to borrow the "
                         "torso asset_cfg from.")
-    env_cfg.events["base_mass"] = EventTermCfg(
+    # ADR-0010: the pin means "the RIG, loaded to m kg" -- mass, CoM shift and inertia at the
+    # mean mount lever arm, i.e. a point ON the deployment ray. Pinning mass alone would put
+    # eval physics outside the training distribution (payload with no CoM shift is a
+    # configuration the coupled DR never samples and the hardware cannot produce).
+    env_cfg.events.pop("base_mass", None)
+    env_cfg.events["payload_mount"] = EventTermCfg(
       mode="startup",
-      func=envs_mdp.dr.body_mass,
-      params={
-        "asset_cfg": env_cfg.events["base_com"].params["asset_cfg"],
-        "operation": "add",
-        "ranges": (cfg.eval_payload_kg, cfg.eval_payload_kg),
-      },
+      func=payload_mount,
+      params=eval_pin_params(
+        env_cfg.events["base_com"].params["asset_cfg"], cfg.eval_payload_kg),
     )
-    print(f"[WP1] Pinned torso payload = {cfg.eval_payload_kg} kg.")
+    _k = list(env_cfg.events)
+    if _k.index("base_com") > _k.index("payload_mount"):
+      raise SystemExit(f"--eval-payload-kg: payload_mount must follow base_com; order {_k}.")
+    print(f"[WP1] Pinned mounted payload = {cfg.eval_payload_kg} kg at d={MOUNT_D_MEAN}.")
 
   # Check if this is a tracking task by checking for motion command.
   is_tracking_task = "motion" in env_cfg.commands and isinstance(

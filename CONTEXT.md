@@ -7,15 +7,40 @@ in `doc/hrl/` and `.claude/docs/`; decisions in `docs/adr/`.
 ## Language
 
 **Extrinsics** (`e_t`):
-The privileged, per-episode environment-factor vector (friction, base mass / CoM,
-per-joint motor-strength and damping, …) available only in simulation. The *inputs* to
-the RMA encoder, not its output.
+The privileged, per-episode environment-factor vector (friction, mounted payload and
+the CoM shift it causes, per-joint motor-strength and damping, …) available only in
+simulation. The *inputs* to the RMA encoder, not its output.
 _Avoid_: latent, z (those are the encoding), "privileged obs" (broader).
 
-**Extrinsics latent** (`z`):
+**Extrinsics latent** (`z`) — **A2/RMA only**:
 The compact 8-dim encoding `z = μ(e_t)` the encoder produces and feeds to the policy.
-At deployment it is replaced by the adaptation estimate `ẑ`.
-_Avoid_: extrinsics, e_t (those are the raw inputs).
+At deployment it is replaced by the adaptation estimate `ẑ`. A learned *compression*:
+it exists only where an encoder `μ` exists.
+_Avoid_: extrinsics, e_t (those are the raw inputs); using it for H-adapt, which has no
+`μ` — that is `ê` below.
+
+**Extrinsics estimate** (`ê`) — **H-adapt only**:
+What H-adapt's `φ` produces: a direct estimate of the extrinsics themselves, same space
+and dimension as `e` (ℝ⁵ on the H1-2), not a compression of them. H-adapt has no encoder
+`μ`, so there is nothing to compress — the high level consumes raw `e` in simulation and
+`ê` on the robot.
+_Avoid_: `z` (that is A2's compressed code, a different object); "latent" unqualified.
+
+**Mounted payload**:
+The weighted backpack carried in front of the torso. A *single* physical placement, so
+its mass and the CoM shift it causes are one extrinsic, not two: mass never arrives
+without a shift. Contrast the robot's own CoM uncertainty, which is a separate extrinsic
+that exists with no payload present.
+_Avoid_: "payload" alone when the CoM shift is meant; treating payload mass and CoM
+offset as independently sampled quantities.
+
+**Mount lever arm** (`d`):
+The vector from the torso's own centre of mass to the mounted payload's centre of mass.
+Together with the payload mass it determines the whole inertial effect — CoM shift and
+added rotational inertia alike. A property of the *rig*, not of the load: changing how
+much is in the pack moves the mass, not `d`.
+_Avoid_: "offset" (ambiguous with the resulting CoM shift, which is a different, smaller
+vector).
 
 **Adaptation module** (`φ`):
 The deployable network that estimates `ẑ` from a window of recent proprioceptive

@@ -550,6 +550,38 @@ present**: on Phase-1 seed 123 the HL demonstrably reads payload (counterfactual
 the counterfactual slope gives +0.595. Partial the other components out **when you write the
 gate**, not after seeing the data — post-hoc estimators are diagnostics, never a rescue.
 
+## ⚠ Killing `check_test_sensitivity.py` leaves a mutation APPLIED (2026-09-02)
+
+The harness mutates source **in place** and restores after each case, so a kill (Ctrl-C, a
+stopped background task, a timeout) leaves the in-flight mutation on disk. Observed: an
+interrupted run left `deploy.yaml`'s `left_ankle_pitch_joint` clip widened from
+`[-0.897334, 0.523598]` to `[-1.2, 0.9]` — a **live hardware config**, on the joint that
+rejects lateral pushes, and `pytest` was the only thing that flagged it.
+
+**Recovering is not `git checkout <file>`.** Several harness targets (the deploy yamls,
+`PROVENANCE.json`) routinely carry legitimate uncommitted edits from other sessions, so a
+checkout silently destroys their work. Reverse the specific mutation instead: the exact
+before/after strings are in the `MUTATIONS` list in `check_test_sensitivity.py`, and
+`git diff -- <file>` shows precisely which one landed.
+
+**After any interrupted run**: `pytest -q`, then `git diff` every harness target, then
+grep for the mutation payloads. Never launch a training run from a checkout whose harness
+was killed without doing this — a mutated module imports silently.
+
+## ⚠ An acceptance gate keyed on a NAME goes vacuous when the name changes (2026-09-02)
+
+`test_apply_payload_dr_is_opt_in_not_on_the_base_tasks` guarded the WP2 inertness proof with
+`assert "base_mass" not in cfg.events`. ADR-0010 renamed that event to `payload_mount`, so
+the assertion started checking for a key that exists nowhere: **vacuously true**, green under
+`pytest`, and passing even with payload DR applied unconditionally to the base A0 task. Only
+`check_test_sensitivity.py` caught it, and only because it requires the **named** test to
+fail — the mutation did cause *a* failure, just in a different test.
+
+Assert on something that cannot be renamed without also changing behaviour. Here: the event's
+**function origin** (`"payload_inertia" in v.func.__module__`), not its dict key. General rule:
+a gate whose assertion mentions an identifier has this failure mode latent in it, and it
+appears at rename time, long after the test was written and reviewed.
+
 ## ⚠ Observational partials cannot predict a counterfactual (WP5, 2026-09-02)
 
 Two traps, both hit while predicting a coupled-ray response from a fitted regression:

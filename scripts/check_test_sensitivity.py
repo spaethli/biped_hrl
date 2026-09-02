@@ -36,6 +36,7 @@ DGA = REPO / "scripts/deploy_gate_analyzer.py"
 PRV = REPO / "scripts/deploy_provenance.py"
 BSN = REPO / "scripts/bridge_session.py"
 PPS = REPO / "scripts/period_payload_stats.py"
+PI = REPO / "src/tasks/velocity/mdp/payload_inertia.py"
 BFR = REPO / "scripts/bench_flight_recorder.py"
 SJH = REPO / "scripts/score_joint_hold.py"
 HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
@@ -523,6 +524,33 @@ MUTATIONS = [
   ("phi runs on a partially filled history (an input shape it never saw in training)", ENCH,
    "        if (!full()) return false;\n", "",
    "test_window_refuses_a_partial_buffer"),
+
+  # --- ADR-0010: the coupled mounted-payload event (2026-09-02) -----------------------
+  # The first is the silent class: nothing crashes, the CoM shift just disappears and `e`
+  # keeps reporting a plausible number.
+
+  ("payload event reads the DEFAULT com, so the base_com residual is silently erased "
+   "(the Operation.add overwrite class)", PI,
+   "  com = model.body_ipos[env_ids, bid, :]",
+   '  com = env.sim.get_default_field("body_ipos")[bid].to(env.device).expand(n, 3)',
+   "test_payload_shift_composes_on_top_of_the_base_com_residual"),
+
+  ("rank-1 inertia left about the body ORIGIN: the parallel-axis shift back to the new "
+   "CoM is dropped", PI,
+   "  inertia_new = i_o_new - mass_new[:, None, None] * (cc_new * eye - c_outer_new)",
+   "  inertia_new = i_o_new",
+   "test_rank1_update_matches_the_independent_closed_form"),
+
+  ("--eval-payload-kg pins MASS ONLY: eval physics becomes payload with no CoM shift, a "
+   "configuration training never samples and the hardware cannot produce", PI,
+   '    "d_ranges": tuple((v, v) for v in MOUNT_D_MEAN),',
+   '    "d_ranges": ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0)),',
+   "test_eval_pin_reproduces_what_training_samples_at_that_mass"),
+
+  ("payload mass never written back, so `e` reports a 0 payload beside a real CoM shift", PI,
+   "  model.body_mass[env_ids, bid] = mass_new",
+   "  model.body_mass[env_ids, bid] = mass",
+   "test_env_latent_e_reports_realized_totals_after_the_coupled_event"),
 ]
 
 

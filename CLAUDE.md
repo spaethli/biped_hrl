@@ -108,7 +108,7 @@ goal decode, reward-term direction/gating, the warm-start column map, deploy/tra
 config parity and (2026-08-04) the readiness-pipeline seams. Run it before and after any
 change to those. New tests must be proven able to fail:
 `python scripts/check_test_sensitivity.py` re-introduces each historical defect and checks
-it is caught (185 tests as of 2026-09-02, 85/85 mutations). A test that restates the logic it guards cannot
+it is caught (193 tests as of 2026-09-02, 89/89 mutations). A test that restates the logic it guards cannot
 fail when that logic breaks — the harness catches that too. Details → `hrl-infra.md`.
 
 **Deploy readiness (2026-08-04): one command, one verdict.**
@@ -256,6 +256,17 @@ analysis and the proposed change first.
   ⚠ **A zero vector is not a nominal latent**: payload/CoM read as deltas but friction reads
   as an ABSOLUTE coefficient (support 0.3–1.6), so a zero fill is a frictionless floor.
   Details -> `doc/hrl/A1a_deploy_plan.md` "WP5d".
+- **Payload DR is COUPLED, not two knobs (2026-09-02, `docs/adr/0010`).** One `payload_mount`
+  event samples a payload mass and a mount lever arm `d`, then DERIVES torso mass, CoM shift and
+  rotational inertia from them (exact rank-1 pseudo-inertia update). `base_mass` is gone; mass is
+  never sampled independently of the CoM shift it physically causes, because the rig is a
+  backpack mounted in front and the hardware cannot produce one without the other.
+  ⚠ **The event MUST be registered after `base_com`** — `Operation.add` has `uses_defaults=True`,
+  so the engine writes `default + random` and a later `add` on `body_ipos` **erases** the payload
+  shift SILENTLY (`env_latent_e` keeps reporting a plausible number). `apply_payload_dr` raises on
+  a bad order. `--eval-payload-kg m` now means *the rig loaded to m kg* (mass + CoM + inertia at
+  the mean `d`), so a Bar B sweep traverses the deployment ray by construction. `e` stays ℝ⁵ and
+  the deploy contract is untouched. Details → `A1a_plan.md`, `hrl-infra.md`.
 - **Model v2 = option B** (2026-07-09, `docs/adr/0005`): torso 300/3 + arm hold gains,
   derived scales, frictionloss 0, **desired_kl=0.01** (required). v1 checkpoints invalid.
   Replays need the constants the checkpoint trained with (env-side scales).

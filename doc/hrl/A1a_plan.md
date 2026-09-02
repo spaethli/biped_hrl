@@ -684,8 +684,6 @@ mixture, not a policy property).
 | 42 | +0.00086 s/kg | **+0.089** | FAIL |
 | 123 | +0.00265 s/kg | **+0.268** | FAIL |
 
-![Bar B](../../data/2026-09-02-wp5-phase1-barB/fig1_bar_b.png)
-
 *`fig1_bar_b.png` — the gate and why it fails. The payload trend is real on both seeds (and
 POSITIVE, as pre-registered), but the shaded per-env spread `sigma_eps` it must beat is an
 order of magnitude wider. The two seeds also settled at different cadences (~0.40 s vs
@@ -716,14 +714,10 @@ Physics pinned at 6 kg in every arm. `read%` = counterfactual / observational:
 | friction | +0.0485 | **+0.0363** | 75% (7.9 SE) | | +0.0703 | **+0.0684** | 97% (16.4 SE) |
 | payload | +0.0098 | +0.0048 | 49% (1.1 SE) | | +0.0305 | **+0.0406** | 133% (9.7 SE) |
 
-![read decomposition](../../data/2026-09-02-wp5-phase1-barB/fig2_read_decomposition.png)
-
 *`fig2_read_decomposition.png` — the headline. Grey = observational (physics and observation
 move together), colour = counterfactual (observation ONLY). `read%` is suppressed as `n.s.`
 where the counterfactual sits inside the ±2 SE band, because a ratio of two near-zero numbers
 says nothing about the read path.*
-
-![counterfactual dose-response](../../data/2026-09-02-wp5-phase1-barB/fig3_cf_dose_response.png)
 
 *`fig3_cf_dose_response.png` — the causal evidence. Physics pinned at 6 kg in every arm and
 every body/geom property identical, so all movement is caused by the observation alone.
@@ -744,8 +738,6 @@ consequences rather than reading the value. Payload is the mirror image: inert o
 **t = −1.16** on s123; `com_dz` **flips sign** (−2.27 / +5.05). Both would have been written
 up as findings from s42 alone. Only `com_dx` (ratio 0.85) and `friction` (1.45) reproduce
 observationally with t > 20 on both.
-
-![seed reproducibility](../../data/2026-09-02-wp5-phase1-barB/fig4_seed_reproducibility.png)
 
 *`fig4_seed_reproducibility.png` — which components survive a second seed. Dashed lines
 mark |t| = 2.*
@@ -797,9 +789,11 @@ and the seed with more headroom shows the larger payload response.
 - ⚠ **No CPU-only regression test guards the `play.py` fixes** — it imports the mjlab env
   stack at module scope. Verified by execution only.
 
-Raw data (33 JSON), `analyze_barB.py` (re-derives every number above) and `plot_barB.py`
-(regenerates all four figures) → `data/2026-09-02-wp5-phase1-barB/`. Both read only
-`raw/*.json`: no GPU, no mjlab import.
+Raw data (33 JSON), `analyze_barB.py` (re-derives every number above) and `plot_barB.py` /
+`plot_mount_geometry.py` (regenerate all six figures) → `data/2026-09-02-wp5-phase1-barB/`.
+The analysis scripts read only `raw/*.json`: no GPU, no mjlab import.
+⚠ `data/` is **gitignored** (`.gitignore:5`), so the figures named above are LOCAL — cite them
+by filename as here, never as an embedded image link, or the published repo carries a dead link.
 
 ### ⚠ AMENDMENT (2026-09-02, owner input): payload and CoM are COUPLED on the robot
 
@@ -846,8 +840,6 @@ responds to the coupling (slope turns negative); seed 123's three rays are nearl
 because **it does not read `com_dx`** (17% read, 2.9 SE) — internally consistent with the
 counterfactual decomposition above, from a completely separate measurement.
 
-![coupled ray](../../data/2026-09-02-wp5-phase1-barB/fig5_coupled_ray.png)
-
 *`fig5_coupled_ray.png` — seed 42's rays fan out under coupling; seed 123's overlap.*
 
 ### ⚠ RETRACTED: an additive recombination predicted a PASS. It was wrong.
@@ -873,3 +865,203 @@ the manipulation actually traverses.**
 ⚠ Design note (n=2, do NOT act on alone): a FRONT mount sits on the shallow side of seed 42's
 `com_dx` response (2.56x shallower than backward). Seed 123's asymmetry runs the other way
 (0.35) but its `com_dx` response is 2-16x smaller in absolute terms throughout.
+
+### Mount geometry measured on the robot (2026-09-02) — `base_com` must roughly DOUBLE
+
+Owner measurements: torso **19 cm** deep (x) and **46 cm** tall (z); payload CoM **7 cm** in
+front of the front face and **4 cm** below the torso's lower end.
+
+**Model check** (`h1_2.xml`, `torso_link`, `ipos` = [0.0005, 0.0028, 0.2048], mass 17.789 kg):
+
+| quantity | measured | model | verdict |
+|---|---|---|---|
+| torso height z | 0.46 m | 0.44 m (`torso_collision` box) | ✓ 4.5% |
+| torso depth x, at chest height | 0.19 m | **0.146 m** | ✗ **30% larger** |
+
+⚠ The full visual mesh does span 0.198 m in x, but **only because of the head** (z 0.55-0.76,
+x to +0.125). Sliced to the chest band (z 0.03-0.47) the torso is a symmetric ±0.073 m box, so
+"0.19 ≈ 0.198" is a coincidence, not agreement. Either the measurement includes covers/cabling
+absent from the mesh, or it was taken across the shoulders. **Worth re-measuring at chest
+height** — it moves `d_x` by 2.2 cm and the required `base_com` x by ~0.9 cm.
+
+**Lever arm** (torso CoM → payload CoM) and the induced shift `delta = m*d/(M+m)`:
+
+| | `d_x` | `d_z` | \|d\| |
+|---|---|---|---|
+| from the measurements | +0.1645 | **−0.2348** | 0.287 m |
+| from model geometry | +0.1425 | −0.2148 | 0.258 m |
+
+| m (kg) | `dx` | `dz` | outside ±0.05? |
+|---|---|---|---|
+| 4 | +0.030 | −0.043 | no |
+| 6 | +0.042 | −0.059 | **z** |
+| 8 | +0.051 | −0.073 | **x + z** |
+| 12 | +0.066 | **−0.095** | **x + z** |
+
+**⚠ The VERTICAL axis binds first, not the forward one** — the pack hangs 0.235 m *below* the
+torso CoM but only 0.165 m *ahead* of it. At the current ±0.05 m only **4.8 kg** stays inside
+the trained support (x alone would allow 7.8 kg).
+
+**Required `base_com` to cover the full 0-12 kg: x ±0.066 m, z ±0.095 m** — round to
+**x ±0.07, z ±0.10**, i.e. roughly **double** the current ±0.05. `y` can stay ±0.05 (the pack
+is laterally centred; keep some for mounting asymmetry).
+
+*`fig6_mount_geometry.png` — regenerate with `plot_mount_geometry.py`.*
+
+⚠ **Widening the two ranges independently is the CHEAP fix, not the right one.** It would let
+the sampler draw physically impossible combinations (12 kg with zero CoM shift — exactly the
+direction Bar B measured and the hardware cannot realize). The principled fix is a **coupled**
+payload event: sample `m`, then set the mass AND the CoM offset from it via `m*d/(M+m)`, so the
+DR traverses the 1-D deployment ray instead of a 5-D box containing it. That is a small change
+to `apply_payload_dr` and it would also make Bar B measurable on the ray by construction.
+
+⚠ Note `com_dz` is the component the HL responds to LEAST (r = −0.109 on s42, sign-flipping
+across seeds). So the axis furthest out of distribution is also the least influential — mildly
+reassuring, but the training distribution still never contained the deployment configuration,
+and `docs/adr/0009` is the standing warning that a bench cannot see a reserve it never taxes.
+
+## SPEC — coupled payload-mount randomization (2026-09-02, grilled + approved)
+
+Decision record → `docs/adr/0010-coupled-payload-mount-randomization.md`. Glossary terms
+(**Mounted payload**, **Mount lever arm** `d`, `ê` vs `z`) → `CONTEXT.md`.
+**Status: IMPLEMENTED and verified 2026-09-02** — see "Implementation result" at the end.
+
+### Scope
+
+Replace the two independent torso events (payload mass, CoM offset) with **one** event that
+samples a mounted payload and derives mass, CoM and rotational inertia from it.
+
+**Explicitly NOT changed:** `env_latent_e` (a pure readback — it already reports realized
+deltas, so it works unmodified); the `base_com` event and its meaning; task ids; `e`'s
+dimension (ℝ⁵) and therefore the deploy contract (HL 94→99, `φ` outputs 5); the LL; the HL
+reward weights including `hl_cot_coef`; `deploy/` in its entirety; PROVENANCE.json and
+checkpoint staging; **every non-payload task, which must stay byte-identical** (the WP2
+inertness gate — the event is still registered only by `apply_payload_dr`).
+
+### The physics
+
+Pseudo-inertia of a body, `h = m·c` (first moment), `Σ = ∫ r rᵀ dm` (second moment):
+
+    J = [[Σ,  h ],        Σ  = ½ tr(I_o) I₃ − I_o        I_o = I_c + m(cᵀc I₃ − c cᵀ)
+         [hᵀ, m ]]
+
+Adding a point mass `m_p` at body-frame position `p` is an **exact rank-1 update**:
+
+    J' = J + m_p [p;1][p;1]ᵀ
+
+then read back `m' = J'₃₃`, `c' = J'₀:₃,₃ / m'`, `I_o' = tr(Σ') I₃ − Σ'`,
+`I_c' = I_o' − m'(c'ᵀc' I₃ − c' c'ᵀ)`, and eigendecompose `I_c'` into MuJoCo's principal
+moments (`body_inertia`) + principal frame (`body_iquat`).
+
+⚠ **`p` is anchored to the DEFAULT torso CoM, not the current one**: `p = ipos_default + d`.
+The pack is bolted to the shell, so its physical location cannot depend on `base_com`, which
+represents *uncertainty about* the torso CoM rather than a real displacement. Anchoring to
+`ipos_default` also makes `p` independent of event order; only the resulting combined CoM
+depends on `base_com`, which is correct.
+
+### Sampling
+
+    m   ~ U(0, 12) kg           d_x ~ U(0.13, 0.19) m
+    d_y ~ U(-0.03, 0.03) m      d_z ~ U(-0.28, -0.18) m
+
+Per-env (`shared_random=False`), `mode="startup"` as before. `M_torso` is **read from the
+model**, never hardcoded. Measured rig: `d = (0.1625, 0, -0.2348)`; the `d_x` range covers the
+cable-cover ambiguity (0.1425–0.1865 across extreme readings of where the cover sits).
+
+### Files
+
+| file | change |
+|---|---|
+| `src/tasks/velocity/mdp/payload_inertia.py` | **NEW.** Pure-torch `add_point_mass(mass, ipos, inertia, iquat, m_p, p)` → `(mass', ipos', inertia', iquat')`, batched over envs. No mjlab imports **in the module itself**, so it stays trivially unit-testable. Plus the event `payload_mount(env, env_ids, mass_range, d_ranges, asset_cfg)`. |
+| `src/tasks/velocity/config/h1_2/env_cfgs.py` | Rewrite `apply_payload_dr` to register `payload_mount` **last** (`cfg.events.pop("base_mass", None)` then insert), with a startup assertion that `base_com` precedes it. |
+| `scripts/play.py` | `--eval-payload-kg m` applies mass + CoM + inertia at **mean `d` = (0.16, 0, −0.23)**, i.e. "the rig, loaded to m kg". |
+| `tests/test_payload_mount.py` | **NEW**, four groups below. |
+| `scripts/check_test_sensitivity.py` | One mutation per group. |
+
+### ⚠ The ordering guard is load-bearing
+
+`Operation.add` has `uses_defaults=True` (`dr/_types.py:94-99`), so the engine writes
+`default + random` — two `add` events on `body_ipos` mean **the second erases the first**, and
+`apply_payload_dr:352` records `base_com` as running *after* the payload event today. Written
+the obvious way the CoM shift silently vanishes and `env_latent_e` keeps reporting a plausible
+number. Hence: the event is registered **last**, writes `body_ipos` itself (composing on the
+current value), and asserts at startup that `base_com` precedes it in the event dict.
+
+### Test plan (defined up front, per the workflow)
+
+1. **Composition + ordering.** After startup, `body_ipos` carries **both** the `base_com`
+   residual and the payload shift. Mutation: swap the event order → must be CAUGHT.
+2. **Physical consistency.** `(mass, ipos, inertia)` match closed form for a known `(m_p, p)`;
+   inertia eigenvalues stay strictly positive and satisfy the triangle inequality across the
+   full sampled `(m, d)` range. Mutation: apply the parallel-axis term about the body origin
+   instead of the CoM.
+3. **Eval-pin parity.** `--eval-payload-kg m` produces the same `(mass, ipos, inertia)` that
+   training samples at that `m` with `d = d_mean`. Mutation: pin mass only.
+4. **`e` readback fidelity.** `env_latent_e` still returns realized
+   `(payload, com_dx/dy/dz, friction)` after the coupled event, payload column = added mass,
+   com columns = **total** delta. Mutation: report the payload-induced shift only.
+
+### Acceptance
+
+`pytest` green including the 4 new tests; `check_test_sensitivity.py` catches all 4 new
+mutations; a 2-iteration train smoke on `Unitree-H1_2-Flat-A1-Payload` showing a non-zero
+`com_dz` at high `m` in `env_latent_e` (the composition defect's live signature); and
+**non-payload tasks byte-identical** — the WP2 inertness gate re-run.
+
+### Deferred, deliberately
+
+Phase-1 seeds are **not** re-run now. They are re-run once, after A1a itself is settled, so the
+cost is paid a single time (owner's call, 2026-09-02). Until then the Bar B verdict stands as a
+measurement on a DR that cannot represent the rig — which is the finding, not a defect in it.
+Provenance markers go into both Phase-1 run dirs, since replace-in-place leaves their
+`params/env.yaml` as the only record of what they trained on.
+
+
+### Implementation result (2026-09-02)
+
+`pytest` **193 passed**, 2 skipped (185 + 8 new). `check_test_sensitivity.py`: **89/89, baseline
+green, zero misses** — including all four new ADR-0010 mutations.
+
+**Live probe, 256 envs on `Unitree-H1_2-Flat-A1-Payload`** — the coupling is real in the sim,
+not just in the unit tests:
+
+| `e` column | mean | min | max |
+|---|---|---|---|
+| payload | +5.714 | +0.006 | +11.969 |
+| com_dx | +0.035 | −0.045 | **+0.097** |
+| com_dz | −0.052 | **−0.132** | +0.044 |
+| friction | +0.958 | +0.309 | +1.599 |
+
+`corr(payload, com_dx)` = **+0.647**, `corr(payload, com_dz)` = **−0.753**. Not ±1 by design:
+`base_com` still adds an independent ±0.05 residual and `d` is randomized, which is exactly
+what keeps `com` from being a deterministic function of `m`.
+
+**Inertia is written and tracks the payload**: principal moments span 0.129–0.282 /
+0.420–1.362 / 0.494–1.391 (sorted ascending by `eigh`; compare the sorted nominal
+`[0.1278, 0.4096, 0.4873]` — each starts at nominal near m=0 and grows),
+`corr(payload, tr(I))` = **+0.867**, and `body_iquat` deviates from identity by up to 1.62,
+i.e. the principal frame genuinely rotates. ⚠ The correlation is 0.867 rather than ~1 because
+`tr(I) ∝ m·|p−c'|²` depends on the randomized `d` as well as on mass — that is the right
+answer, not a shortfall.
+
+**The `dr.body_mass` UserWarning is gone** from the training log (it fired on every previous
+payload run): mass is no longer sampled through a function documented as valid only for a
+point mass *at* the CoM. 2-iteration train smoke on the payload task exits 0 with
+`payload_mount` listed in the event manager table.
+
+⚠ **A third WP2 test had gone VACUOUS and neither `pytest` nor review could see it.**
+`test_apply_payload_dr_is_opt_in_not_on_the_base_tasks` — the inertness gate protecting replay
+of every existing A0/A1 checkpoint — asserted `"base_mass" not in cfg.events`. ADR-0010 renamed
+that event, so the assertion started checking for a key that exists nowhere: green, and passing
+even with payload DR applied unconditionally to the base A0 task. Caught only by
+`check_test_sensitivity.py`, and only because it requires the **named** test to fail (the
+mutation did cause a failure, in a different test). Now asserted on the event's **function
+origin**, which cannot be renamed without changing behaviour. General rule → `hrl-infra.md`.
+
+⚠ **Two other WP2 tests had to be rewritten**, not deleted: they asserted the old `base_mass`
+contract, and `check_test_sensitivity.py` refused to run at all
+(`BASELINE NOT GREEN`) until they were. They now assert the **new** contract *and* the
+`base_com` → `payload_mount` ordering, which the old ones could not check because the
+dependency did not exist. Without the harness's green-baseline gate this would have surfaced
+as four "weak new tests" in a sensitivity score rather than as a design change needing a
+decision.

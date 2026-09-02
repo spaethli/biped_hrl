@@ -334,35 +334,56 @@ PAYLOAD_DR_RANGE = (0.0, 12.0)
 
 
 def apply_payload_dr(
-  cfg: ManagerBasedRlEnvCfg, ranges: tuple[float, float] = PAYLOAD_DR_RANGE
+  cfg: ManagerBasedRlEnvCfg,
+  ranges: tuple[float, float] = PAYLOAD_DR_RANGE,
 ) -> None:
-  """WP2 (2026-08-31): promote torso payload to a randomized env parameter.
+  """WP2/ADR-0010: promote the MOUNTED PAYLOAD to a randomized env parameter.
 
-  Extends the existing ``base_mass`` DR term (previously only reachable via the
-  wide-DR bundle, ``apply_wide_dr`` above) rather than adding a parallel mass
-  mechanism -- same event key, same ``dr.body_mass`` function, same torso asset_cfg
-  as ``base_com``. ``--eval-payload-kg`` (``play.py``) overwrites this same event key
-  with a degenerate pinned range, so it keeps working unchanged whether or not the
-  loaded task calls this function.
+  Registers a single ``payload_mount`` event that samples a payload mass and a mount lever
+  arm ``d``, then DERIVES the torso mass, CoM shift and rotational inertia from them (see
+  ``project_mdp.payload_inertia``). Replaces the pre-ADR-0010 arrangement, which extended the
+  independent ``base_mass`` event and left CoM to ``base_com`` and inertia unmodelled --
+  able to draw 12 kg with zero CoM shift, and unable to draw the rig at all past 4.8 kg.
 
-  Deliberately NOT called from the base flat/A1 env cfgs: registering the event
-  unconditionally would make ``dr.body_mass`` sample RNG on every reset even at a
-  degenerate (0, 0) range (it still draws from the distribution before multiplying
-  by a zero-width range), shifting the RNG stream consumed by every event registered
-  after it (``foot_friction``, ``encoder_bias``, ``base_com``, ``push_robot``) and
-  failing the WP2 inertness gate even though the physical result would be identical.
-  Only task variants that explicitly call this function carry payload DR; the plain
-  ``Unitree-H1_2-Flat``/``-A1`` tasks are untouched.
+  ``base_com`` is deliberately KEPT and untouched: it means uncertainty in the *robot's own*
+  CoM, a claim that holds with no payload present, and it exists in every task. The payload
+  event composes on top of it.
+
+  ⚠ **ORDERING IS LOAD-BEARING.** ``Operation.add`` has ``uses_defaults=True``
+  (``dr/_types.py:94-99``), so the DR engine writes ``default + random``, not
+  ``current + random``: two ``add`` events on ``body_ipos`` mean the second ERASES the first.
+  ``payload_mount`` must therefore run after ``base_com``, which the assertion below pins --
+  a new key lands last in the dict, but a future edit that reorders or re-inserts ``base_com``
+  would otherwise break it SILENTLY (the CoM shift vanishes and ``env_latent_e`` keeps
+  reporting a plausible number).
+
+  Deliberately NOT called from the base flat/A1 env cfgs: the event samples RNG, so
+  registering it unconditionally would shift the stream consumed by every event after it and
+  break replay of every existing checkpoint. Only task variants that call this function carry
+  payload DR.
   """
-  cfg.events["base_mass"] = EventTermCfg(
+  if "base_com" not in cfg.events:
+    raise ValueError("apply_payload_dr requires a 'base_com' event to borrow the torso "
+                     "asset_cfg from and to order against.")
+  # base_mass is subsumed: mass is now derived from the mount, never sampled on its own.
+  cfg.events.pop("base_mass", None)
+  cfg.events["payload_mount"] = EventTermCfg(
     mode="startup",
-    func=envs_mdp.dr.body_mass,
+    func=project_mdp.payload_mount,
     params={
       "asset_cfg": cfg.events["base_com"].params["asset_cfg"],
-      "operation": "add",
-      "ranges": ranges,
+      "mass_range": ranges,
+      "d_ranges": project_mdp.MOUNT_D_RANGES,
     },
   )
+  keys = list(cfg.events)
+  if keys.index("base_com") > keys.index("payload_mount"):
+    raise ValueError(
+      "payload_mount must run AFTER base_com: base_com uses operation='add', which the DR "
+      "engine applies to the COMPILE-TIME DEFAULT, so running it later overwrites the "
+      "payload CoM shift instead of composing with it -- silently. Event order is "
+      f"{keys}."
+    )
 
 
 def unitree_h1_2_flat_payload_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:

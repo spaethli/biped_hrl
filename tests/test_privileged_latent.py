@@ -115,31 +115,55 @@ def test_env_latent_e_is_zero_payload_and_zero_com_when_dr_is_disabled():
 
 
 def test_apply_payload_dr_is_opt_in_not_on_the_base_tasks():
-  """WP2 acceptance gate: the base A0/A1 task registrations must not carry the
-  base_mass event, or dr.body_mass's RNG draw (even at a degenerate range) shifts the
-  stream every later-registered event consumes, breaking the inertness proof."""
+  """WP2 acceptance gate: the base A0/A1 registrations must carry NO payload event at all,
+  or its RNG draw shifts the stream every later-registered event consumes and the inertness
+  proof (hence replay of every existing A0/A1 checkpoint) breaks.
+
+  ⚠ Asserted on the event's FUNCTION ORIGIN, not its key. The key-based version of this
+  test went vacuous the moment ADR-0010 renamed ``base_mass`` -> ``payload_mount``: it kept
+  asserting the absence of a key that no longer exists anywhere, so it passed even with
+  payload DR applied unconditionally to the base task. ``check_test_sensitivity.py`` caught
+  that (2026-09-02); a name is not a safe thing to hang an acceptance gate on.
+  """
   import mjlab.tasks  # noqa: F401
   import src.tasks  # noqa: F401
   from mjlab.tasks.registry import load_env_cfg
 
   for task in ("Unitree-H1_2-Flat", "Unitree-H1_2-Flat-A1"):
     cfg = load_env_cfg(task)
-    assert "base_mass" not in cfg.events, (
-      f"{task}: base_mass event present on a task that never calls apply_payload_dr"
-    )
+    offenders = [
+      k for k, v in cfg.events.items()
+      if "payload_inertia" in getattr(getattr(v, "func", None), "__module__", "")
+    ]
+    assert not offenders, f"{task}: payload event(s) {offenders} on a non-payload task"
+    assert "base_mass" not in cfg.events, f"{task}: stale base_mass event present"
 
 
-def test_apply_payload_dr_adds_exactly_the_base_mass_event_at_the_given_range():
+def test_apply_payload_dr_registers_the_coupled_mount_event_last():
+  """ADR-0010: one `payload_mount` event, and it MUST follow `base_com`.
+
+  `base_mass` is gone -- mass is derived from the mount, never sampled independently.
+  The ordering is load-bearing, not cosmetic: `base_com` uses operation="add", which the
+  DR engine applies to the compile-time DEFAULT, so running it after the payload event
+  would overwrite the CoM shift instead of composing with it, silently.
+  """
   from src.tasks.velocity.config.h1_2.env_cfgs import (
     apply_payload_dr,
     unitree_h1_2_flat_env_cfg,
   )
+  from src.tasks.velocity.mdp.payload_inertia import MOUNT_D_RANGES
 
   cfg = unitree_h1_2_flat_env_cfg()
-  assert "base_mass" not in cfg.events
+  assert "payload_mount" not in cfg.events
   apply_payload_dr(cfg, ranges=(0.0, 12.0))
-  assert cfg.events["base_mass"].params["ranges"] == (0.0, 12.0)
-  assert cfg.events["base_mass"].params["asset_cfg"] is cfg.events["base_com"].params["asset_cfg"]
+
+  ev = cfg.events["payload_mount"]
+  assert "base_mass" not in cfg.events, "independent mass sampling must be gone"
+  assert ev.params["mass_range"] == (0.0, 12.0)
+  assert ev.params["d_ranges"] == MOUNT_D_RANGES
+  assert ev.params["asset_cfg"] is cfg.events["base_com"].params["asset_cfg"]
+  keys = list(cfg.events)
+  assert keys.index("base_com") < keys.index("payload_mount"), keys
 
 
 def test_payload_dr_task_variants_carry_the_event():
@@ -149,8 +173,11 @@ def test_payload_dr_task_variants_carry_the_event():
 
   for task in ("Unitree-H1_2-Flat-Payload", "Unitree-H1_2-Flat-A1-Payload"):
     cfg = load_env_cfg(task)
-    assert "base_mass" in cfg.events
-    assert cfg.events["base_mass"].params["ranges"] == (0.0, 12.0)
+    assert "payload_mount" in cfg.events, task
+    assert "base_mass" not in cfg.events, task
+    assert cfg.events["payload_mount"].params["mass_range"] == (0.0, 12.0)
+    keys = list(cfg.events)
+    assert keys.index("base_com") < keys.index("payload_mount"), (task, keys)
 
 
 # --- HighLevelTd3 obs_e_dim wiring ----------------------------------------------------
