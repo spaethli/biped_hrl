@@ -673,7 +673,16 @@ A0's 0.5960, 1.01x) — a fixed clock IS a cadence pin, so do not read it as a l
 off the cadence floor, against the pre-flight's saturated 0.3527 at coef 0.2. The grid
 predicted T* ≈ 0.400 — an independent confirmation of the objective reconstruction.
 
-### BAR B — **FAIL on both seeds**
+### BAR B — **FAIL on both seeds** (ADJUDICATED 2026-09-03, `docs/adr/0011`)
+
+**Owner's decision: the FAIL is RECORDED with its mechanism, not re-stated against a component
+that passes.** `com_dx` (-0.851) and `friction` (+0.684) would clear a Bar-B-shaped statistic
+scaled to their own DR spread, but that component would have been chosen *after* seeing which
+one passes. The counterfactual result below is reported as **evidence for the mechanism, not a
+substitute gate** — it was not pre-registered. ⚠ **Phase 2's gate is written fresh and
+pre-registered before its estimator is fit, and must partial the other latent components out
+when written**; the partial and counterfactual-slope estimators here stay post-hoc diagnostics.
+
 
 7 pinned payloads x 64 envs x 2 eval seeds = 448 envs, command pinned vx=0.5
 (period is near-binary in the command, so a random-command average is a standing/walking
