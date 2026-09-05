@@ -4,7 +4,8 @@
 2026-07-02: `hl_cadence_source="hl"` gives the TD3 HL the period as +1 action dim, CoT enters
 the HL window reward via `hl_cot_coef` — see `doc/hrl/A1a_plan.md`; S3 = first learned-HL run).
 ⚠ **The S4/S5 gate verdicts below were scored on a CoT denominator that changed 2026-07-10 and
-are retired — see the Amendment at the end. S4's A1a half PASSES at `hl_cot_coef=5`.**
+are retired — see the Amendments at the end. S4's A1a half PASSES at `hl_cot_coef=5`, and
+`hl_cot_coef=5` + `rel_standing_envs=0.20` meets it in BOTH regimes (2026-09-05).**
 
 ## Context
 
@@ -190,3 +191,50 @@ neighbouring weights — reverts to unvalidated.
 Instrument: `python scripts/play.py <TaskID> --checkpoint-file <pt> --num-envs 64
 --diagnose-cadence 600 --eval-cmd-vx 0.5` reports the HL's commanded period, its within-episode
 std across windows, and windows-per-stride (`[CADDIAG] {json}`).
+
+## Amendment 2026-09-05 — S4 met in BOTH regimes, and the CoT ratio's second exploit
+
+**`hl_cot_coef=5` + `rel_standing_envs=0.20` is the first A1a arm to match or beat A0 in both
+regimes at the benchmark speed** (`2026-09-02_17-34-56_a1a_fullmirror_cot5_standing20_s42`,
+1 seed, all numbers re-measured in one session against a same-session A0):
+
+| | A0 | c5_r20 | | | A0 | c5_r20 |
+|---|---|---|---|---|---|---|
+| WALK `act_legs` | 0.6161 | **0.94x** | | STAND `act_legs` | 0.0164 | **0.67x** |
+| WALK `ajit_p95` | 62988 | **0.50x** | | STAND `ajit` mean | 377.0 | **0.93x** |
+| WALK `jacc_p95` | 83.95 | **0.56x** | | STAND `jacc` mean | 0.726 | **0.95x** |
+| WALK `ss_err_vx` | 0.0538 | **0.92x** | | STAND **touchdowns** | 128 | **128 (floor)** |
+| WALK **CoT** | 0.5137 | **0.82x** | | STAND `double_support` | 0.997 | 0.998 |
+| WALK `stride` | 0.578 | **1.00x** | | STAND `ajit_p95` | 63.9 | **11.1x** |
+
+0 falls in both. Residual = the standing p95 (transient) channel, 3.3-11x, unclosed in every
+arm ever measured. **`hl_cot_coef=7` never reaches the standing floor at any standing
+fraction** (best 201 td), so the S5 cap is tighter from the standing side than the walking
+side that placed it on 2026-09-01.
+
+**A second exploit of the CoT ratio, and the fix.** The 2026-07-10 change stopped the HL
+earning distance SIDEWAYS. It still earns distance by going FASTER than commanded, and the
+incentive is steepest where the denominator is smallest:
+
+| | signed `end_err_vx` | `hl_err_vx` | `ll_err_vx` |
+|---|---|---|---|
+| c5_r20 @ cmd 0.25 | **+0.1524** (runs ~0.40 for a 0.25 command) | **0.1975** | 0.1167 |
+| c5_r20 @ cmd 0.50 | +0.0691 | 0.1224 | 0.1241 |
+| `hl_cot_coef=0.2` @ cmd 0.25 | +0.0394 | 0.0777 | 0.0721 |
+
+`hl_err > ll_err` at cmd 0.25 confirms the HL originates it. Consequence: **`ss_err_vx` is
+4.5x A0 at cmd 0.25 and 2.2x at 1.0 while being 0.92x at 0.5.** The smoothness and energy
+wins ARE speed-robust (`act_legs` 0.94-0.98x, `ajit_p95` 0.44-0.50x, CoT 0.68-0.82x over
+0.25/0.5/1.0); only tracking is not, and `hl_cot_coef=0.2` at the same `rse` tracks A0-level
+at all three, so the cause is the weight, not the standing fraction.
+
+**`hl_cot_cap_commanded` (default False, byte-identical when off)** caps the credited
+distance at the COMMANDED distance: `d = min(d_walked, d_commanded)` before the `d_floor`
+clamp. Overshooting then costs energy and earns no further credit; under-shooting is
+untouched, so `d_floor`'s anti-stall role and the 07-10 projection are unchanged. Formula
+moved to `hrl_runner.window_cot()` for a test seam; `tests/test_window_cot.py` pins the
+INCENTIVE (including `test_cap_off_lets_overshoot_pay`, which pins the defect itself).
+
+**Generalizes:** a normalized reward whose denominator the agent influences is an incentive
+to inflate that denominator. Check every direction it can be inflated — 07-10 closed
+"sideways", this closes "faster". Ask the question once per axis of the denominator.

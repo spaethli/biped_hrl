@@ -44,6 +44,17 @@ ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
+  # ADR-0004 S1c: `CoT = energy / walked distance` is a ratio whose denominator the HL
+  # controls, so uncapped it pays for walking FURTHER than commanded. Measured overshoot at
+  # hl_cot_coef=5: +0.152 m/s at cmd 0.25 (61%), hl_err 0.198 > ll_err 0.117 (2026-09-05).
+  ("CoT denominator credits distance beyond the command (overshoot pays)", HR,
+   "torch.minimum(win_dist, win_cmd)", "torch.maximum(win_dist, win_cmd)",
+   "test_cap_on_makes_overshoot_strictly_worse"),
+
+  ("CoT commanded-distance cap silently disabled (flag becomes a no-op)", HR,
+   "torch.minimum(win_dist, win_cmd) if cap_commanded else win_dist", "win_dist",
+   "test_cap_on_credits_nothing_beyond_the_command"),
+
   # ADR-0009: the deploy clip is kept, so it stays pinned to h1_2_limits.h, and the yaml must
   # not carry a duplicate key (yaml-cpp keeps the FIRST, PyYAML the LAST -- three A0 hardware
   # sessions on 2026-08-27 ran clipped while the config read `clip: null`).

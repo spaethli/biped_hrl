@@ -128,8 +128,19 @@ is already near it** — that metric is informative only when failing.
   `jacc_legs_p95`, 8.6–11.4× on commanded `ajit_legs_p95`** (at `cmd 0` the mean sits *above*
   the p95 — the set-down transient carries it). On the *aggregate* `jacc_legs_p95` every A1
   arm beats A0 (0.48–0.92×) while sitting 1.0–1.8× above on the mean.
-  ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **Walking — SOLVED 2026-09-01 by
-  `hl_cot_coef=5`, not by the cadence range.** A1 had been stepping at ~0.35 s vs A0's 0.578 s
+  ⚠ RQ2: A0 trains at `rel_standing_envs=0.05`. **BOTH REGIMES SOLVED 2026-09-05 by
+  `hl_cot_coef=5` + `rel_standing_envs=0.20`** (`2026-09-02_17-34-56_..._cot5_standing20_s42`,
+  1 seed): walk `act_legs` 0.94x A0, `ajit_p95` 0.50x, `jacc_p95` 0.56x, `ss_err_vx` 0.92x,
+  `err_vy` 0.58x, **CoT 0.82x**, stride 1.00x; stand `act_legs` **0.67x**, `ajit`/`jacc` means
+  0.93x/0.95x, touchdowns **128 = the floor**, `double_support` 0.998 vs 0.997; 0 falls in
+  both. Unique among 11 arms in the `cot {5,7}` x `rse {0.10..0.20}` grid. ⚠ **Two caveats:**
+  the standing p95 (transient) channel is still 3.3-11x, unclosed in every arm ever measured;
+  and the TRACKING win is speed-specific — `ss_err_vx` is 4.5x A0 at cmd 0.25 and 2.2x at 1.0
+  (the smoothness/energy wins ARE speed-robust). That is a signed OVERSHOOT the HL originates
+  (`+0.152 m/s` at cmd 0.25, `hl_err` 0.198 > `ll_err` 0.117): `CoT = energy / walked distance`
+  pays for covering more ground than commanded. Fix implemented as `hl_cot_cap_commanded`
+  (default off, `docs/adr/0004` Amendment 2026-09-05); untested arm pending.
+  **Walking alone was solved 2026-09-01 by `hl_cot_coef=5`, not by the cadence range.** A1 had been stepping at ~0.35 s vs A0's 0.578 s
   because the HL commands the range floor at `hl_cot_coef=0.2`; the CoT weight was calibrated
   on a denominator that changed 2026-07-10 (`docs/adr/0004` Amendment). At coef 5 the HL picks
   an interior 0.775 s and the arm beats A0 on **9 of 10** walking metrics — `act_legs` 0.96×,

@@ -237,6 +237,18 @@ analysis and the proposed change first.
   rule: a coefficient is calibrated against a REWARD, not a task; reformulating a reward term
   reverts every weight tuned against it, and every sweep that ruled out neighbours, to
   unvalidated.
+  ⚠ **2026-09-05: `hl_cot_coef=5` + `rel_standing_envs=0.20` matches/beats A0 in BOTH regimes**
+  (walk `act_legs` 0.94x, CoT 0.82x, stride 1.00x; stand `act_legs` 0.67x, touchdowns at the
+  128 floor) — unique among 11 arms of a `cot {5,7}` x `rse {0.10..0.20}` grid. `cot 7` never
+  reaches the standing floor at any `rse`. **But `CoT = energy / walked distance` also pays the
+  HL for going FASTER than commanded** (2026-07-10 closed "sideways", this is "faster"):
+  signed overshoot **+0.152 m/s at cmd 0.25** with `hl_err` > `ll_err`, so `ss_err_vx` is 4.5x
+  A0 at 0.25 and 2.2x at 1.0 while 0.92x at 0.5. Smoothness/energy wins are speed-robust;
+  tracking is not — **always sweep the command speed before calling a tracking win**. Opt-in
+  fix `hl_cot_cap_commanded` (default off = byte-identical) caps the credited distance at the
+  commanded distance; formula in `hrl_runner.window_cot()`, tests in `tests/test_window_cot.py`.
+  General: a normalized reward whose denominator the agent influences is an incentive to
+  inflate that denominator — check every axis it can be inflated along.
 - **The deploy obs-dim contract is FAIL-CLOSED for the HRL state (WP5d, 2026-09-02).**
   `algorithms.h:81` still sizes the ORT input tensor from the ONNX declared shape and never
   compares it to the vector that was built (a mismatch reads adjacent HEAP -> erratic actions

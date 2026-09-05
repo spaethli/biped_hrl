@@ -43,6 +43,25 @@ from ...mdp.observations import env_latent_e
 from mjlab.envs.mdp.rewards import joint_acc_l2, joint_pos_limits
 
 
+def window_cot(win_energy, win_dist, win_cmd, d_floor, cap_commanded):
+  """Per-window dimensionless cost of transport for the HL reward (ADR-0004 S1c).
+
+  Denominator = distance walked ALONG THE COMMAND this window (signed projection since
+  2026-07-10; undirected let the HL earn cheap metres sideways), floored at what a
+  threshold-speed (0.1 m/s) walk covers so a stuck robot is expensive but finite.
+
+  ``cap_commanded`` (2026-09-05) additionally caps the credited distance at the COMMANDED
+  distance. Without it the HL lowers its own penalty by covering MORE ground than asked,
+  and the incentive is steepest where the denominator is smallest: at ``hl_cot_coef=5``
+  the measured overshoot was **+0.152 m/s at cmd 0.25 (61%)** vs +0.039 at coef 0.2, with
+  ``hl_err_vx`` (0.198) > ``ll_err_vx`` (0.117) confirming the HL originates it. Capping
+  makes exceeding the command cost energy while earning no further distance credit;
+  under-shooting is untouched, so the anti-stall property the floor exists for survives.
+  """
+  d = torch.minimum(win_dist, win_cmd) if cap_commanded else win_dist
+  return win_energy / (d.clamp(min=d_floor) * 75.0 * 9.81)
+
+
 class HierarchicalRunner(VelocityOnPolicyRunner):
   """Two-level HRL runner (A1). Low level = PPO; high level = pluggable."""
 
@@ -131,6 +150,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.cadence_period_range = tuple(train_cfg.get("cadence_period_range", (0.5, 1.4)))
     self.ll_cadence_coef: float = train_cfg.get("ll_cadence_coef", 0.0)
     self.hl_cot_coef: float = train_cfg.get("hl_cot_coef", 0.0)
+    self.hl_cot_cap_commanded: bool = train_cfg.get("hl_cot_cap_commanded", False)
     # d(T) duty schedule: swing time (s) held constant across periods; 0 = fixed-floor duty.
     self.cadence_swing_time: float = train_cfg.get("cadence_swing_time", 0.0)
     self.cadence_duty_range = tuple(train_cfg.get("cadence_duty_range", (0.56, 0.70)))
@@ -676,6 +696,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # reward (windows align with rollouts: num_steps_per_env % c == 0 is enforced).
     win_energy = torch.zeros(self.env.num_envs, device=self.device)
     win_dist = torch.zeros_like(win_energy)
+    win_cmd = torch.zeros_like(win_energy)  # commanded distance (hl_cot_cap_commanded)
     # WL-F: per-window leg action rate, and the running (sum_x, sum_y, sum_xx, sum_yy,
     # sum_xy, n) needed to correlate it with the per-fire estimator error without keeping
     # every sample. Reset per iteration so the logged correlation is that iteration's.
@@ -955,7 +976,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             _d_par = ((rd_.root_link_lin_vel_b[:, :2] * _cmd).sum(dim=-1)
                       / _cmd.norm(dim=-1).clamp(min=1e-6)) * _eng * uenv.step_dt
             win_dist += _d_par
-            #win_dist += _d_step
+            win_cmd += _cmd.norm(dim=-1) * _eng * uenv.step_dt
           # Refresh the goal in the post-step obs (remaining delta at the new state)
           # so the normalizer/next-act input is consistent. Carry the same per-step
           # estimator offset so the stored next-obs goal matches what the LL conditions on.
@@ -997,11 +1018,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             # gated-off (standing-command) window has zero energy -> exactly 0.
             if self.hl_cot_coef != 0.0:
               d_floor = 0.1 * self.c * uenv.step_dt
-              cot_w = win_energy / (win_dist.clamp(min=d_floor) * 75.0 * 9.81)
+              cot_w = window_cot(win_energy, win_dist, win_cmd, d_floor,
+                                 self.hl_cot_cap_commanded)
               self.hl.accumulate(-self.hl_cot_coef * cot_w)
               cot_pen_sum += -(self.hl_cot_coef * cot_w).mean().item()
               win_energy.zero_()
               win_dist.zero_()
+              win_cmd.zero_()
             self.hl.end_window(uenv, obs, achieved, dones, extras)
 
           # Episode bookkeeping uses task reward (A0-comparable); intrinsic is the

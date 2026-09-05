@@ -626,6 +626,18 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   commanded linear speed > 0.1; a distance floor keeps stuck-under-command windows expensive
   but finite, and an all-gated-off window is exactly 0). HL-only; the LL stays a pure tracker
   (the decoupling claim). 0 disables (byte-identical HL reward). Set >0 in S3+."""
+  hl_cot_cap_commanded: bool = False
+  """Cap the CoT denominator at the COMMANDED window distance (2026-09-05). Off = the
+  historical reward, byte-identical. On: ``d = min(d_walked, d_commanded)`` before the
+  ``d_floor`` clamp, so exceeding the command costs energy but earns no further distance
+  credit. **Why:** ``CoT = energy / walked distance`` pays the HL for covering more ground
+  than asked, and the incentive is steepest where the denominator is smallest. Measured at
+  ``hl_cot_coef=5``: signed overshoot **+0.152 m/s at cmd 0.25 (61%)** and +0.069 at cmd
+  0.5, with ``hl_err_vx`` 0.198 > ``ll_err_vx`` 0.117 (HL-originated); at coef 0.2 the same
+  arm family overshoots only +0.039. That overshoot is why ``hl_cot_coef=5`` tracks 4.5x
+  worse than A0 at cmd 0.25 and 2.2x at 1.0 while beating it at 0.5. Under-shooting is
+  untouched, so the anti-stall role of ``d_floor`` (and of the 2026-07-10 signed
+  projection) is unchanged. Sibling to ``hl_cot_coef``; a no-op when that is 0."""
   hl_velocity_goals_only: bool = True
   """Posture-sag fix (2026-07-09): the TD3 HL learns only the velocity goal columns
   (action = task_dim(+period) instead of goal_dim(+period)); orientation/height targets are
