@@ -238,3 +238,45 @@ INCENTIVE (including `test_cap_off_lets_overshoot_pay`, which pins the defect it
 **Generalizes:** a normalized reward whose denominator the agent influences is an incentive
 to inflate that denominator. Check every direction it can be inflated — 07-10 closed
 "sideways", this closes "faster". Ask the question once per axis of the denominator.
+
+## Amendment 2026-09-07 — seed 123: half the 09-05 claim survives
+
+Three seed-123 replicates, benched paired against their s42 twins with a same-session A0
+anchor and the full 0.25/0.5/1.0 command sweep.
+
+**Replicates on both seeds (`rse 0.20`):** **CoT 0.81x** (identical to 2 d.p.), `ajit_p95`
+0.49x/0.48x, `jacc_p95` 0.56x/0.63x, standing `act_legs` 0.60x/0.70x (quieter than A0),
+touchdowns 128/155 against A0's floor of 128, 0 falls.
+
+**Does NOT replicate:** walk `act_legs` 0.93x/1.03x, `ss_err_vx` 0.88x/1.03x, `err_vy`
+0.58x/1.15x — all STRADDLE parity. **The 09-05 wording "matches or beats A0 in BOTH regimes"
+is withdrawn.** The defensible claim is: beats A0 on energy, commanded smoothness and standing
+quietness; MATCHES it on walking magnitude and tracking within the seed spread. Note the
+pattern — every MAGNITUDE survived, every ERROR-type metric moved, the same split as the
+cross-session drift.
+
+**S4's criterion is unaffected**: it is written on `cot` at A0-level tracking and fall_rate,
+and `cot` is the metric that reproduced exactly (0.81x both seeds, and 0.77x twice on the
+earlier `rse 0.10` arm). Scoring S4 on an energy magnitude rather than a velocity error was,
+in hindsight, the right choice of gate quantity.
+
+**The low-speed overshoot is CONFIRMED at n=6** — all six `cot 5` arms (3 standing fractions
+x 2 seeds) sit at **3.13-5.37x A0 `ss_err_vx` at cmd 0.25** (mean 4.48x) while 0.64-1.03x at
+0.5. Robust property of the weight, exactly as the denominator mechanism predicts. The
+`hl_cot_cap_commanded` arm is now the highest-value pending run; pre-registration: cmd-0.25
+`ss_err_vx` should fall from ~4.5x toward the ~1.1x that `hl_cot_coef=0.2` achieves, with CoT
+staying <= ~0.85x and `ajit_p95` <= ~0.55x. If CoT regresses above A0, the cap removed the
+pressure instead of redirecting it.
+
+⚠ **`rel_standing_envs=0.15` is bimodal**: s42 breaks the WALKER (`ss_err_vx` 7.79x A0,
+commanded period 0.884 s), s123 breaks the STANDER (td 1702). Same config, opposite failures.
+2 of 6 `cot 5` runs failed, both in that cell — either 0.15 is a bifurcation point or the
+family has a ~1-in-3 failure rate, and **n=2 per cell cannot separate these**. `rse 0.12` is
+indistinguishable from 0.20 at n=2 (td 129/141 vs 128/155), so the operating point is
+**0.12-0.20**, not 0.20 uniquely.
+
+⚠ **Training stability:** `cot5_standing20_s123` died at iteration ~9124/10001 with an LL PPO
+action-std blow-up (`normal expects all elements of std >= 0.0`) while reward and episode
+length were healthy. Resumed from `model_9100` and cleared the same iteration immediately, so
+it is a rare sampling event, not a poisoned state — but a keeper that diverges at ~9k
+iterations is worth knowing before a deploy campaign.

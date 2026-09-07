@@ -237,13 +237,18 @@ analysis and the proposed change first.
   rule: a coefficient is calibrated against a REWARD, not a task; reformulating a reward term
   reverts every weight tuned against it, and every sweep that ruled out neighbours, to
   unvalidated.
-  ⚠ **2026-09-05: `hl_cot_coef=5` + `rel_standing_envs=0.20` matches/beats A0 in BOTH regimes**
-  (walk `act_legs` 0.94x, CoT 0.82x, stride 1.00x; stand `act_legs` 0.67x, touchdowns at the
-  128 floor) — unique among 11 arms of a `cot {5,7}` x `rse {0.10..0.20}` grid. `cot 7` never
-  reaches the standing floor at any `rse`. **But `CoT = energy / walked distance` also pays the
+  ⚠ **2026-09-07 (2 seeds each, same-session): `hl_cot_coef=5` + `rel_standing_envs` 0.12-0.20
+  BEATS A0 on energy/smoothness and MATCHES it on walking tracking.** Replicates: **CoT 0.81x**
+  (both seeds, 2 d.p.), `ajit_p95` 0.48-0.49x, `jacc_p95` 0.56-0.63x, standing `act_legs`
+  0.60-0.70x A0 at td 128-155 (floor 128). **Does NOT replicate — walk `act_legs`, `ss_err_vx`
+  and `err_vy` all straddle parity between seeds**, so the 09-05 "beats A0 in both regimes"
+  claim is withdrawn: every MAGNITUDE survived, every ERROR-type metric moved. `rse 0.15` is
+  **bimodal** (one seed breaks walking, the other breaks standing). `cot 7` never reaches the
+  standing floor at any `rse`. **But `CoT = energy / walked distance` also pays the
   HL for going FASTER than commanded** (2026-07-10 closed "sideways", this is "faster"):
-  signed overshoot **+0.152 m/s at cmd 0.25** with `hl_err` > `ll_err`, so `ss_err_vx` is 4.5x
-  A0 at 0.25 and 2.2x at 1.0 while 0.92x at 0.5. Smoothness/energy wins are speed-robust;
+  signed overshoot **+0.152 m/s at cmd 0.25** with `hl_err` > `ll_err`. **Confirmed at n=6:
+  all six `cot 5` arms (3 standing fractions x 2 seeds) run 3.13-5.37x A0 at cmd 0.25 (mean
+  4.48x) while 0.64-1.03x at 0.5.** Smoothness/energy wins are speed-robust;
   tracking is not — **always sweep the command speed before calling a tracking win**. Opt-in
   fix `hl_cot_cap_commanded` (default off = byte-identical) caps the credited distance at the
   commanded distance; formula in `hrl_runner.window_cot()`, tests in `tests/test_window_cot.py`.
