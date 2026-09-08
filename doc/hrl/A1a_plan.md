@@ -11,6 +11,93 @@ reference, Cost of transport) in `CONTEXT.md`.
 > base to keep this repo publishable. What remains here is the current design and
 > status: the options in use and how the working solution is implemented.
 
+## FROZEN A1a policy (2026-09-07)
+
+**A1a is fixed here.** The best policy tested on hardware to date is the keeper below;
+further A1a tuning is closed for now, and open ideas are parked in the backlog
+(hierarchy-benefit roadmap, research KB) rather than run.
+
+| | |
+|---|---|
+| Run | `logs/rsl_rl/h1_2_velocity_a1_v2/2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42` |
+| Checkpoint | `model_10000.pt` |
+| Deployed ONNX | `high_level.onnx` md5 `a38240fbe332`, `low_level.onnx` md5 `5f6fa925a1f0` (dims 94 / 96, `goal_scale` baked) |
+| Selected by | **hardware**, not the sim bench |
+
+Config that defines it (read from the run's own `params/`, not from the run name):
+
+- `hl_cot_coef=5.0`, `rel_standing_envs=0.12`, `seed=42`
+- `hl_algorithm=td3`, `hl_reward_mode=tracking`, `hl_velocity_goals_only=true`, `hl_vel_source=state`
+- `hl_cadence=true`, `hl_cadence_source=hl`, `cadence_period_range=(0.35, 1.0)`,
+  `cadence_duty_range=(0.56, 0.70)`, `ll_cadence_coef=0.5`
+- `joint_acc_l2` at the **default `-2.5e-7`**, `action_rate_l2 = -0.05`, `entropy_coef=0.005`
+
+⚠ **The hardware keeper is not the sim-frontier keeper.** The `jacc1e-7 + rse 0.20`
+combination that won the sim smoothness comparison is a *different* config: this run
+carries the stock `joint_acc_l2` weight and `rse 0.12`. Don't conflate the two when
+citing "the keeper" — say which bench selected it.
+
+⚠ Two known, accepted residuals, both already characterized and neither a blocker:
+the standing **p95** smoothness channel stays 3.3-11x A0 (unclosed in every arm ever
+measured), and low-speed tracking overshoots (**3.13-5.37x A0 `err_vx` at cmd 0.25**,
+confirmed n=6) because `CoT = energy / walked distance` pays the HL to exceed the
+command. The opt-in fix `hl_cot_cap_commanded` exists and is **not** enabled in this
+policy.
+
+**Parked ideas (filed, not run).** Foremost: a **stance / step-width penalty** — the robot
+keeps its feet close together (user, 2026-09-07). Checked and it is *rewarded*, not
+incidental: the H1-2 default pose has `hip_roll = 0`, which FK puts at a **0.326 m** stance
+width, and `rewards["pose"]` pulls `hip_roll` back to it (`std_walking` 0.15, `std_standing`
+**0.05**). Sensitivity is ~**1.63 m/rad**, so +0.05 rad of hip roll is already a 0.408 m
+stance. ⚠ **But `pose` does NOT explain the reported behaviour.** The narrowing is observed
+in **walking**, not standing (user, 2026-09-07), and `pose`'s hip_roll tolerance *loosens*
+3x from standing to walking — if `pose` dominated, standing would be the narrowest regime.
+So `pose` accounts only for the nominal geometry; the walking narrowing has another cause.
+**MEASURED 2026-09-07** (`play.py` now emits `stance_w_walk` / `stance_w_stand` /
+`stance_w_td`; 64 envs x 600 steps x 2 seeds, 8 arms in one batch). The keeper walks at
+**0.2577 m = 79% of nominal = 0.906x A0**, while standing at **0.981x A0** — **standing is at
+parity, walking is not**, matching the report. The cause is the CoT lever, but the response is
+**threshold-like, not proportional**: `cot 0.3` is the *widest* arm measured (1.107x A0),
+`cot 0.5` 1.048x, then a **step between 0.5 and 2**, then a plateau (2/5/7 -> 0.250/0.252/
+0.254). `cot 10` is excluded — `err_vx` 0.37 means it is not tracking, so its gait is not
+comparable. ⚠ A0 itself walks at 0.873 of nominal and narrows walking-vs-standing (0.940), so
+the lever **deepens a generic tendency rather than creating it**; and the keeper-vs-A0 9.4% gap
+is inside the ~10% walking replicate floor, so it is the **five-config dose-response**, not that
+pair, that carries the finding. And this is **not** a stability
+strategy — step width is the primary control variable for lateral balance, the actively
+unstable direction, so narrowing spends margin rather than buying it. ⚠ Sim **does** push
+laterally (`push_robot`: y ±0.5 m/s, roll ±0.52 rad/s, every 5-6 s, on the bench too — see the
+ADR-0009 correction of 2026-09-07), so the argument is **duty cycle**, not absence: the HL's
+CoT window is 0.16 s and a push lands every ~34 windows (~3%), so energy pressure is continuous
+while disturbance pressure is rare. `foot_sites_b()` (`rl/hrl/leg_odom.py:104`) computes the
+width from the 12 leg encoders and is a transcription of the deployed C++, so this is
+measurable in sim and on hardware with no new sensor. ⚠ `pose` is **shared with A0**, so an
+env-level width term is an RQ2 confound — the clean route is an LL-intrinsic term, as
+ADR-0002 did for the arms. Measure before retraining. Full entry → hierarchy-benefit
+backlog, Track I (research KB).
+
+**Deploy readiness: GO (2026-09-08).** `deploy_readiness.py` run by the owner on the frozen
+keeper returned a pass. Bridge artifacts corroborate a clean session:
+`logs/deploy_safety/2026-09-08_17-47-20_fullmirror_cot5_standing12_candidate*` — ~4 min,
+`VelocityHRL -> Passive` normal shutdown, `goal_scale` pinned from ONNX metadata, run() timing
+p99 <= 75 us with 0.022% overruns. The A0 control arm was served from cache (by design).
+So the keeper now carries **two independent forms of evidence: the hardware session and a
+pipeline GO.**
+
+⚠ **What the GO does and does not cover.** Its bridge stage is the MuJoCo bridge, not the
+robot, so it is strongest on the DEPLOY PATH (provenance/md5 identity, the obs-dim contract,
+config parity, A0 attribution) — precisely the defect class a hardware session cannot isolate.
+It is NOT a second confirmation of locomotion quality: it inherits the bench's blind spots,
+including the two found this week — no gate scores the RESPONSE to the `push_robot` disturbance
+(the ADR-0009 lost-reserve class), and the stance narrowing measured 2026-09-07 (walking width
+0.791 of nominal) is invisible to every readiness gate. Treat hardware and GO as complementary,
+not redundant.
+
+**Provenance is staged and clean** (`deploy_provenance.py --check` → `ok: true`,
+staged 2026-09-07). Before any bridge or hardware session, re-run that check: the
+deploy directory is a single mutable slot and a manual ONNX copy leaves no trace
+other than the md5.
+
 ## Current status (2026-07-24)
 
 - **Co-training is the A1a line** (user's call 2026-07-13, reaffirmed since).
@@ -1074,3 +1161,97 @@ contract, and `check_test_sensitivity.py` refused to run at all
 dependency did not exist. Without the harness's green-baseline gate this would have surfaced
 as four "weak new tests" in a sensitivity score rather than as a design change needing a
 decision.
+
+## WP5 Phase 1 — RERUN on the frozen keeper LL (2026-09-08)
+
+Phase 1's verdict had been measured on a different frozen LL, so it did not describe the
+deployed system. Retrained the Phase-1 HL with the **A1a keeper's LL** frozen underneath
+(`2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42/model_10000.pt`), `rse 0.12` +
+resampling `(3.0, 20.0)` (both inherited from the keeper, as the original inherited its LL's
+`0.15` / `(3,8)`); all other WP5 protocol held. Runs
+`2026-09-08_07-48-18_..._keeperLL_standing12_s42` and `2026-09-08_10-39-15_..._s123`.
+
+| | new s42 | new s123 | orig s42 | orig s123 | bar |
+|---|---|---|---|---|---|
+| `err_vx` | 0.1133 | 0.1073 | 0.1142 | 0.1067 | < 0.1219 ✓ |
+| `act_legs` | **0.5698** | **0.5904** | 0.7027 | 0.6939 | < 0.8363 ✓ |
+| `stride_period_s` | 0.6330 | 0.6232 | 0.4024 | 0.4067 | off floor ✓ |
+| Bar B `r` | **−0.5799 PASS** | −0.1593 FAIL | +0.089 FAIL | +0.268 FAIL | \|r\| ≥ 0.5 |
+
+- **Policy bar PASSES both**, and `act_legs` now sits **below the A0 anchor (0.5960)** on both
+  seeds — the frozen keeper LL carried its smoothness up into the Phase-1 policy.
+- **Bar B is STILL NOT MET** as a two-seed gate (PASS/FAIL). Much closer than the original
+  FAIL/FAIL (signal up, `sigma_eps` down to 0.0173/0.0276 from 0.033), but ⚠ **both slopes are
+  NEGATIVE against a pre-registered POSITIVE sign**, so s42 clears the letter of `|r| ≥ 0.5`
+  while contradicting the mechanism's predicted direction. Not restated as a pass — ADR-0011's
+  precedent applies.
+- **Core WP5 claim PASSES on the deployed LL**, and the read channels **swapped**: `payload` is
+  now read on BOTH seeds with a consistent sign (cf ΔT −0.0190 / −0.0186, 6.7 / 3.8 SE) where it
+  was previously the weakest channel and n.s. on s42. `friction` is significant on both but with
+  **opposite signs**; `com_dx` stays seed-dependent with the two seeds' roles **inverted** vs the
+  original — two independent 2-seed measurements now agree that `com_dx` reading is seed-luck.
+- **Cadence is much slower (commanded T ≈ 0.75–0.91 s vs ≈ 0.40 s), and it is real**: training
+  `hl/period_mean` converged to 0.7010 vs the original's 0.5149, opposite to what the lower
+  standing fraction would predict. The HL's commanded period tracks the frozen LL's natural
+  cadence (keeper realized stride 0.554 s vs ~0.345 s for the old lineage).
+- ⚠ **Do not read 5-component regression partials off a pinned sweep**: `--eval-payload-kg`
+  moves CoM with mass, so `corr(payload, com_dx) = +0.669`, `corr(payload, com_dz) = −0.779`
+  (R² 0.358 vs full-DR 0.802). The counterfactual is the clean instrument.
+- ⚠ Bar B `r` must be pooled over all **448 envs**, never over the 7 arm means — averaging
+  strips the per-env noise the bar is judged against (arm-means gives a spurious −0.966).
+
+## WP5 Phase 2 — `phi` trained and gated, then redone on the keeper (2026-09-07/08)
+
+Trains `phi` (`_CnnPhi`, 92-dim -> ℝ⁵ over a 50-frame `obs["policy"]++obs["command"]`
+window — the adaptation module WP5d's deploy path was built to accept), supervised
+against the privileged `e`. Spec grilled per CLAUDE.md before any code. Full
+pre-registration (gate statistic, splits, ablation/Phase-3-lite protocol, all 8 grilled
+decisions) and both runs' complete per-column/per-regime tables → journal
+`a1a-experiment-journal.md` 2026-09-07/08.
+
+**The gate** (ADR-0011's binding constraint — partial the other 4 latent components out,
+never re-state against a favorable one): per column, `|r_partial(z_hat_i, e_true_i |
+e_true_{j≠i})| ≥ 0.5` AND marginal R² ≥ 0.3, scored on held-out envs only, reported per
+column, never aggregated into one boolean. `phi`'s pinned input includes command
+(WP5d's shipped contract) — a documented deviation from Kumar et al.'s RMA design this
+WP does not have standing to reopen; a throwaway 89-dim ablation (no command, never
+exported) is the cheap A/B instead.
+
+Re-run 2026-09-08 on the WP5 Phase-1 rerun above (keeper LL, `2026-09-08_07-48-18_
+..._s42` / `..._10-39-15_..._s123`), superseding the first run (pre-keeper Phase-1,
+`2026-09-01_20-25-30_..._s42` / `..._23-18-56_..._s123`).
+
+| column | R² (keeper) | r_partial (keeper) | R² (pre-keeper) |
+|---|---|---|---|
+| payload_kg | 0.957 | 0.950 | 0.971 |
+| com_dx | 0.950 | 0.965 | 0.963 |
+| com_dy | 0.901 | 0.963 | 0.939 |
+| com_dz | 0.825 | 0.884 | 0.940 |
+| friction | 0.974 | 0.995 | 0.990 |
+
+- **Gate PASSES all 5 columns on both HL/LL pairs.** Margin is smaller on the keeper
+  (`com_dz` now weakest; plausibly its different LL reward shaping and/or its longer
+  `(3,20)` command-resampling holds vs the original `(3,8)`), but the shape is identical.
+- **Payload alone fails to interpolate a withheld 5-7 kg band (R² -0.32/-0.80) and to
+  extrapolate past its 12 kg training ceiling (R² -19.7/-29.6 at Bar F's 15 kg block)**,
+  on both pairs — a prediction of what that hardware block will find (a systematic
+  under-estimate, not noise), not a Bar-F verdict. Every other column, including an OOD
+  mount lever-arm (ADR-0010's own requested check), interpolates/extrapolates fine.
+- **Command-confound resolved**: the 89-dim ablation matches the 92-dim real model
+  almost exactly on both pairs (val loss within 0.002/0.00001 of each other). The
+  within-env standing-vs-walking wobble in `z_hat` (17-58% of the gate's between-env
+  signal) is a proprioceptive-excitation effect, not `phi` reading command as a
+  shortcut.
+- **Phase-3-lite** (nominal payload only — play mode never applies payload DR): swapping
+  true `e` for `phi`'s estimate shifts tracking metrics 0.1-4.5%, never moves
+  `fall_rate` off 0, moves `act_legs` <1% absolute, on both pairs. Supports "Phase 3 is
+  skippable" at this one operating point; the loaded-payload point was not exercised.
+- **Distribution shift: 0/92 observation columns move beyond 2σ**, on both pairs
+  (largest ever seen: 0.098σ).
+- `adapt_encoder.onnx` exported (`HierarchicalRunner.export_adapt_encoder_onnx`,
+  unchanged) and metadata-verified; C++ `adapt_encoder_test` 28/28 out-of-tree. Not
+  validated: the full `State_RLHRL.cpp` load path (needs a DDS/hardware build
+  environment).
+
+The second half of Bar B (commanded `T` vs. true payload) is Phase-1/planning-chat
+territory per ADR-0011 and is not adjudicated here — see "WP5 Phase 1 — RERUN" above.

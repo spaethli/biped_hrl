@@ -184,6 +184,16 @@ class PlayConfig:
   by ``dx = m*d/(M_torso + m)`` (``M_torso`` = 17.789 kg), so payload and com_dx move
   TOGETHER on the robot and never independently as the two DR events sample them.
   Falsifying payload alone measures a direction the hardware cannot realize."""
+  hl_obs_e_source: Literal["true", "phi"] = "true"
+  """WP5 Phase 2's sim-side Phase-3-lite comparison (2026-09-07): 'true' (default,
+  byte-identical) feeds the HL the privileged env_latent_e as always; 'phi' swaps in
+  phi's reconstructed history estimate instead -- the sim-only decision input for
+  whether Phase 3 (fine-tuning the HL against phi's imperfect estimate) is needed.
+  Requires --phi-dir. Never touches deploy/ or the ONNX export path -- phi runs as a
+  torch module directly, mirroring the C++ decode/cold-start math for realism."""
+  phi_dir: str | None = None
+  """Directory from train_phi.py holding phi_real.pt + norm.json (with a z_cold key).
+  Required when --hl-obs-e-source phi."""
   video: bool = False
   video_length: int = 1000
   video_height: int = 1080 #| None = None
@@ -216,6 +226,76 @@ def _deep_merge(default: dict, override: dict) -> dict:
     else:
       out[k] = v
   return out
+
+
+def restore_run_structure(agent_cfg, env_cfg, resume_path: Path) -> None:
+  """Rebuild ``agent_cfg`` (+ ``env_cfg``'s goal dim) with the structure the checkpoint at
+  ``resume_path`` was trained with, not the task's current defaults: a checkpoint trained
+  with a different goal space crashes the load (dim mismatch), and a different
+  ``hl_algorithm`` silently builds the wrong high level (e.g. oracle instead of the
+  trained ppo/td3, whose state is then ignored). ``train.py`` dumps the launch config to
+  ``params/agent.yaml``; restore the structure-determining keys from there. Keys absent
+  from the yaml (older runs) or not on the cfg (e.g. A0) keep the defaults. Shared by
+  ``play.py`` and ``collect_phi_data.py`` (WP5 Phase 2), which both load frozen HRL
+  checkpoints outside their task's bare-default structure.
+  """
+  params_yaml = resume_path.parent / "params" / "agent.yaml"
+  if not params_yaml.exists():
+    return
+  saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
+  structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
+                    "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
+                    "hl_obs_vel", "hl_obs_e",
+                    # A1a cadence channel: without hl_cadence restored, eval rebuilt the
+                    # runner with the channel OFF -> fixed 0.6 clock, --eval-cadence-period
+                    # silently inert (the 2026-07-02 "no entrainment" false verdicts).
+                    "hl_cadence", "cadence_period_range", "ll_cadence_coef",
+                    "hl_cot_coef", "hl_cadence_source", "cadence_swing_time",
+                    "cadence_duty_range", "hl_velocity_goals_only")
+  restored = {k: saved[k] for k in structure_keys
+              if k in saved and hasattr(agent_cfg, k)}
+  # hl_velocity_goals_only defaulted to True on 2026-07-09: checkpoints saved
+  # before the key existed trained full-goal HLs, so ABSENCE must restore False
+  # (the "keys absent keep the defaults" rule would silently rebuild a task_dim
+  # HL and crash/mis-load every pre-change TD3 checkpoint).
+  if "hl_velocity_goals_only" not in saved and hasattr(agent_cfg, "hl_velocity_goals_only"):
+    restored["hl_velocity_goals_only"] = False
+  # Same absence rule for hl_obs_vel (defaulted to True 2026-07-10): checkpoints saved
+  # before the key existed trained HLs without the +2 vel obs -> absence must restore
+  # False or every pre-velobs TD3 checkpoint mis-builds 94-dim nets vs its saved 92.
+  if "hl_obs_vel" not in saved and hasattr(agent_cfg, "hl_obs_vel"):
+    restored["hl_obs_vel"] = False
+  for k, v in restored.items():
+    cur = getattr(agent_cfg, k)
+    if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):
+      v = _deep_merge(asdict(cur), v)  # cur is a cfg dataclass (hl_ppo / hl_td3)
+    setattr(agent_cfg, k, v)
+  # The env's goal obs dim was baked from the default runner cfg at task
+  # registration; re-derive it from the restored component list.
+  if "goal_components" in restored and "goal" in env_cfg.observations:
+    from src.tasks.velocity.rl.hrl.goal_space import goal_dim
+
+    env_cfg.observations["goal"].terms["goal"].params["dim"] = goal_dim(
+      tuple(restored["goal_components"])
+    )
+  if restored:
+    print(f"[INFO]: Restored run structure from {params_yaml.name}: "
+          f"{ {k: v for k, v in restored.items() if k in ('goal_components', 'hl_algorithm')} }")
+
+
+def foot_pos_b(robot, foot_ids: torch.Tensor) -> torch.Tensor:
+  """Foot site positions in the PELVIS frame, [B, 2, 3].
+
+  A pure function of the encoders, so this is exactly what hardware FK would produce from
+  `q` (`hrl::foot_site_b` / `leg_odom.foot_sites_b`, parity-checked). Used by the leg-odometry
+  bench and by the stance-width metric, which is why it is a function and not a closure.
+  """
+  rel_w = robot.site_pos_w[:, foot_ids, :] - robot.root_link_pos_w[:, None, :]
+  q = robot.root_link_quat_w                       # [B, 4] (w, x, y, z)
+  qv, qw = q[:, 1:], q[:, 0:1]
+  t = 2.0 * torch.cross(qv.unsqueeze(1).expand_as(rel_w), rel_w, dim=-1)
+  return rel_w - qw.unsqueeze(1) * t + torch.cross(
+    qv.unsqueeze(1).expand_as(t), t, dim=-1)
 
 
 def run_play(task_id: str, cfg: PlayConfig):
@@ -328,53 +408,8 @@ def run_play(task_id: str, cfg: PlayConfig):
     log_dir = resume_path.parent
 
     # Rebuild the runner with the structure the checkpoint was trained with, not the
-    # current task defaults: a checkpoint trained with a different goal space crashes
-    # the load (dim mismatch), and a different hl_algorithm silently builds the wrong
-    # high level (e.g. oracle instead of the trained ppo/td3, whose state is then
-    # ignored). train.py dumps the launch config to params/agent.yaml; restore the
-    # structure-determining keys from there. Keys absent from the yaml (older runs)
-    # or not on the cfg (e.g. A0) keep the defaults.
-    params_yaml = resume_path.parent / "params" / "agent.yaml"
-    if params_yaml.exists():
-      saved = yaml.full_load(params_yaml.read_text())  # dump_yaml writes python/tuple tags
-      structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
-                        "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
-                        "hl_obs_vel", "hl_obs_e",
-                        # A1a cadence channel: without hl_cadence restored, eval rebuilt the
-                        # runner with the channel OFF -> fixed 0.6 clock, --eval-cadence-period
-                        # silently inert (the 2026-07-02 "no entrainment" false verdicts).
-                        "hl_cadence", "cadence_period_range", "ll_cadence_coef",
-                        "hl_cot_coef", "hl_cadence_source", "cadence_swing_time",
-                        "cadence_duty_range", "hl_velocity_goals_only")
-      restored = {k: saved[k] for k in structure_keys
-                  if k in saved and hasattr(agent_cfg, k)}
-      # hl_velocity_goals_only defaulted to True on 2026-07-09: checkpoints saved
-      # before the key existed trained full-goal HLs, so ABSENCE must restore False
-      # (the "keys absent keep the defaults" rule would silently rebuild a task_dim
-      # HL and crash/mis-load every pre-change TD3 checkpoint).
-      if "hl_velocity_goals_only" not in saved and hasattr(agent_cfg, "hl_velocity_goals_only"):
-        restored["hl_velocity_goals_only"] = False
-      # Same absence rule for hl_obs_vel (defaulted to True 2026-07-10): checkpoints saved
-      # before the key existed trained HLs without the +2 vel obs -> absence must restore
-      # False or every pre-velobs TD3 checkpoint mis-builds 94-dim nets vs its saved 92.
-      if "hl_obs_vel" not in saved and hasattr(agent_cfg, "hl_obs_vel"):
-        restored["hl_obs_vel"] = False
-      for k, v in restored.items():
-        cur = getattr(agent_cfg, k)
-        if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):
-          v = _deep_merge(asdict(cur), v)  # cur is a cfg dataclass (hl_ppo / hl_td3)
-        setattr(agent_cfg, k, v)
-      # The env's goal obs dim was baked from the default runner cfg at task
-      # registration; re-derive it from the restored component list.
-      if "goal_components" in restored and "goal" in env_cfg.observations:
-        from src.tasks.velocity.rl.hrl.goal_space import goal_dim
-
-        env_cfg.observations["goal"].terms["goal"].params["dim"] = goal_dim(
-          tuple(restored["goal_components"])
-        )
-      if restored:
-        print(f"[INFO]: Restored run structure from {params_yaml.name}: "
-              f"{ {k: v for k, v in restored.items() if k in ('goal_components', 'hl_algorithm')} }")
+    # current task defaults (see restore_run_structure's docstring).
+    restore_run_structure(agent_cfg, env_cfg, resume_path)
 
   # Every headless eval/probe reports a DISTRIBUTIONAL mean, so the env count is part of the
   # measurement, not a perf knob. At 1 env a single command draw is the whole sample and the
@@ -524,7 +559,19 @@ def run_play(task_id: str, cfg: PlayConfig):
       runner.eval_cadence_period = cfg.eval_cadence_period
       print(f"[A1a] Fixed stride period = {cfg.eval_cadence_period} s.")
 
-    policy = runner.get_inference_policy(device=device)
+    if cfg.hl_obs_e_source == "phi":
+      if not getattr(runner, "hl_obs_e", False):
+        raise SystemExit("--hl-obs-e-source phi: this checkpoint was not trained with "
+                          "hl_obs_e -- there is no true-e channel to swap out.")
+      if cfg.phi_dir is None:
+        raise SystemExit("--hl-obs-e-source phi requires --phi-dir "
+                          "(train_phi.py's output directory).")
+      from phi_data import load_phi_for_inference
+      phi_model, phi_norm = load_phi_for_inference(cfg.phi_dir, device)
+      print(f"[INFO] hl_obs_e_source=phi: loaded {cfg.phi_dir}/phi_real.pt")
+      policy = runner.get_inference_policy(device=device, phi_model=phi_model, phi_norm=phi_norm)
+    else:
+      policy = runner.get_inference_policy(device=device)
 
     # A1a fixed-command eval/replay: pin the twist command so a stride-period sweep isolates the
     # commanded period from the natural velocity->period mapping. Collapse ranges to a point +
@@ -597,6 +644,13 @@ def run_play(task_id: str, cfg: PlayConfig):
       contact_sensor = uenv.scene["feet_ground_contact"]
     except KeyError:
       contact_sensor = None
+    # Stance-width metric (2026-09-07): the foot sites, same pair the leg-odometry bench uses.
+    try:
+      bench_foot_ids, _bfn = uenv.scene["robot"].find_sites(
+        ["left_foot", "right_foot"], preserve_order=True)
+      assert _bfn == ["left_foot", "right_foot"], f"foot site order: {_bfn}"
+    except Exception:
+      bench_foot_ids = None
     step_dt = uenv.step_dt
     MASS_G = 75.0 * 9.81  # H1-2 ~75 kg; dimensionless CoT = energy / (m g distance)
     # WP1 payload pilot: copper-loss-corrected CoT variant, metric-only (never enters any
@@ -680,6 +734,14 @@ def run_play(task_id: str, cfg: PlayConfig):
         jl_sum = torch.zeros(len(lim_names), device=env.device)  # mean excess/step (ADR-0008 sizing)
         jl_rew = {}  # term name -> summed |contribution|, for the reward-share table
         jl_cmds = []  # per-step POST-clip targets, for the commanded-range percentiles
+      # Stance width (2026-09-07): lateral foot separation in the pelvis frame, the control
+      # variable for lateral balance. REGIME-SPLIT on the same commanded-motion gate as the
+      # CoT numerator -- the narrowing is reported in WALKING, and `pose` pulls hip_roll to 0
+      # three times harder when standing (std 0.05 vs 0.15), so a pooled mean cannot say
+      # which regime moved. `_td` samples only at touchdown, which is the biomechanical
+      # definition of step width (foot PLACEMENT); the other two average over swing too.
+      w_walk_sum = w_stand_sum = w_td_sum = 0.0
+      w_walk_n = w_stand_n = w_td_n = 0
       energy_eng = dist_eng = td_count = 0.0  # CoT numerator/denominator + footfall count
       energy_eng_copper = 0.0  # copper-loss CoT numerator (metric-only)
       prev_contact: torch.Tensor | None = None
@@ -692,8 +754,14 @@ def run_play(task_id: str, cfg: PlayConfig):
         runner, "cadence_duty_range", (0.56, 0.70))
 
       with torch.inference_mode():
+        # WP5 Phase 2 phi hook: force a full buffer reset at the start of THIS seed's
+        # rollout (the closure's hist/fill persist across the seed loop, but env.reset()
+        # just discarded the simulator state -- an all-True mask is a no-op on the very
+        # first seed, where the buffer is already zeroed, and load-bearing on every seed
+        # after it, else the phi path would start seed 1 on seed 0's stale tail).
+        dones = torch.ones(env.unwrapped.num_envs, dtype=torch.bool, device=env.device)
         for _ in range(cfg.eval_steps):
-          actions = policy(obs)
+          actions = policy(obs, dones)
           obs, _, dones, extras = env.step(actions.to(env.device))
 
           # 1. Tracking error.
@@ -827,12 +895,30 @@ def run_play(task_id: str, cfg: PlayConfig):
           energy_eng += (power * eng).sum().item() * step_dt
           energy_eng_copper += (power_copper * eng).sum().item() * step_dt
           dist_eng += (lin_speed * eng).sum().item() * step_dt
+          # 6c. Stance width: |y_L - y_R| between the foot sites in the pelvis frame.
+          # `walk_m` is the same commanded-motion gate as the CoT numerator above, so the
+          # split matches how `cot` is scored.
+          if bench_foot_ids is not None:
+            wid = foot_pos_b(robot, bench_foot_ids)
+            wid = (wid[:, 0, 1] - wid[:, 1, 1]).abs()  # [B] lateral separation, m
+            walk_m = cmd[:, :2].norm(dim=-1) > 0.1
+            w_walk_sum += wid[walk_m].sum().item()
+            w_walk_n += int(walk_m.sum().item())
+            w_stand_sum += wid[~walk_m].sum().item()
+            w_stand_n += int((~walk_m).sum().item())
+
           # 7. Achieved stride period from footfall rising edges (same-foot touchdown interval).
           if contact_sensor is not None:
             is_contact = contact_sensor.data.current_contact_time > 0  # [B, n_feet]
             n_feet = is_contact.shape[1]
             if prev_contact is not None:
               td_count += (is_contact & ~prev_contact).float().sum().item()
+              # Step width proper: sample only on a rising edge, and only while walking.
+              if bench_foot_ids is not None:
+                td_m = (is_contact & ~prev_contact).any(dim=1) & walk_m
+                if bool(td_m.any()):
+                  w_td_sum += wid[td_m].sum().item()
+                  w_td_n += int(td_m.sum().item())
             prev_contact = is_contact.clone()
             # 8. Gait match vs the commanded clock (H2 lock-in diagnostic): fraction of feet
             # whose contact agrees with the commanded stance schedule (same rule as feet_gait).
@@ -933,6 +1019,11 @@ def run_play(task_id: str, cfg: PlayConfig):
         "cot_copper":   energy_eng_copper / (dist_eng * MASS_G + 1e-6),
         "omega_xy":     _m(omega_xys) if omega_xys else float("nan"),
         "ss_vx_var":    _m(achieved_vx_vars[ss0:]) if achieved_vx_vars else float("nan"),
+        # Stance width in metres. Nominal geometry (hip offsets, hip_roll=0) is 0.326 m,
+        # so a value near that IS the feet-together posture, and larger means abducted.
+        "stance_w_walk":  w_walk_sum / w_walk_n if w_walk_n else float("nan"),
+        "stance_w_stand": w_stand_sum / w_stand_n if w_stand_n else float("nan"),
+        "stance_w_td":    w_td_sum / w_td_n if w_td_n else float("nan"),
         "stride_period_s": (cfg.eval_steps * step_dt)
                            / max(td_count / max(n_envs * max(n_feet, 1), 1), 1e-6),
         # WP2: actual sampled payload (mean over envs), see the reset()-time read above.
@@ -1032,6 +1123,9 @@ def run_play(task_id: str, cfg: PlayConfig):
     print(f"  Energy    CoT copper: {_fmt('cot_copper')}")
     print(f"  Stability omega_xy  : {_fmt('omega_xy')}")
     print(f"  Stability ss_vx_var : {_fmt('ss_vx_var')}")
+    print(f"  Stance    width_walk: {_fmt('stance_w_walk')}  (nominal 0.326 m)")
+    print(f"  Stance    width_stand: {_fmt('stance_w_stand')}")
+    print(f"  Stance    width_td  : {_fmt('stance_w_td')}  (at touchdown, walking)")
     print(f"  Gait      stride_s  : {_fmt('stride_period_s')}")
     print(f"  Gait      match     : {_fmt('gait_match')}")
     print(f"  Env       payload_kg: {_fmt('payload_kg')}")
@@ -1574,16 +1668,7 @@ def run_play(task_id: str, cfg: PlayConfig):
     n_envs = uenv.num_envs
 
     def _foot_b() -> torch.Tensor:
-      """Foot positions in the PELVIS frame, [B, 2, 3] — a pure function of the encoders,
-      so this is exactly what hardware FK would produce from `q`."""
-      rel_w = robot.site_pos_w[:, foot_ids, :] - robot.root_link_pos_w[:, None, :]
-      # world -> body: quat_rotate_inverse, done via the projected-gravity-free route of
-      # rotating by the conjugate root quaternion.
-      q = robot.root_link_quat_w                       # [B, 4] (w, x, y, z)
-      qv, qw = q[:, 1:], q[:, 0:1]
-      t = 2.0 * torch.cross(qv.unsqueeze(1).expand_as(rel_w), rel_w, dim=-1)
-      return rel_w - qw.unsqueeze(1) * t + torch.cross(
-        qv.unsqueeze(1).expand_as(t), t, dim=-1)
+      return foot_pos_b(robot, foot_ids)
 
     est_a, true_a, keep_a, phase_a, spd_a = [], [], [], [], []
     orc_a, single_a, nct_a = [], [], []  # contact-oracle rungs

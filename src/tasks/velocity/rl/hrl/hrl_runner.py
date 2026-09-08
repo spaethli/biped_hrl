@@ -547,7 +547,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
       )
     raise NotImplementedError(f"hl_algorithm='{self.hl_algorithm}' is unknown.")
 
-  def get_inference_policy(self, device: str | None = None):
+  def get_inference_policy(self, device: str | None = None, phi_model=None, phi_norm=None):
     """Hierarchy-aware inference policy for play/eval.
 
     The base implementation returns the bare LL actor — but the LL's ``goal`` obs is
@@ -559,6 +559,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
 
     Known approximation (matches training): the window clock is not reset on episode
     resets, so after a mid-window reset the stale target persists for < c steps.
+
+    ``phi_model``/``phi_norm`` (WP5 Phase 2's sim-side Phase-3-lite comparison, off by
+    default -- ``None`` is byte-identical): when set, ``obs["hl_e"]`` is filled from
+    ``phi``'s reconstructed history instead of the true ``env_latent_e``, mirroring the
+    C++ deploy's cold-start-holds-then-switches contract (``z_cold`` while the 50-frame
+    buffer is filling; ``clamp(center+scale*raw, lo, hi)`` once it is). The returned
+    ``policy`` then takes an optional second argument, the ``dones`` from the PRIOR
+    ``env.step()`` (so this obs is the post-auto-reset one for those envs), which resets
+    only those envs' history buffer -- matching the buffer clear on every FSM entry.
+    Every existing caller passes only ``obs`` and is unaffected.
     """
     self.alg.eval_mode()
     self.hl.eval_mode()
@@ -566,9 +576,28 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     uenv = self.env.unwrapped
     step = 0
     target = None
+    hist = fill = None  # phi's ring buffer + per-env fill counter, lazily allocated
+    if phi_model is not None:
+      z_cold_t = torch.tensor(phi_norm["z_cold"], device=device, dtype=torch.float32)
+      z_center_t = torch.tensor(phi_norm["center"], device=device, dtype=torch.float32)
+      z_scale_t = torch.tensor(phi_norm["scale"], device=device, dtype=torch.float32)
+      z_lo_t = torch.tensor(phi_norm["clip_lo"], device=device, dtype=torch.float32)
+      z_hi_t = torch.tensor(phi_norm["clip_hi"], device=device, dtype=torch.float32)
 
-    def policy(obs):
-      nonlocal step, target
+    def policy(obs, dones: torch.Tensor | None = None):
+      nonlocal step, target, hist, fill
+      if phi_model is not None:
+        n = uenv.num_envs
+        if hist is None:
+          hist = torch.zeros(n, 50, 92, device=device)
+          fill = torch.zeros(n, dtype=torch.long, device=device)
+        if dones is not None and dones.any():
+          reset_ids = dones.nonzero(as_tuple=True)[0]
+          hist[reset_ids] = 0.0
+          fill[reset_ids] = 0
+        frame = torch.cat([obs["policy"], obs["command"]], dim=-1)
+        hist = torch.cat([hist[:, 1:, :], frame.unsqueeze(1)], dim=1)
+        fill = torch.clamp(fill + 1, max=50)
       state = self.goal_space.extract(uenv)
       if step % self.c == 0:
         # Eval is noise-free: feed the HL the clean lin-vel (deploy substitutes the
@@ -580,9 +609,17 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         # A1a comparator (blind-HL, bias-only probe) were scored.
         if self.hl_obs_vel:
           obs["hl_vel"] = state[:, 0:2]
-        # WP2: privileged latent e, ground truth at both train and eval (no noise model).
+        # WP2: privileged latent e, ground truth at both train and eval (no noise model)
+        # -- or, WP5 Phase 2's phi-driven estimate (see phi_model docstring above).
         if self.hl_obs_e:
-          obs["hl_e"] = env_latent_e(uenv, self._e_torso_cfg, self._e_foot_cfg)
+          if phi_model is not None:
+            with torch.no_grad():
+              raw = phi_model(hist)
+            z = torch.clamp(z_center_t + z_scale_t * raw, z_lo_t, z_hi_t)
+            cold = (fill < 50).unsqueeze(-1)
+            obs["hl_e"] = torch.where(cold, z_cold_t, z)
+          else:
+            obs["hl_e"] = env_latent_e(uenv, self._e_torso_cfg, self._e_foot_cfg)
         target = self.hl.act_inference(uenv, obs, state)
         # A1a: command the stride period for this window. source='hl': act_inference
         # already wrote the HL's period (an eval pin overrides it, for the CoT(period)
