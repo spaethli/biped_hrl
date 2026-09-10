@@ -116,10 +116,26 @@ missing when it read as drift.
 * **The bench cannot see this class of defect.** Every pre-registered metric improved under v3:
   `err_vx` 0.0903 vs 0.0941, `act_legs` 0.567 vs 0.600, `jacc_legs_p95` 62.1 vs 78.6, `fall_rate`
   0 for both. In the standing condition all three arms use 0.026-0.069 rad of ankle roll and none
-  approaches a bound, because sim standing applies no lateral disturbance. **A reserve is
-  invisible to any metric collected in the regime where the reserve is not needed.** Adding a
-  disturbance term to the benchmark is the prerequisite for trusting a non-inferiority bar on any
-  future change of this shape.
+  approaches a bound. **A reserve is invisible to any metric collected in the regime where the
+  reserve is not needed.**
+
+  ⚠ **Correction 2026-09-07 — the stated REASON was wrong, and it pointed at a no-op fix.**
+  This bullet originally read "because sim standing applies no lateral disturbance", and
+  prescribed "adding a disturbance term to the benchmark" as the prerequisite. **There already
+  is one.** `push_robot` (`events`, `push_by_setting_velocity`) fires every **5-6 s** in
+  training with linear `y` in **±0.5 m/s** and roll rate in **±0.52 rad/s**, and `play.py`
+  removes only `base_mass` from the event set, so the **bench applies it too**. Adding a
+  disturbance term would therefore have changed nothing.
+
+  The conclusion (the bench cannot see this defect) still stands; only the mechanism is now
+  open. What is actually missing is a metric that scores the **RESPONSE** to the push that
+  already happens — recovery time, peak ankle-roll demand, lateral excursion after an event —
+  rather than pooled statistics over a rollout in which a push is a small minority of steps.
+  Candidate explanations for why the loss stayed invisible, none of them yet tested: the event
+  sets base VELOCITY (an impulse the policy answers with one recovery step) rather than applying
+  a sustained lateral load; the ±0.5 m/s magnitude may sit below what the hardware delivered; and
+  pooled p1/p99 spans weight the disturbed steps only by their small duty cycle. **Do not cite
+  "sim applies no lateral disturbance" — it is false.**
 * **The step from "less range" to "worse push rejection" is an inference.** The range is measured
   in both sim and hardware and they agree to a few percent; the causal link to push rejection
   rests on the operator's hardware observation, at n=1 session for v3 and a single training seed

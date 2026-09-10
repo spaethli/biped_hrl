@@ -137,3 +137,59 @@ def test_reset_drops_the_cross_episode_difference():
 
   assert torch.allclose(v[0], torch.zeros(3)), "reset env must not difference across reset"
   assert v[1].abs().sum() > 1.0, "sanity: the un-reset env DOES see the jump"
+
+
+def test_nominal_stance_width_is_the_hip_offset_pair():
+  """Pins the 0.326 m nominal stance width quoted in doc/hrl/A1a_plan.md and ADR-0009's
+  correction, so a link-table or hip-offset edit cannot silently move the reference the
+  stance-width metric (`play.py --eval-steps ...` -> `stance_w_*`) is read against.
+
+  0.326 is not a free constant: it is twice the 0.163 m hip lateral offset, and it holds at
+  ANY symmetric leg pose with hip_roll = 0, because only hip_roll and hip_yaw move a foot
+  laterally. Both poses below are checked for that reason -- straight-legged and the
+  crouched default the policies actually train at (hip_pitch -0.2, knee 0.5, ankle -0.3).
+  """
+  import pytest
+  import torch
+  from src.tasks.velocity.rl.hrl.leg_odom import foot_sites_b
+
+  def width(q):
+    p = foot_sites_b(q)
+    return float((p[0, 0, 1] - p[0, 1, 1]).abs())
+
+  straight = torch.zeros(1, 12)
+  assert width(straight) == pytest.approx(0.326, abs=1e-3)
+
+  crouched = torch.zeros(1, 12)
+  for leg in (0, 1):  # sdk order per leg: yaw, pitch, roll, knee, ankle_pitch, ankle_roll
+    crouched[0, leg * 6 + 1] = -0.2
+    crouched[0, leg * 6 + 3] = 0.5
+    crouched[0, leg * 6 + 4] = -0.3
+  assert width(crouched) == pytest.approx(0.326, abs=1e-3), \
+    "hip_pitch/knee/ankle_pitch are sagittal; they must not change stance width"
+
+
+def test_stance_width_grows_with_symmetric_hip_roll():
+  """The sensitivity the stance-width finding rests on (~1.63 m/rad near 0).
+
+  Guards the SIGN and rough scale, not a fitted number: if abduction stopped widening the
+  stance, every reading of `stance_w_*` would invert in meaning while still looking
+  plausible.
+  """
+  import pytest
+  import torch
+  from src.tasks.velocity.rl.hrl.leg_odom import foot_sites_b
+
+  def width(hip_roll):
+    q = torch.zeros(1, 12)
+    for leg, sgn in ((0, 1.0), (1, -1.0)):
+      q[0, leg * 6 + 1] = -0.2
+      q[0, leg * 6 + 2] = sgn * hip_roll
+      q[0, leg * 6 + 3] = 0.5
+      q[0, leg * 6 + 4] = -0.3
+    p = foot_sites_b(q)
+    return float((p[0, 0, 1] - p[0, 1, 1]).abs())
+
+  w0, w5, w10 = width(0.0), width(0.05), width(0.10)
+  assert w0 < w5 < w10, "abduction must widen the stance"
+  assert (w5 - w0) / 0.05 == pytest.approx(1.63, rel=0.15)

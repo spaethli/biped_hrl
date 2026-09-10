@@ -81,6 +81,14 @@ OMITTED = {
     "mech_power_copper_w": "k*tau^2 is dominated by static holding torque; reads 26-33 vs sim ~0.5",
     "cot_copper": "see mech_power_copper_w; the same static-torque domination in the numerator",
     "payload_kg": "a PRIVILEGED sim extrinsic (env_latent_e); the robot carries no payload record",
+    # Stance width (2026-09-07). NOT dead-signal omissions like the rest of this table --
+    # `meas_q` carries all 12 leg slots, so `leg_odom.foot_sites_b` would give the walking
+    # and standing widths directly. Deferred rather than impossible: it needs the SDK slot
+    # order verified against a real session before the number can be trusted, and a wrong
+    # width is worse than an absent one. `_td` is the exception and IS impossible here.
+    "stance_w_walk": "computable from meas_q via foot_sites_b; DEFERRED pending SDK slot-order check on a real log",
+    "stance_w_stand": "computable from meas_q via foot_sites_b; DEFERRED pending SDK slot-order check on a real log",
+    "stance_w_td": "needs foot contact state to find touchdown; foot_force_* is dead (same reason as gait_match)",
 }
 
 
