@@ -478,6 +478,11 @@ def run_play(task_id: str, cfg: PlayConfig):
     )
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  # WP5 Phase 2 gave HierarchicalRunner.get_inference_policy an optional 2nd arg (`dones`,
+  # for phi's history-buffer reset). A flat or dummy policy's callable takes `obs` only and
+  # reads a 2nd positional as `masks` -> crash. Set True below once `policy` exists and the
+  # runner is hierarchical.
+  policy_wants_dones = False
   if DUMMY_MODE:
     action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
     if cfg.agent == "zero":
@@ -572,6 +577,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       policy = runner.get_inference_policy(device=device, phi_model=phi_model, phi_norm=phi_norm)
     else:
       policy = runner.get_inference_policy(device=device)
+    policy_wants_dones = hasattr(runner, "hl")  # only the hierarchical closure accepts (obs, dones)
 
     # A1a fixed-command eval/replay: pin the twist command so a stride-period sweep isolates the
     # commanded period from the natural velocity->period mapping. Collapse ranges to a point +
@@ -761,7 +767,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         # after it, else the phi path would start seed 1 on seed 0's stale tail).
         dones = torch.ones(env.unwrapped.num_envs, dtype=torch.bool, device=env.device)
         for _ in range(cfg.eval_steps):
-          actions = policy(obs, dones)
+          actions = policy(obs, dones) if policy_wants_dones else policy(obs)
           obs, _, dones, extras = env.step(actions.to(env.device))
 
           # 1. Tracking error.

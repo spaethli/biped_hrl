@@ -256,6 +256,11 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   fall_rate, action_rate, orient_dev, height_dev) + `[BENCH] {json}`, multi-seed mean±std.
   **Use `fall_rate`, NOT `ep_len`, for survival** (`episode_length_s=1e9`, no resets in play).
   A0 baseline 0.09/0.11/0.10. Strips exploration noise → judge HLs by this, not training err.
+  ⚠ **Flat-policy bench regressed on `405f459` and was fixed 2026-09-10:** WP5 Phase 2 changed
+  the eval loop to `policy(obs, dones)`; only `HierarchicalRunner`'s closure accepts the 2nd
+  arg, so a FLAT checkpoint crashed (`ValueError: dim0 and dim1…`, `dones` read as `masks`).
+  Guarded by `policy_wants_dones = hasattr(runner, "hl")` in `play.py`. No `tests/` seam covers
+  the eval loop — bench a flat *and* a hierarchical checkpoint after touching it.
 - **`--num-envs` is part of the measurement, not a perf knob (2026-08-09).** Every eval/probe
   reports a distributional mean, so at 1 env a single command draw *is* the sample and the
   result goes bimodal: the same A0 checkpoint gave `jacc_legs` 24.75/25.14/25.81/26.23 **and
