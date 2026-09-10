@@ -141,8 +141,8 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
         throw std::runtime_error("[HRL] unknown hrl.base_estimator '" + arm_name
                                  + "'. Valid: " + valid);
     }
-    spdlog::info("[HRL] base_estimator = {} (arm {}); the other six run passively and are "
-                 "logged only", arm_name, est_arm_);
+    spdlog::info("[HRL] base_estimator = {} (arm {}) feeds obs[\"hl_vel\"]; the other six "
+                 "run passively and are logged only", arm_name, est_arm_);
 #endif
 
     // FAIL-CLOSED base-state source check (2026-08-05). "Absent keeps the old path" is a
@@ -268,9 +268,11 @@ State_RLHRL::State_RLHRL(int state_mode, std::string state_string)
                      "only for A/B attribution. Set hrl.hl_vel_from_leg_odom for the real "
                      "absolute source (a real-robot config is REFUSED without it).");
     if (hl_vel_from_leg_odom_)
-        spdlog::info("[HRL] HL velocity from LEG ODOMETRY (stance-foot kinematics, "
-                     "c-averaged over each window). The LL's goal delta is untouched and "
-                     "still uses {} — the two velocity sources are deliberately split.",
+        spdlog::info("[HRL] HL velocity from the '{}' estimator arm, c-averaged over each "
+                     "window (arm 0 = leg odometry / stance-foot kinematics). The LL's goal "
+                     "delta is untouched and still uses {} — the two velocity sources are "
+                     "deliberately split.",
+                     kEstArmNames[est_arm_],
                      vel_from_imu_ ? "the IMU increment" : "rt/sportmodestate");
     if (vel_from_imu_ && hl_target_mode_ != "delta")
         spdlog::warn("[HRL] base_vel_from_imu with hl_target_mode={}: the increment "

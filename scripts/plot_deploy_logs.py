@@ -9,7 +9,11 @@ by column presence (same convention as scripts/deploy_gate_analyzer.py):
                        state/target, estimator-vs-ground-truth velocity/height, act_rate.
                        s0..s6 / tgt0..tgt6 are ALREADY physical units (vx, vy m/s; wz
                        rad/s; idx 3-5 projected-gravity, unitless; idx 6 height m) — the
-                       C++ deploy side decodes the tanh goal before logging.
+                       C++ deploy side decodes the tanh goal before logging. Views:
+                       goals, estimator, command, smoothness, plus goaltrack (goal vs
+                       operator cmd vs leg-odom achieved, in absolute units, + saturation)
+                       and imuint (raw acc integration vs the deploy estimator's
+                       within-window increment; reads the sibling base .csv for acc_*).
   all_joints_*.csv     read_all_joints.cpp (sibling repo h1_2_low_level_controller,
                        ~/ramlab_ws/trajectories/): q[i]/dq[i]/tau_est[i] per joint. Only
                        the CURRENT schema is supported — the two 2026-02-19 example files
@@ -142,6 +146,14 @@ def load_run(path: Path, kind: str) -> Run:
   meta = None
   if kind == "flight_base":
     meta_path = Path(f"{resolve_base(path)}_meta.json")
+    if not meta_path.exists():
+      # The recorder sometimes writes a name-suffixed meta (`<ts>_meta_<runname>.json`);
+      # accept it when exactly one sibling matches, same fallback as
+      # bench_flight_recorder.read_flight. Without this the keeper session loses its
+      # joint names AND its `base_estimator` (the arms view then draws all seven).
+      sib = sorted(Path(path).parent.glob(f"{Path(path).name[:19]}*meta*.json"))
+      if len(sib) == 1:
+        meta_path = sib[0]
     if meta_path.exists():
       meta = json.loads(meta_path.read_text())
     else:
@@ -588,8 +600,176 @@ def view_smoothness(runs, run_labels, out_dir, fmt, labels, downsample, **_):
   save_fig(fig, out_dir, "smoothness", fmt)
 
 
+def _window_starts(df: pd.DataFrame) -> np.ndarray:
+  """Row indices where an HL window begins.
+
+  `est_vx`/`est_vy` are within-window INCREMENTS reset to exactly 0 at each HL fire
+  (hrl_telemetry.h), so a row with both == 0 is a window start. On the keeper session
+  this recovers c=8 on 981/981 gaps."""
+  if "est_vx" not in df or "est_vy" not in df:
+    return np.array([0])
+  fire = (df["est_vx"].to_numpy() == 0.0) & (df["est_vy"].to_numpy() == 0.0)
+  idx = np.flatnonzero(fire)
+  return idx if len(idx) else np.array([0])
+
+
+def _sibling_base_df(run: Run, cols: list[str]) -> pd.DataFrame | None:
+  """The flight-recorder base .csv next to a _hrl.csv run, restricted to `cols`.
+
+  The two logs are written by the same C++ process off the same FSM-entry clock, so `t`
+  is directly comparable -- no affine pairing (that is only needed for the separate ROS
+  joint-telemetry log in bench_flight_recorder.py)."""
+  base = Path(f"{resolve_base(run.path)}.csv")
+  if not base.exists():
+    print(f"[PLOT] WARNING: {base.name} not found next to {run.path.name} -- skipping "
+          "the raw-IMU integration (it needs the base log's acc_*/quat_*)")
+    return None
+  have = set(read_header(base))
+  return pd.read_csv(base, usecols=[c for c in cols if c in have])
+
+
+def _cumtrapz_reset(y: np.ndarray, x: np.ndarray, starts: np.ndarray) -> np.ndarray:
+  """Cumulative trapezoid of y over x, re-zeroed at each index in `starts` -- the raw-IMU
+  counterpart of the estimator's within-window velocity increment."""
+  out = np.zeros_like(y, dtype=float)
+  edges = list(starts) + [len(y)]
+  for a, b in zip(edges[:-1], edges[1:]):
+    if b - a > 1:
+      out[a + 1:b] = np.cumsum(0.5 * (y[a + 1:b] + y[a:b - 1]) * np.diff(x[a:b]))
+  return out
+
+
+def view_goaltrack(runs, run_labels, out_dir, fmt, labels, downsample, **_):
+  """Is the HL goal (a) sensible vs the operator command and (b) achieved?
+
+  Unlike `goals`, this stays in ABSOLUTE velocity units on every line: operator `cmd`,
+  the HL's held target `tgt` (V*), and `lo_*` (leg-odometry absolute velocity) as the
+  achieved reference -- the `s0..s6` state is a within-window increment in `delta` mode
+  and is NOT comparable to an absolute target, which is exactly the trap `goals` falls
+  into. The bottom panel is |tgt| against the goal scale: a policy pinned at the bound is
+  saturating its goal channel (the pre-tracking-reward |g|->1 failure mode)."""
+  fig, axes = plt.subplots(4, 1, figsize=(10, 9), sharex=True)
+  for run, rlabel in zip(runs, run_labels):
+    df, t = run.df, run.df["t"].to_numpy()
+    pfx = f"{rlabel} " if len(runs) > 1 else ""
+    for ax, cmd_c, tgt_c, lo_c in ((axes[0], "cmd_vx", "tgt0", "lo_vx"),
+                                   (axes[1], "cmd_vy", "tgt1", "lo_vy"),
+                                   (axes[2], "cmd_wz", "tgt2", None)):
+      if cmd_c in df:
+        tt, yy = envelope_downsample(t, df[cmd_c].to_numpy(), downsample)
+        ax.plot(tt, yy, "k--", linewidth=1.0, alpha=0.7, label=f"{pfx}cmd")
+      if tgt_c in df:
+        tt, yy = envelope_downsample(t, df[tgt_c].to_numpy(), downsample)
+        ax.plot(tt, yy, linewidth=1.0, label=f"{pfx}HL target V*")
+      if lo_c and lo_c in df:
+        lo = df[lo_c].to_numpy()
+        if np.abs(lo).max() < 50.0:  # a diverged leg-odom stretch would flatten the axis
+          tt, yy = envelope_downsample(t, lo, downsample)
+          ax.plot(tt, yy, linewidth=1.0, alpha=0.85, label=f"{pfx}leg-odom achieved")
+    for tgt_c, lbl in (("tgt0", "|tgt vx| / scale"), ("tgt1", "|tgt vy| / scale")):
+      if tgt_c in df:
+        a = np.abs(df[tgt_c].to_numpy())
+        scale = float(np.round(a.max(), 2)) or 1.0
+        walk = ((df.get("cmd_vx", 0).abs() + df.get("cmd_vy", 0).abs()
+                 + df.get("cmd_wz", 0).abs()) > 0.1).to_numpy()
+        sat = float((a[walk] > 0.98 * scale).mean()) if walk.any() else float("nan")
+        tt, yy = envelope_downsample(t, a / scale, downsample)
+        axes[3].plot(tt, yy, linewidth=1.0,
+                     label=f"{pfx}{lbl}={scale:g}  (walk sat {100 * sat:.0f}%)")
+  axes[3].axhline(1.0, color="red", linestyle=":", linewidth=0.8)
+  for ax, ylab, ttl in zip(axes, ("m/s", "m/s", "rad/s", "fraction of bound"),
+                           ("vx", "vy", "wz", "goal saturation (|tgt| vs scale)")):
+    ax.set_ylabel(labels.ylabel or ylab); ax.set_title(ttl, fontsize=9)
+    legend_if_any(ax, fontsize=6)
+  axes[-1].set_xlabel(labels.xlabel or "t (s)")
+  fig.suptitle(labels.title or "Goal command vs achieved (absolute units)")
+  save_fig(fig, out_dir, "goaltrack", fmt)
+
+
+def view_imuint(runs, run_labels, out_dir, fmt, labels, downsample, **_):
+  """Estimator within-window velocity increment vs a raw trapezoidal IMU integration.
+
+  `est_vx`/`est_vy` in _hrl.csv ARE the deploy estimator's IMU-integrated increment
+  (complementary-filtered with leg odometry). This view re-derives the pure-IMU part
+  independently from the base log's `acc_*` (gravity removed via `quat_*`) and integrates
+  it over the same HL windows, so the gap between the two lines is the fusion correction /
+  drift the filter is absorbing. `gt_*` (bridge only) is the truth both are chasing.
+
+  First-order: gravity is projected out but the frame-rotation (omega x v) term is not,
+  which is negligible over a ~0.16 s window and is the point -- it shows how far raw
+  integration drifts before the next reset."""
+  fig, axes = plt.subplots(3, 1, figsize=(10, 8))
+  G = 9.81
+  end_est, end_raw, end_gt = [], [], []
+  for run, rlabel in zip(runs, run_labels):
+    hdf = run.df
+    th = hdf["t"].to_numpy()
+    base = _sibling_base_df(run, ["t", "acc_x", "acc_y", "quat_w", "quat_x", "quat_y", "quat_z"])
+    if base is None or "acc_x" not in base:
+      continue
+    tb = base["t"].to_numpy()
+    qw, qx = base["quat_w"].to_numpy(), base["quat_x"].to_numpy()
+    qy, qz = base["quat_y"].to_numpy(), base["quat_z"].to_numpy()
+    # body-frame gravity reaction (unit) -- same expression as projected_gravity_xy
+    grx = 2.0 * (qx * qz - qw * qy)
+    gry = 2.0 * (qy * qz + qw * qx)
+    a_lin_x = base["acc_x"].to_numpy() - G * grx
+    a_lin_y = base["acc_y"].to_numpy() - G * gry
+    # HL window starts, mapped from the hrl grid onto the base grid by time
+    starts_h = _window_starts(hdf)
+    # keep the base-grid starts 1:1 with the hrl-grid starts (no de-dup) so the
+    # end-of-window increment arrays line up for the scatter
+    starts_b = np.clip(np.searchsorted(tb, th[starts_h]), 0, len(tb) - 1)
+    raw_x = _cumtrapz_reset(a_lin_x, tb, starts_b)
+    raw_y = _cumtrapz_reset(a_lin_y, tb, starts_b)
+    pfx = f"{rlabel} " if len(runs) > 1 else ""
+    for ax, raw, est_c, gt_c in ((axes[0], raw_x, "est_vx", "gt_vx"),
+                                 (axes[1], raw_y, "est_vy", "gt_vy")):
+      tt, yy = envelope_downsample(tb, raw, downsample)
+      ax.plot(tt, yy, linewidth=0.9, label=f"{pfx}raw-IMU integral")
+      if est_c in hdf:
+        tt, yy = envelope_downsample(th, hdf[est_c].to_numpy(), downsample)
+        ax.plot(tt, yy, "--", linewidth=0.9, label=f"{pfx}estimator (est)")
+      if gt_c in hdf and not bool(np.all(hdf[gt_c].to_numpy() == 0)):
+        tt, yy = envelope_downsample(th, hdf[gt_c].to_numpy(), downsample)
+        ax.plot(tt, yy, ":", linewidth=0.9, label=f"{pfx}ground truth (gt)")
+    # end-of-window increments, all sampled at the SAME instant: the hrl row just before
+    # the next fire. raw_x/raw_y (base grid) are interpolated onto that time -- those
+    # instants sit inside a window, never on a reset, so the interp is within one segment.
+    end_t = th[np.clip(starts_h[1:] - 1, 0, len(th) - 1)]
+    ei = np.clip(starts_h[1:] - 1, 0, len(th) - 1)
+    end_est.append(np.concatenate([hdf["est_vx"].to_numpy()[ei], hdf["est_vy"].to_numpy()[ei]]))
+    end_raw.append(np.concatenate([np.interp(end_t, tb, raw_x), np.interp(end_t, tb, raw_y)]))
+    if "gt_vx" in hdf and not bool(np.all(hdf["gt_vx"].to_numpy() == 0)):
+      end_gt.append(np.concatenate([hdf["gt_vx"].to_numpy()[ei], hdf["gt_vy"].to_numpy()[ei]]))
+  if end_est and end_raw:
+    e = np.concatenate(end_est); r = np.concatenate(end_raw)
+    n = min(len(e), len(r)); e, r = e[:n], r[:n]  # defensive: identical by construction
+    m = np.isfinite(e) & np.isfinite(r)
+    axes[2].scatter(e[m], r[m], s=6, alpha=0.35, label="raw-IMU vs est")
+    if end_gt:
+      g = np.concatenate(end_gt)
+      mg = np.isfinite(e) & np.isfinite(g)
+      axes[2].scatter(e[mg], g[mg], s=6, alpha=0.35, label="gt vs est")
+    lim = float(np.nanpercentile(np.abs(np.concatenate([e[m], r[m]])), 99)) or 1.0
+    axes[2].plot([-lim, lim], [-lim, lim], "k-", linewidth=0.7)
+    axes[2].set_xlim(-lim, lim); axes[2].set_ylim(-lim, lim)
+    corr = float(np.corrcoef(e[m], r[m])[0, 1]) if m.sum() > 2 else float("nan")
+    mae = float(np.abs(e[m] - r[m]).mean()) if m.any() else float("nan")
+    axes[2].set_title(f"end-of-window increment  (corr {corr:.2f}, MAE {mae:.3f} m/s)", fontsize=9)
+  axes[0].set_ylabel(labels.ylabel or "m/s"); axes[0].set_title("vx increment", fontsize=9)
+  axes[1].set_ylabel(labels.ylabel or "m/s"); axes[1].set_title("vy increment", fontsize=9)
+  axes[1].set_xlabel(labels.xlabel or "t (s)")
+  axes[2].set_xlabel("estimator increment (m/s)"); axes[2].set_ylabel("raw-IMU / gt (m/s)")
+  for ax in axes:
+    legend_if_any(ax, fontsize=6)
+  fig.suptitle(labels.title or "Raw-IMU integration vs deploy estimator")
+  save_fig(fig, out_dir, "imuint", fmt)
+
+
 FLIGHT_HRL_VIEWS = {"goals": view_goals, "estimator": view_estimator,
-                    "command": view_command, "smoothness": view_smoothness}
+                    "command": view_command, "smoothness": view_smoothness,
+                    "goaltrack": view_goaltrack, "imuint": view_imuint}
 
 
 # ============================================================= joint_traj : views ====
