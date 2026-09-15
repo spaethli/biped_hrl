@@ -1200,6 +1200,38 @@ resampling `(3.0, 20.0)` (both inherited from the keeper, as the original inheri
 - ⚠ Bar B `r` must be pooled over all **448 envs**, never over the 7 arm means — averaging
   strips the per-env noise the bar is judged against (arm-means gives a spurious −0.966).
 
+## rs8 resampling ablation — BENCHED 2026-09-12, verdict: keep (3,20)
+
+Two undocumented co-trained arms (`2026-09-08_21-27-19_..._rs8_s42`,
+`2026-09-09_18-06-30_..._rs8_s123`) = the A1a keeper config with ONE field changed,
+`resampling_time_range (3.0,8.0)` vs the keeper's `(3.0,20.0)`. One batch, 64 envs x 600
+steps x 2 eval seeds, with A0 + F-mem s42 as anchors.
+
+| arm | err_vx | err_vy | fall | act_legs | jacc_p95 | cot | mech_W | stride | height_dev |
+|---|---|---|---|---|---|---|---|---|---|
+| A0 | 0.0835 | 0.1113 | 0 | 0.5955 | 72.6 | 0.5394 | 167.7 | 0.594 | 0.0243 |
+| F-mem s42 | 0.0841 | 0.1047 | 0 | 0.5776 | 66.0 | 0.5515 | 170.1 | 0.592 | 0.0224 |
+| keeper s42 | 0.1233 | 0.1029 | 0 | 0.6279 | 49.0 | 0.4561 | 161.3 | 0.556 | 0.0094 |
+| keeper s123 | 0.1271 | 0.1052 | 0 | 0.6188 | 46.2 | 0.4227 | 146.5 | 0.542 | 0.0075 |
+| **rs8 s42** | **0.3462** | 0.1765 | 0 | 0.4401 | 32.9 | 0.4194 | **70.8** | 0.690 | 0.0050 |
+| rs8 s123 | 0.1201 | 0.1051 | 0 | 0.6395 | 51.9 | 0.4801 | 168.9 | 0.525 | 0.0120 |
+
+Goal probe: rs8 s42 `ll_err_vx` **0.5488** / `gabs_vx` **0.754** / `end_err_vx` 0.346 (vs the
+keeper pair's 0.22-0.27 / 0.34-0.41 / 0.117); rs8 s123 is the set's BEST
+(`hl_err_vx` 0.1815, `ll_err_vx` 0.1885, `gabs_vx` 0.3016).
+
+- **rs8 is BIMODAL: 1 of 2 seeds collapsed.** s42 is a failed policy — the HL commands
+  near-saturated goals, the LL cannot follow, `mech_W` 70.8 vs 146-170, and the robot
+  under-walks at 4.2x A0 `err_vx`. ⚠ `fall_rate` is **0**, so the fall guard cannot see it
+  (same blind spot as `hl_cot_coef` 10/20).
+- **`(3,8)` does not earn the switch.** Good seed ~keeper-equal; bad seed collapses; the
+  keeper's `(3,20)` is 2/2 healthy. Retroactively supports the `(3,20)` choice for the WP5
+  Phase-1 rerun.
+- ⚠ **The F-mem bridge row reproduced the 2026-09-09 WP3 batch to 1.7% on `err_vx`** (and
+  <1% on `act_legs`/`cot`/`jacc`/`mech_W`), so these rows may be read directly against the
+  WP3 2x2 table. That contradicts the blanket "error metrics don't travel across sessions"
+  caution — carry a bridge row and let it decide, rather than assuming either way.
+
 ## WP5 Phase 2 — `phi` trained and gated, then redone on the keeper (2026-09-07/08)
 
 Trains `phi` (`_CnnPhi`, 92-dim -> ℝ⁵ over a 50-frame `obs["policy"]++obs["command"]`
@@ -1296,9 +1328,9 @@ the deterministic benchmark crashed for **every** flat checkpoint (confirmed on 
 older A0 too). Missed because Phase 2 only benched hierarchical checkpoints and `pytest` is
 CPU/no-MuJoCo. Fix: 3-line guard `policy_wants_dones = hasattr(runner, "hl")` (the file's own
 hierarchical marker, `play.py:1466`), pass the 2nd arg only when true. Smoke-verified on flat
-+ hierarchical + `--eval-payload-kg` + `--eval-cmd-vx`. `pytest` still 203/2. No `tests/` seam
-covers this runtime path — left as a working-tree change for the planning chat to commit; a
-regression guard needs a MuJoCo smoke.
++ hierarchical + `--eval-payload-kg` + `--eval-cmd-vx`. `pytest` still 203/2. Committed
+`1644088`. ⚠ No `tests/` seam covers this runtime path — a regression guard needs a MuJoCo
+smoke.
 
 ### Benchmark — all 6 policies, ONE batch, idle GPU, `--num-envs 64 --eval-steps 600 --eval-seeds 2`
 
@@ -1414,44 +1446,135 @@ confirm it is active stepping, not a static lean.)
 - **The A1a hierarchy reproduces the symptom** from ~10 kg up: H-mem *and* H-adapt step forward
   on a stand command, worse than F-mem (15 kg: 0.030–0.045 m/s, `act_legs` 24× unloaded,
   `mech_W` 30–45 W vs F-mem's 3–5 W). Not an adaptation effect — H-mem ≈ H-adapt.
-- **Mechanism (corrected 2026-09-10 — the first CoT explanation here was wrong).** The CoT
-  window reward is **command-gated**: `_eng = (|cmd_xy| > 0.1)` multiplies energy, walked
-  distance AND commanded distance per step (`hrl_runner.py` ~1000), so a standing-command
-  window has `win_energy = win_dist = win_cmd = 0` and `window_cot(...) → 0` exactly (the code
-  comment says so). CoT contributes **nothing** at a stand, and `hl_cot_cap_commanded` — which
-  only rewrites `d = min(win_dist, win_cmd)` — is a **no-op** there. The real cause is the
-  **frozen LL**: the A1a keeper LL (`2026-09-02_12-57-09_…`) was trained **payload-free**
-  (`payload_mount: 0`, `base_mass: 0` in its `env.yaml`). Under 15 kg of front-mounted load it
-  steps to keep balance — a low-level *execution* corruption. The HL has no lever:
-  `hl_velocity_goals_only=True` means it emits only velocity-goal columns (orientation/height
-  pinned to nominal), so it **cannot command a lean/posture to counter the forward CoM**; and
-  a perfect zero-velocity goal doesn't help because the payload-naive LL can't hold the stand
-  regardless. H-adapt's `e` channel changes *what is commanded*, not *how the LL executes*, so
-  H-mem ≈ H-adapt. F-mem is robust because it is one end-to-end policy trained *with* payload
-  DR — its control law adapted.
-  → **This is direct support for the thesis §4 "adaptation belongs low" principle**: payload
-  under a frozen LL corrupts "how a reference maps to motion", and a reference-adapting
-  hierarchy structurally cannot compensate it.
-- Large training-seed spread (hadapt_s123 as tight as F-mem; hmem_s42 17× worse) — the
-  "standing replicates 4.2×" caveat — but the worst hierarchical seed is well past the worst
-  flat seed, and F-mem is tight on both.
-- Polarity vs thesis H3: this is degradation-in-fidelity (not falls) under payload, but it is
-  the **flat** arm that stays robust and the **hierarchy** that degrades — inverting H3's
-  expected polarity. Raw JSON: `data/2026-09-09-wp3-baseline-arms/standhold_*`.
+- **Mechanism — worked through in three passes (2026-09-10), first two wrong.**
+  1. *First guess (wrong):* "`CoT = energy/walked-distance` pays the HL to walk off a loaded
+     stand for denominator."
+  2. *Correction (right about the reward, wrong about the conclusion):* the CoT window reward
+     is **command-gated** — `_eng = (|cmd_xy| > 0.1)` multiplies energy, walked distance AND
+     commanded distance per step (`hrl_runner.py` ~1000), so a standing window has
+     `win_energy = win_dist = win_cmd = 0` and `window_cot(...) → 0` exactly (code comment says
+     so). So CoT contributes nothing *in the standing-window reward*, and `hl_cot_cap_commanded`
+     is a no-op *there*. Concluded the cause was purely the **frozen payload-free LL** (keeper
+     LL `2026-09-02_12-57-09_…`: `payload_mount: 0`, `base_mass: 0`) stepping to balance under
+     load, unfixable by the HL.
+  3. *Correction (the cotcap retrain falsified pass 2's conclusion):* both `hl_cot_cap_commanded=
+     True` seeds **hold the loaded stand** (15 kg `ss_err_vx` 0.0010/0.0004 vs uncapped
+     0.0452/0.0348; `mech_W` 7 vs 42; `act_legs` 0.06 vs 0.48). So the frozen LL *can* hold a
+     loaded stand — **given a clean zero goal**. The cap is behaviourally active at a stand
+     *indirectly*: the uncapped `hl_cot_coef=5` HL learns a forward-**overshoot** habit from the
+     `|cmd|>0.1` walking windows (it is rewarded for covering more ground than commanded), and
+     that bias **leaks into the zero-command regime** — the HL emits a small forward `g` even at
+     `cmd 0`, which under payload compounds with the frozen LL into stepping. Goal probe
+     confirms the direction: cotcap `gabs_vx` 0.34–0.37 / `hl_err_vx` 0.19–0.21 vs uncapped
+     0.39–0.41 / 0.22–0.23. Two contributing factors, then: **(a) the HL's learned overshoot
+     bias** [fixed by the cap] and **(b) the payload-naive frozen LL's reduced margin** [would
+     be fixed by a full-DR LL]. Empirically (a) alone recovers standing-hold to ~F-mem at n=2.
+- The "adaptation belongs low" reading is **weakened**: the fix that worked is HL-side reward
+  shaping, not LL adaptation. A full-DR LL remains the *principled* fix and the taxonomy still
+  predicts it would help (b), but the HL-side fix was sufficient here.
+- Large training-seed spread on the uncapped arms (hadapt_s123 as tight as F-mem; hmem_s42
+  17× worse — the "standing replicates 4.2×" caveat). cotcap is 2/2 tight; n=2, but the effect
+  size (40–90×) is well past that spread.
+- Polarity vs thesis H3: for the **uncapped** arms this is degradation-in-fidelity (not falls)
+  under payload where the flat arm stays robust — inverting H3's expected polarity. The cap
+  removes the inversion. Raw JSON: `data/2026-09-09-wp3-baseline-arms/standhold_*`.
 
-**`hl_cot_cap_commanded=True` retrain (2026-09-10, user directive).** Kept, but re-scoped: it
-does NOT address the standing-hold drift (CoT is gated off there). It DOES bear on the separate
-`hl_cot_coef=5` low-speed **overshoot** at cmd 0.25 (where `_eng=1`), which the cap is designed
-for. Two H-mem seeds retrained with `--agent.hl-cot-cap-commanded True`, everything else
-identical to the WP3 H-mem runs (config diff = that one flag). Runs
-`a1a_hmem_cot5_cotcap_keeperLL_standing12_s{42,123}`. Benchmarked against the WP3 arms on base
-bench + held command; results below when done.
+### `hl_cot_cap_commanded=True` retrain — RESULTS (2026-09-10)
 
-**Recommended follow-up — a full-DR A1a (LL not frozen).** The standing-hold finding is a
-frozen-LL artefact: the deployable A1a keeper inherits an LL that never saw payload, and the HL
-cannot repair a low-level execution gap. A hierarchical arm co-trained on
-`Unitree-H1_2-Flat-A1-Payload` with the LL **unfrozen** (both levels adapt to the load) would
-test whether the hierarchy *can* hold a loaded stand when the adaptation is where the taxonomy
-says it belongs. ⚠ This breaks the thesis 2x2's "LL frozen at the keeper / LL never retrained"
-invariant, so it is a **new arm and a design decision for the planning chat**, not a WP3
-deliverable. If adopted it also re-opens LL re-validation (deploy parity, the WP5d contract).
+Two H-mem seeds retrained with `--agent.hl-cot-cap-commanded True`, everything else identical
+to the WP3 H-mem runs (config diff = that one flag; `env.yaml` identical). Runs
+`2026-09-10_10-27-27_a1a_hmem_cot5_cotcap_keeperLL_standing12_s42` /
+`2026-09-10_13-19-27_…_s123`. Benchmarked in the same shape as the WP3 batch.
+
+| metric (payload 0) | F-mem | H-mem uncapped | **cotcap** |
+|---|---|---|---|
+| `err_vx` | 0.086 | 0.134 / 0.117 | **0.112 / 0.104** |
+| `cot` | 0.55 | 0.407 / 0.436 | 0.428 / 0.421 |
+| `act_legs` | 0.58 | 0.588 / 0.614 | 0.582 / 0.583 |
+| `jacc_legs_p95` | 65 | 42 / 45 | 44 / 44 |
+| held `ss_err_vx` @cmd 0.25 | 0.053 / 0.031 | **0.138 / 0.136** | **0.056 / 0.056** |
+| held `ss_err_vx` @cmd 0.5 | 0.061 / 0.048 | 0.043 / 0.039 | 0.051 / 0.051 |
+| held `ss_err_vx` @cmd 1.0 | 0.102 / 0.092 | 0.239 / 0.148 | 0.165 / 0.172 |
+| stand `ss_err_vx` @15 kg | 0.0026 / 0.0005 | **0.0452 / 0.0348** | **0.0010 / 0.0004** |
+| stand `mech_W` @15 kg | 4.9 / 3.4 | 41.9 / 30.4 | 7.2 / 6.6 |
+
+- **Cures the cmd-0.25 overshoot** (0.056 ≈ flat, vs 0.137 uncapped — both seeds).
+- **Cures the standing-hold-under-payload drift** (≈ F-mem, both seeds) — see mechanism above.
+- **No measured cost** *(in the pooled payload-0 bench)*: `cot` unchanged, `err_vx` slightly
+  *tighter* than uncapped, payload sweep `cot`/`act_legs` degradation curves identical to uncapped.
+  ⚠ **FALSIFIED 2026-09-12 by the regime split** — there IS a cost, and it is in STANDING.
+  At `--eval-cmd-vx 0`, cotcap is the **worst standing arm of all 13** on both seeds:
+  `act_legs` **2.04x / 1.60x** A0, `ajit_legs_p95` **45.2x / 40.4x**, `mech_W` 1.49x / 2.07x
+  (vs the keeper's 0.93x / 7.6-17x, and F-mem's 1.06x / 1.9x). The pooled random-command bench
+  mixes regimes and could not see it. **A "no measured cost" claim is only as strong as the
+  regime split behind it.** cmd-1.0 undershoot persists
+  (pre-existing; `t90` NaN — a separate issue, the hierarchy dislikes commanded 1.0 m/s).
+- **Revised implication (post regime-split):** the cap fixes the cmd-0.25 overshoot and the
+  loaded-stand-hold **drift**, but does NOT fix — and may slightly worsen — standing
+  **smoothness** (`ajit_p95`), which is a hierarchy-vs-flat gap that exists with or without the
+  cap. "Flip the cap as default" is a real net win on drift/tracking but is not a free lunch;
+  the standing-smoothness cost has to be weighed (or separately worked) regardless.
+
+### `hl_cot_cap_commanded=True` retrain of H-adapt — RESULTS (2026-09-12)
+
+Same treatment on the other 2×2 cell, so the interaction term stays defined either way this
+resolves. Two H-adapt seeds retrained (`--agent.hl-obs-e True --agent.hl-cot-cap-commanded
+True`, everything else identical to the H-adapt Phase-1 rerun; config diff = the one flag,
+`env.yaml` identical). Runs `2026-09-12_11-19-46_a1a_hadapt_e_cot5_cotcap_keeperLL_standing12_s42`
+/ `2026-09-12_14-10-46_…_s123`. Benched in the same shape, including the regime split.
+
+| metric | uncapped s42 | uncapped s123 | **cotcap s42** | **cotcap s123** |
+|---|---|---|---|---|
+| held `ss_err_vx` @cmd 0.25 | 0.139 | 0.149 | **0.053** | **0.087** |
+| stand `ss_err_vx` @15 kg | 0.0301 | 0.0026 | **0.0006** | **0.0120** |
+| stand `mech_W` @15 kg | 45.3 | 10.1 | **7.3** | **26.3** |
+| stand `ajit_legs_p95` @0 kg | 2364 | 872 | 3044 | 1105 |
+| `gabs_vx` (goal probe) | 0.401 | 0.407 | 0.364 | 0.348 |
+
+- **cmd-0.25 overshoot: fixed on both seeds**, same as H-mem (0.053/0.087 vs 0.139/0.149).
+  `gabs_vx` down on both seeds too — same overshoot-reduction signature as H-mem.
+- **Standing-hold drift under payload: NOT a clean win — seed-split, unlike H-mem's 2/2.**
+  s42 (the bad uncapped seed) is rescued dramatically (0.0301→0.0006, ~50×; 45→7 W). **s123
+  (already the good uncapped seed) gets WORSE** (0.0026→0.0120, ~4.6×; 10→26 W) — still far
+  better than any bad uncapped seed, but the cap is not a uniform fix here.
+- **Standing smoothness (`ajit_p95`): no improvement, matching the H-mem pattern** — both
+  cotcap seeds sit at or above their uncapped sibling (3044 vs 2364; 1105 vs 872).
+- **Net read:** the cap's benefit (overshoot, and *usually* drift) replicates across both 2×2
+  cells; its cost (standing smoothness) also replicates. But the drift benefit is **less
+  reliable for H-adapt than H-mem** — a genuine lineage difference, not just seed noise, since
+  it reverses direction on the seed that didn't need fixing. Do not report "the cap fixes
+  standing-hold" without naming which seed and which channel.
+
+**Follow-up still open — a full-DR A1a (LL not frozen).** Still relevant: the cap fixes drift
+inconsistently and doesn't touch the standing-smoothness gap at all, so the frozen-LL
+contribution to standing quality remains untested. Worth doing if the thesis wants the
+"adaptation belongs low" claim empirically anchored rather than argued. ⚠ Breaks the 2×2 "LL
+frozen / never retrained" invariant → new arm, planning-chat decision, re-opens LL deploy
+re-validation (WP5d contract).
+
+### Does the no-DR keeper (the hardware-deployed checkpoint) hold up under weight? No. (2026-09-14)
+
+Hypothesis: since the frozen LL inside every H-mem/H-adapt arm is payload-free either way,
+maybe the fully no-DR A1a keeper (`2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42`
+— the checkpoint actually staged to hardware) generalizes to payload as well as, or better
+than, the DR-trained arms. Benched it + its sibling seed
+(`2026-09-05_17-59-38_..._s123`) against the full WP3/cotcap comparison set, same battery.
+`Unitree-H1_2-Flat-A1` and `-Payload` are byte-identical in PLAY mode (`apply_payload_dr`
+only fires `if not play`), so `--eval-payload-kg` applies to the no-DR checkpoint cleanly.
+
+**Refuted — no-DR is the worst arm tested, at every payload:**
+- Already worst tracker at 0 kg (`err_vx` 0.126/0.127, `act_legs` 0.627/0.618 — both the
+  highest of any hierarchical arm at baseline).
+- Payload sweep: starts behind, degrades at a similar relative rate, never catches up
+  (`err_vx` @15kg 0.140/0.152 vs every DR-trained arm's 15kg number, best cotcap 0.118/0.112).
+- **Standing hold under payload (decisive): @15 kg drifts 0.069/0.121 m/s at 52/61 W** —
+  1.5–4× worse drift than even the worst DR-trained uncapped seed, and by far the most power
+  of anything benched (everyone else: 4–46 W). Training the HL under payload DR partially
+  compensates for the frozen LL's payload-blindness even without ever retraining the LL;
+  skipping DR entirely gets neither benefit.
+- One narrow edge: standing smoothness (`ajit_legs_p95`) at **zero** payload only (1055/1209,
+  mid-pack among hierarchical arms) — evaporates under load, still ~10× worse than F-mem.
+
+Full data tables (12 policies × base/held/payload-sweep/standing-hold/goal-probe) →
+journal `a1a-experiment-journal.md` 2026-09-14. Raw JSON:
+`data/2026-09-09-wp3-baseline-arms/nodr_bench.json`.
