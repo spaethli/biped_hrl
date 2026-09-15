@@ -140,14 +140,18 @@ def test_policy_step_decode_tracks_changes_not_a_row_count():
     assert inconsistent_runs(np.arange(0, len(raw), 10)) > 100
 
 
-def test_affine_alignment_recovers_an_injected_clock_skew():
+@pytest.mark.parametrize("b_true", [-3.3, -10.3, -60.0])
+def test_affine_alignment_recovers_an_injected_clock_skew(b_true):
     """A constant offset is wrong by 40 policy steps over a 308 s session.
 
     Synthetic: one chirp-ish signal sampled on two clocks differing by a known offset and
     rate. Recovery of BOTH terms is asserted; a constant-only fit fails the rate assertion.
+    The offsets span the operator-timing range: -3.3 s is 2026-08-27, -10.3 s is
+    2026-09-07 (outside the fine search's +-8 s, so only the coarse stage reaches it), and
+    -60 s is a slow start nobody has measured yet but nothing prevents.
     """
     rng = np.random.default_rng(0)
-    dur, b_true, m_true = 300.0, -3.3, -2600e-6
+    dur, m_true = 300.0, -2600e-6
     ta = np.arange(0.0, dur, 0.002)
     # A gait-like signal must carry APERIODIC structure or the lag is only identifiable
     # modulo the stride period (0.6 s), and a -3.3 s offset aliases onto -0.3 s. Real
@@ -254,3 +258,130 @@ def test_reference_column_names_handle_the_ach_v_exception():
     assert bfr.ref_columns("ach_v") == ("ach_vx", "ach_vy")
     assert bfr.ref_columns("est_v_compl") == ("est_v_compl_x", "est_v_compl_y")
     assert bfr.ref_columns("est_v_legodom") == ("est_v_legodom_x", "est_v_legodom_y")
+
+
+
+def load_align_fixture(session):
+    f = pd.read_csv(FIX / f"{session}.align_flight.csv.gz")
+    a = pd.read_csv(FIX / f"{session}.align_telemetry.csv.gz")
+    return (f["t"].to_numpy(float), f["meas_q3"].to_numpy(float),
+            a["time"].to_numpy(float), a["q3"].to_numpy(float))
+
+
+# (b at t_telem = 0, skew band ppm) measured on the full-rate logs. Each session guards a
+# different defect: 13-42-55 carries a non-affine excursion in its first 60 s that a fixed
+# 0.5 s rejection gate bends the fit around (-1648 ppm at 116 ms), and 09-07's -10.2 s
+# offset is outside the fine search, so without the coarse stage it fits -16021 ppm at
+# correlation 0.58. The other session is unaffected by each defect, which is the point.
+REAL_ALIGNMENT = {
+    "2026-08-27_13-42-55": (-3.339, (-2700, -2300)),
+    "2026-09-07_11-44-50": (-10.169, (-3600, -3100)),
+}
+
+
+@pytest.mark.parametrize("session", sorted(REAL_ALIGNMENT))
+def test_alignment_on_real_session_pairs(session):
+    """The two real pairs that broke the alignment, each on the defect it exposed."""
+    b_exp, (m_lo, m_hi) = REAL_ALIGNMENT[session]
+    fit = bfr.fit_alignment(*load_align_fixture(session))
+    assert fit is not None
+    assert fit["b"] == pytest.approx(b_exp, abs=0.05)
+    assert m_lo < fit["m"] * 1e6 < m_hi, f"skew {fit['m'] * 1e6:+.0f} ppm"
+    assert fit["resid_ms"] < 40.0
+    assert fit["xcorr"] > 0.9
+
+
+def _touch(path, stamp_end):
+    import datetime as _dt
+    import os
+    path.write_text("")
+    ts = _dt.datetime.strptime(stamp_end, "%Y-%m-%d %H:%M:%S").timestamp()
+    os.utime(path, (ts, ts))
+    return path
+
+
+def test_find_pair_selects_by_recording_interval_overlap(tmp_path):
+    """Neither filename is a first-sample time; both files being written at once is.
+
+    The real 2026-09-07 case: the telemetry file starts +125 s after the flight filename,
+    past any forward window sized on 2026-08-27 (+5..+68 s), yet both files were written
+    together from 11:46:55 to 11:49:42. A file that ended before the flight started must
+    lose, and among overlapping files the larger overlap wins.
+    """
+    traj = tmp_path / "traj"
+    traj.mkdir()
+    flight = _touch(tmp_path / "2026-09-07_11-44-50.csv", "2026-09-07 11:49:42")
+    _touch(traj / "all_joints_2026-09-07_11-30-00_earlier_session.csv", "2026-09-07 11:44:30")
+    _touch(traj / "all_joints_2026-09-07_11-49-30_brief_overlap.csv", "2026-09-07 11:52:00")
+    _touch(traj / "all_joints_2026-09-07_11-46-55_real.csv", "2026-09-07 11:50:42")
+    p, start_offset, overlap = bfr.find_pair(flight, traj)
+    assert p.name == "all_joints_2026-09-07_11-46-55_real.csv"
+    assert start_offset == pytest.approx(125.0)
+    assert overlap == pytest.approx(167.0, abs=1.0)
+
+
+def test_find_pair_refuses_a_file_started_after_the_flight_stopped(tmp_path):
+    """+70 s after the flight filename sits inside any plausible forward window, but the
+    flight recorder had already stopped writing: there is nothing to align to."""
+    traj = tmp_path / "traj"
+    traj.mkdir()
+    flight = _touch(tmp_path / "2026-09-07_12-00-00.csv", "2026-09-07 12:00:40")
+    _touch(traj / "all_joints_2026-09-07_12-01-10_next.csv", "2026-09-07 12:04:00")
+    assert bfr.find_pair(flight, traj) is None
+
+
+def test_missing_traj_dir_fails_loudly(tmp_path):
+    """A typo'd directory used to glob to nothing and read as "no pair for this session"."""
+    flight = _touch(tmp_path / "2026-09-07_11-44-50.csv", "2026-09-07 11:49:42")
+    with pytest.raises(SystemExit, match="does not exist"):
+        bfr.find_pair(flight, tmp_path / "no_such_dir")
+
+
+def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0):
+    """One Run of `run_s` walking at a constant speed, paired with a `telem_s` telemetry log.
+
+    Everything is constant, so the right answers are exact by construction: the credited
+    distance is speed * run_s and the mean power is power_w, no matter how far past the Run
+    the telemetry kept recording.
+    """
+    tf = np.arange(0.0, run_s, 1 / 500.0)
+    n = len(tf)
+    F = {
+        "t": tf,
+        "cmd": np.column_stack([np.full(n, speed), np.zeros(n), np.zeros(n)]),
+        "df": pd.DataFrame({"est_v_compl_x": np.full(n, speed),
+                            "est_v_compl_y": np.zeros(n)}),
+    }
+    ta = np.arange(0.0, telem_s, 1 / 50.0)
+    m = len(ta)
+    tau = np.zeros((m, 27))
+    dq = np.zeros((m, 27))
+    tau[:, 0] = power_w          # one joint carries all of it: sum |tau*dq| = power_w
+    dq[:, 0] = 1.0
+    return F, {"t": ta, "tau": tau, "dq": dq, "knee": np.zeros(m)}, {"b": 0.0, "m": 0.0}
+
+
+def test_energy_ignores_telemetry_recorded_outside_the_run():
+    """np.interp CLAMPS, so a Run that ENDS WALKING used to earn distance for every trailing
+    telemetry sample: the held gate stayed 1 and the held speed stayed nonzero.
+
+    Latent while a flight recorder file spanned a whole controller process; it bit under the
+    Run-scoped scoring of ADR-0012, where a 186 s Run pairs with a 232 s telemetry log. On
+    2026-09-14_14-48-55 it reported 45.12 m against an independently computed 11.5 m, and
+    diluted mech_power_w to 79 W, the lowest of the session, by averaging in samples from
+    after the robot had stopped.
+    """
+    F, T, align = _energy_inputs(run_s=10.0, telem_s=30.0)
+    out = bfr._energy(F, T, align, "est_v_compl")
+    assert out["cot_distance_m"] == pytest.approx(5.0, abs=0.05)   # 0.5 m/s * 10 s, not 30 s
+    assert out["mech_power_w"] == pytest.approx(100.0, rel=1e-6)
+
+
+def test_energy_is_unchanged_when_the_telemetry_fits_inside_the_run():
+    """The guard must not shorten a pair that was already contained: the eight 2026-09-14
+    Runs other than 14-48-55 reproduced to every printed digit after the fix, and that
+    invariant is what makes the correction safe to apply retroactively."""
+    F, T, align = _energy_inputs(run_s=30.0, telem_s=10.0)
+    out = bfr._energy(F, T, align, "est_v_compl")
+    assert out["cot_distance_m"] == pytest.approx(5.0, abs=0.05)   # bounded by the telemetry
+    assert out["mech_power_w"] == pytest.approx(100.0, rel=1e-6)

@@ -16,9 +16,11 @@ Two logs per session (a "session pair", CONTEXT.md):
                        the ONLY source of `tau_est`, the measured joint torque. Without it
                        `mech_power_w` and `cot` cannot be computed at all.
 
-The pair is proposed by filename timestamp and CONFIRMED by cross-correlating a shared
-measured joint, because the filename timestamp is not the first-sample time (measured: a
-+16 s filename offset against a -3.3 s signal lag). The two clocks differ in RATE, measured
+The pair is proposed by overlapping recording intervals (filename time to mtime) and
+CONFIRMED by cross-correlating a shared measured joint, because neither filename is a
+first-sample time: the flight recorder's is process launch, and logging starts whenever the
+RL state is entered (+16 s filename offset vs a -3.3 s signal lag on 2026-08-27, +125 s vs
+-10.3 s on 2026-09-07). The two clocks differ in RATE, measured
 -2600 to -3067 ppm across three sessions, so the alignment is affine in time: over a 308 s
 session a constant offset is wrong by 40 policy steps.
 
@@ -92,27 +94,42 @@ OMITTED = {
 }
 
 
-def find_pair(flight_csv, traj_dir, window_s):
-    """Nearest joint-telemetry log STARTING AFTER this flight session, within window_s.
+def _recording_interval(path, stamp):
+    """[start, end] of a log in wall time: filename timestamp to last write (mtime)."""
+    start = pd.to_datetime(stamp, format="%Y-%m-%d_%H-%M-%S")
+    return start, pd.Timestamp.fromtimestamp(Path(path).stat().st_mtime)
 
-    Search is forward-only because the ROS logger is started after the FSM is entered:
-    measured +5..+68 s across the eleven 2026-08-27 sessions, never negative. Returns None
-    rather than reaching for a far-away file -- a wrong pair produces a plausible CoT.
+
+def find_pair(flight_csv, traj_dir):
+    """The joint-telemetry log whose recording interval OVERLAPS this flight session's.
+
+    Neither filename is a first-sample time, so neither can be compared to the other on its
+    own. The flight recorder's filename is PROCESS LAUNCH, and logging starts only when the
+    RL state is entered, which is operator timing: 2026-09-07_11-44-50 was last written at
+    11:49:42 yet holds 156 s of ticks. A "telemetry starts within N s after" rule therefore
+    encodes how long someone waited, and broke at +125 s. What is actually true of a real
+    pair is that both files were being written at the same time, so the interval from
+    filename to mtime must overlap. Largest overlap wins; the cross-correlation still has to
+    confirm it. Returns (path, start_offset_s, overlap_s) or None.
     """
-    stamp = flight_csv.name[:19]  # YYYY-MM-DD_HH-MM-SS
+    d = Path(traj_dir)
+    if not d.is_dir():
+        # A typo'd directory globbed to nothing and read as "no pair found" -- which looks
+        # like a property of the session rather than a mistake in the command.
+        raise SystemExit(f"--traj-dir {traj_dir} does not exist")
     try:
-        t0 = pd.to_datetime(stamp, format="%Y-%m-%d_%H-%M-%S")
+        start_f, end_f = _recording_interval(flight_csv, flight_csv.name[:19])
     except ValueError:
         return None
     best = None
-    for p in sorted(Path(traj_dir).glob("all_joints_*.csv")):
+    for p in sorted(d.glob("all_joints_*.csv")):
         try:
-            ts = pd.to_datetime(p.name[11:30], format="%Y-%m-%d_%H-%M-%S")
+            start_a, end_a = _recording_interval(p, p.name[11:30])
         except ValueError:
             continue
-        dt = (ts - t0).total_seconds()
-        if 0 <= dt <= window_s and (best is None or dt < best[1]):
-            best = (p, dt)
+        overlap = (min(end_f, end_a) - max(start_f, start_a)).total_seconds()
+        if overlap > 0 and (best is None or overlap > best[2]):
+            best = (p, (start_a - start_f).total_seconds(), overlap)
     return best
 
 
@@ -130,6 +147,42 @@ def _xcorr(a, f, dt, maxlag):
     return (np.arange(-L, L) * dt)[k], float(cc[k])
 
 
+def coarse_lag(t_f, knee_f, t_a, knee_a, win_s=20.0, min_corr=0.9):
+    """Whole-session offset L in  t_flight = t_aj + L, before any rate is fitted.
+
+    Each telemetry window is slid across the ENTIRE flight series with a normalized
+    correlation, and the median lag of the windows that match well is taken. Per-window
+    matching is what makes this robust: a single global correlation is dominated by the
+    highest-variance stretch of either log, and on 2026-09-07 it locked a walking tail onto
+    a walking head at -119 s (corr 0.52) against a true -10.3 s. The two logs read the SAME
+    encoder, so even a quiet standing window carries shared noise and matches at 0.99.
+    Returns None when fewer than two windows agree.
+    """
+    g = CTRL_DT
+    F = np.interp(np.arange(t_f[0], t_f[-1], g), t_f, knee_f)
+    ga = np.arange(t_a[0], t_a[-1], g)
+    A = np.interp(ga, t_a, knee_a)
+    M = int(win_s / g)
+    if len(F) <= M or len(A) < M:
+        return None
+    c1 = np.concatenate(([0.0], np.cumsum(F)))
+    c2 = np.concatenate(([0.0], np.cumsum(F * F)))
+    mu = (c1[M:] - c1[:-M]) / M
+    sd = np.sqrt(np.maximum((c2[M:] - c2[:-M]) / M - mu * mu, 0.0))
+    lags = []
+    for i in range(0, len(A) - M + 1, M // 2):
+        w = A[i:i + M]
+        if w.std() < 1e-6:
+            continue
+        w = (w - w.mean()) / w.std()
+        corr = np.correlate(F, w, "valid") / (M * np.maximum(sd, 1e-9))
+        corr[sd < 1e-6] = 0.0
+        j = int(np.argmax(corr))
+        if corr[j] > min_corr:
+            lags.append((t_f[0] + j * g) - ga[i])
+    return float(np.median(lags)) if len(lags) >= 2 else None
+
+
 def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0):
     """Affine time map  t_flight = t_aj + (b + m * t_aj), fitted on windowed cross-correlation.
 
@@ -138,13 +191,18 @@ def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0):
     per-window lags are fitted with one robust pass (drop >0.5 s outliers) because a quiet
     standing stretch has a nearly flat autocorrelation and occasionally peaks at a false lag.
     """
-    hi = min(t_f[-1], t_a[-1])
-    grid = np.arange(0.0, hi, CTRL_DT)
+    # Coarse first: the fine search below is +-maxlag per window, and the offset between the
+    # two loggers' t=0 is operator timing (-3.3..-4.4 s on 2026-08-27, -10.3 s on 2026-09-07,
+    # unbounded in principle). Pre-shift by it, fit the residual lag and the rate, compose.
+    b0 = coarse_lag(t_f, knee_f, t_a, knee_a) or 0.0
+    t_a = t_a + b0
+    lo, hi = max(t_f[0], t_a[0]), min(t_f[-1], t_a[-1])
+    grid = np.arange(lo, hi, CTRL_DT)
     if len(grid) < 100:
         return None
     A = np.interp(grid, t_a, knee_a)
     F = np.interp(grid, t_f, knee_f)
-    win = max(int(min(30.0, hi / 3.0) / CTRL_DT), 200)
+    win = max(int(min(30.0, (hi - lo) / 3.0) / CTRL_DT), 200)
     ts, ls, cs = [], [], []
     for i in range(0, max(len(grid) - win, 1), max(win // 2, 1)):
         lag, c = _xcorr(A[i:i + win], F[i:i + win], CTRL_DT, maxlag)
@@ -159,7 +217,7 @@ def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0):
     if good.sum() < 2:
         # too little structure to fit a rate; fall back to the single best window
         k = int(np.argmax(cs))
-        return {"b": float(ls[k]), "m": 0.0, "xcorr": float(cs[k]),
+        return {"b": float(b0 + ls[k]), "m": 0.0, "coarse_lag_s": float(b0), "xcorr": float(cs[k]),
                 "resid_ms": float("nan"), "windows": 1, "windows_total": len(ts)}
     ts, ls, cs = ts[good], ls[good], cs[good]
     # Resolve the stride-period alias BEFORE fitting. A walking knee trace is near-periodic,
@@ -194,20 +252,33 @@ def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0):
                 break
             m, b = np.polyfit(ts[inl], cand[inl], 1)
         ls = ls + np.round(((m * ts + b) - ls) / P) * P
-    # Final fit on the WELL-DETERMINED windows only, weighted by correlation. Unwrapping
-    # snaps every window onto the line, which would otherwise let a weakly-correlated one
-    # (a quiet standing stretch, where the peak is nearly flat) drag the rate: admitting
-    # them all raised the fitted residual from 13 ms to 53 ms on 13-42-55.
+    # Final fit on the WELL-DETERMINED windows only, weighted by correlation, with robust
+    # rejection scaled to the actual scatter. A fixed 0.5 s gate is two orders looser than
+    # the residuals it is gating (tens of ms): on 13-42-55 the first 60 s carry a genuine
+    # non-affine excursion (+0.30 s lag at corr 0.996, back to 0.00 ten seconds later --
+    # 15000 ppm, which no clock drifts at, so a discrete event), and inside a 0.5 s gate it
+    # bent the whole fit to -1648 ppm at 116 ms. 3 x MAD (floor 50 ms) drops those three
+    # windows and recovers -2482 ppm at 18 ms, in line with the other sessions.
     keep = (np.abs(ls - (m * ts + b)) < 0.5) & (cs > 0.7)
     if keep.sum() < 2:
         keep = np.abs(ls - (m * ts + b)) < 0.5
-    if keep.sum() >= 2:
+    for _ in range(5):
+        if keep.sum() < 3:
+            break
         m, b = np.polyfit(ts[keep], ls[keep], 1, w=cs[keep])
-        keep = (np.abs(ls - (m * ts + b)) < 0.5) & (cs > 0.7)
+        r = ls - (m * ts + b)
+        mad = 1.4826 * np.median(np.abs(r[keep] - np.median(r[keep])))
+        refit = (np.abs(r) < max(0.05, 3.0 * mad)) & (cs > 0.7)
+        if refit.sum() < 3 or np.array_equal(refit, keep):
+            break
+        keep = refit
     if keep.sum() < 2:
         keep = np.ones(len(ls), bool)
     resid = ls[keep] - (m * ts[keep] + b)
-    return {"b": float(b), "m": float(m), "xcorr": float(np.median(cs[keep])),
+    # t_flight = (t_aj + b0) + b + m (t_aj + b0)  =  t_aj + (b0 + b + m b0) + m t_aj
+    b, m = b0 + b + m * b0, m
+    return {"b": float(b), "m": float(m), "coarse_lag_s": float(b0),
+            "xcorr": float(np.median(cs[keep])),
             "resid_ms": float(resid.std() * 1000.0), "windows": int(keep.sum()),
             "windows_total": int(len(ts))}
 
@@ -495,7 +566,17 @@ def _energy(F, T, align, vel_ref):
     t_in_flight = ta + (align["b"] + align["m"] * ta)
     tf = F["t"]
     lin = np.linalg.norm(F["cmd"][:, :2], axis=1)
-    gate = np.interp(t_in_flight, tf, (lin > CMD_THRESHOLD).astype(float)) > 0.5
+    # np.interp CLAMPS outside its range, so telemetry samples mapping past either end of the
+    # Run inherit its first/last gate and speed held constant. A Run that ENDS while walking
+    # then earns distance for every trailing telemetry sample (gate held at 1) and dilutes
+    # power[gate].mean() with samples from after it stopped. Latent while a flight recorder
+    # file spanned a whole controller process; it bites under Run-scoped scoring (ADR-0012),
+    # where a 186 s Run pairs with a 232 s telemetry log. Measured on 2026-09-14_14-48-55:
+    # 45.12 m against an independently computed 11.5 m, with mech_power_w reading the lowest
+    # of the session at 79 W. Runs that end standing hold gate=0 and were never affected,
+    # which is why only one run in eleven looked wrong.
+    inside = (t_in_flight >= tf[0]) & (t_in_flight <= tf[-1])
+    gate = (np.interp(t_in_flight, tf, (lin > CMD_THRESHOLD).astype(float)) > 0.5) & inside
     spd = np.interp(t_in_flight, tf,
                     np.linalg.norm(F["df"][list(ref_columns(vel_ref))].to_numpy(float), axis=1))
     if gate.sum() < 50:
@@ -547,28 +628,28 @@ def process(csv_path, args):
           else "  (an ESTIMATE -> keys are err_vx_est/err_vy_est)"))
 
     T = align = None
-    pair = find_pair(csv_path, args.traj_dir, args.pair_window)
+    pair = find_pair(csv_path, args.traj_dir)
     if pair is None:
-        msg = (f"no joint-telemetry log within {args.pair_window:.0f}s of {csv_path.name[:19]}"
-               f" in {args.traj_dir}")
+        msg = (f"no joint-telemetry log in {args.traj_dir} was being written while "
+               f"{csv_path.name} was (filename time to mtime)")
         if args.require_torque:
             raise SystemExit(f"  ERROR {msg} (--require-torque)")
         print(f"  WARN {msg}\n       -> omitting mech_power_w, cot (both need tau_est)")
     else:
-        p, dt = pair
+        p, dt, overlap = pair
         T = read_telemetry(p)
         align = fit_alignment(F["t"], F["df"][f"meas_q{KNEE_SLOT}"].to_numpy(float),
                               T["t"], T["knee"])
         if align is None or align["xcorr"] < args.xcorr_floor:
             got = "unfittable" if align is None else f"{align['xcorr']:.2f}"
-            msg = (f"pair {p.name} (+{dt:.0f}s) REJECTED: knee xcorr {got} "
+            msg = (f"pair {p.name} ({dt:+.0f}s, {overlap:.0f}s overlap) REJECTED: knee xcorr {got} "
                    f"< floor {args.xcorr_floor:.2f}")
             if args.require_torque:
                 raise SystemExit(f"  ERROR {msg} (--require-torque)")
             print(f"  WARN {msg}\n       -> omitting mech_power_w, cot")
             T = align = None
         else:
-            print(f"  paired: {p.name}  (+{dt:.0f}s)")
+            print(f"  paired: {p.name}  ({dt:+.0f}s, {overlap:.0f}s overlap)")
             print(f"  xcorr(knee) {align['xcorr']:.2f}  [floor {args.xcorr_floor:.2f}, PASS]"
                   f"   windows {align['windows']}/{align['windows_total']}")
             # 100 ms = 5 policy steps. The alignment only decides which REGIME a torque
@@ -597,6 +678,7 @@ def process(csv_path, args):
     }
     if align is not None:
         session.update({"pair_lag_s": round(align["b"], 4),
+                        "pair_coarse_lag_s": round(align["coarse_lag_s"], 3),
                         "pair_skew_ppm": round(align["m"] * 1e6, 1),
                         "pair_xcorr": round(align["xcorr"], 4),
                         "pair_resid_ms": round(align["resid_ms"], 1)})
@@ -606,7 +688,12 @@ def process(csv_path, args):
           f"{sr['right_ankle_roll']['span']:.4f}    pinned(any leg) "
           f"{session['session_pinned_any_leg'] * 100:.2f}%")
 
-    out_dir = Path("logs/robot_logs" if args.robot else "logs/sim_logs")
+    # `label` is the csv name's first 19 chars, so several runs sliced out of ONE controller
+    # process (different FSM entries, e.g. 2026-09-14_15-00-37 holds three) share a label and
+    # would overwrite each other in a shared directory. --out-dir lets a per-run bundle keep
+    # its own metrics beside its own logs.
+    out_dir = Path(args.out_dir) if args.out_dir else Path(
+        "logs/robot_logs" if args.robot else "logs/sim_logs")
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for regime in ("walking", "standing"):
@@ -639,8 +726,10 @@ def main():
     g.add_argument("--sim", action="store_true", help="write to logs/sim_logs/")
     ap.add_argument("--traj-dir", default=str(TRAJ_DIR),
                     help="where the joint-telemetry (all_joints_*.csv) logs live")
-    ap.add_argument("--pair-window", type=float, default=120.0,
-                    help="max seconds AFTER the flight session to look for its telemetry log")
+    ap.add_argument("--out-dir", default=None,
+                    help="write the regime jsons here instead of logs/{robot,sim}_logs/; "
+                         "needed when several runs sliced from one controller process share "
+                         "a label (see bundle_hardware_run.py)")
     ap.add_argument("--xcorr-floor", type=float, default=0.70,
                     help="reject a proposed pair whose knee cross-correlation is below this")
     ap.add_argument("--require-torque", action="store_true",
