@@ -55,7 +55,7 @@ hrl:
   hl_cadence: true
   hl_cadence_source: hl
   cadence_period_range: [0.35, 1.0]
-  pin_period: 0.625    # first hardware walks run PINNED (plan G3); re-derive per candidate
+  pin_period: 0.0    # first hardware walks run PINNED (plan G3); re-derive per candidate
                        # (keeper's own stride 0.625); set 0.0 to hand the HL the clock (G3.5)
 
   # Deployable base-state estimator (2026-08-03), REQUIRED on the real robot since
