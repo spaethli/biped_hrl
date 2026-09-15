@@ -44,12 +44,19 @@ read from `meas_q12`. That rotation is NOT cosmetic: split deploy is supposed to
 waist, but measured across the eleven 2026-09-14 runs |psi| reaches p95 0.03-0.25 rad and
 peaks near 0.6, so it is applied per sample and its magnitude is reported.
 
-NO MOCAP DATA EXISTED WHEN THIS WAS WRITTEN. The Vicon reader is therefore written to a
-documented, sniffed format assumption (printed prominently before any work is done, with a
-CLI override for every field), and the whole pipeline is proven end-to-end by `--selftest`
-against a synthetic trajectory with a planted clock skew, a planted frame rotation and a
-planted lever arm. What the self-test cannot prove is that a real Nexus export matches the
-sniffer -- check the printed mapping on the first real file.
+FORMAT. Two readers, dispatched on layout. Raw Nexus ASCII is sniffed field by field, with the
+decision printed before any work and a CLI override for each. The 2026-09-14 captures arrived
+PRE-PROCESSED instead -- one header row, one rigid body, `time_s`, `x/y/z_mm`, `qw..qz`,
+`wx/wy/wz_deg_s`, `speed_mm_s`, `residual_mm`, `markers_used` at 100 Hz -- and take the flat
+path. ⚠ Their angular-rate triple is in the WORLD frame, which no column name says; it is
+rotated through R before use, and that plus a 0.10 s pre-fit smoothing took the frame residual
+from 9.4-14.9 deg to 5.2-8.1 deg. The exported triple beats differentiating attitude, which at
+100 Hz turns sub-millimetre marker noise into ~0.7 rad/s of spurious rate.
+
+`--selftest` proves the whole pipeline end to end against a synthetic trajectory with a planted
+clock skew, frame rotation and lever arm (recovered to 3.1 ms, 2.4 ppm, 0.0018 deg, 2 mm/s).
+Measured on the real captures: three of four runs pass every gate; the fourth is refused at
+24.5 deg, correctly, with 16% NaN attitude rows and a marker count reaching zero.
 
 Usage:
   python scripts/mocap_align.py --selftest
