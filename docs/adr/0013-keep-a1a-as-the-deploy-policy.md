@@ -119,6 +119,6 @@ marker-cluster offset precisely. The 0.03 m/s threshold is excluded as lever-lim
 
 So the decision is **supported but not established**. Three DR Runs from two policies in one
 session, a post-hoc metric, and an ordering that weakens as the threshold loosens. The
-`A1a_s123` seed-band session is what would settle it, and base-speed settling from motion
-capture is still outstanding. If neither strengthens it, the honest report is that cadence
-saturation is the measured difference and settling time was only directionally consistent.
+`A1a_s123` seed-band session is what would settle it. If it does not strengthen the result,
+the honest report is that cadence saturation is the measured difference and settling time was
+only directionally consistent.

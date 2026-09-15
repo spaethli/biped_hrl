@@ -980,6 +980,38 @@ Swap the real `phi` in through `export_adapt_encoder_onnx` (no C++ change), set
 `hrl.hl_obs_e: true`, re-run `deploy_readiness.py` with the A0 control arm. Phase 2 must
 build its windows to the layout above.
 
+## ⚠ `pin_period` silently blinds the cadence channel (2026-09-14)
+
+`State_RLHRL.cpp:744` decodes the HL's stride-period action **only when `pin_period <= 0`**.
+While pinned, the HL's extra tanh dim is never read and the telemetry's `period` column logs
+the constant, so a pinned session produces **no evidence about cadence at all** — not in
+behaviour, not in the log. There is no warning. Cadence is the hierarchy's only actuated
+adaptation channel and the one every payload claim runs through, so a session meant to measure
+it must set `pin_period: 0.0` and the operator must confirm it before the run, not after.
+
+The value shipped in `deploy_real.yaml` was `0.625`, commented as "the keeper's own stride" —
+true for the 2026-07-14 `cot0.2` line, not for the frozen `cot5 + rse 0.12` keeper, which asks
+for 0.996-0.999 s standing and 0.80-0.88 s walking when given its clock. **Re-derive or unpin
+per candidate; never inherit it.** Unpinned since 2026-09-14.
+
+## ⚠ One-sided yaw drift: read the hip-yaw zeroing before blaming the policy (2026-09-15)
+
+A left/right turning bias is a **mechanical zeroing offset**, not a policy or estimator
+defect. Regressing each session's fitted yaw offset on `mean(raw_q0 - raw_q6)` — the L-R hip
+yaw asymmetry, straight out of the _Flight recorder_ — over **14 sessions across 4 dates**
+gives `offset = 1.120 * (q_L - q_R) - 0.052`, **r = 0.898, r2 = 0.81**. It reproduces the
+2026-08-13 block's published `+0.162 rad/s` (predicts +0.166 at that day's +0.195 rad
+asymmetry) and its disappearance after the leg re-zero (+0.008 predicted at 2026-09-14's
++0.054 rad; measured -0.035 to +0.016).
+
+**Pre-run check, one line:** print `mean(raw_q0 - raw_q6)` from the previous session's flight
+recorder. Above ~0.1 rad, re-zero the legs before recording anything that scores yaw.
+
+Motion capture on 2026-09-14 confirms the onboard **gyro was measuring real motion** (truth and
+`est_gyro_z` agree to 0.005 rad/s on the offset), so no gyro-derived result needed retracting.
+What survives as a policy property is the **slope**: commanded yaw is achieved at only
+**0.55-0.59**, on every session and both instruments.
+
 ## Rollback rules
 
 Any hardware anomaly: flight-recorder CSV first, then reproduce in the bridge in

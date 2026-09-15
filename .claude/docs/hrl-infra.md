@@ -246,6 +246,42 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
 (refills in ~40 iters).
 
 ## Tools
+- **Hardware Run scoring and ground truth** (2026-09-15, architecture-agnostic — A2+ will use
+  these unchanged). A **Run** is one FSM `entry`, never a file: the flight recorder writes one
+  CSV per controller *process*, the ONNX loads once per process, so every entry in a file is
+  the same policy and scoring the file whole pools distinct Runs. Vocabulary in `CONTEXT.md`
+  (`Run`, `Session pair`), pairing rule in `docs/adr/0012`.
+  - `scripts/bundle_hardware_run.py --scan <DATE>` then `--labels <json>` → one directory per
+    Run with its sliced logs and a `run.json` manifest. Pairs the joint telemetry log by
+    **cross-correlation over every candidate**, not by filename: the interval rule misses 4 of
+    12 Runs, and a *constant* lag misses 9 of 12 because the clocks differ by -3337..-6613 ppm
+    (most of a stride period over a 170 s Run). Fail-closed on a >2% fitted rate and on a
+    wall-offset outlier; `--accept-outliers` overrides, and each use must be justified in
+    `run.json`.
+  - `scripts/mocap_align.py <bundle> <capture> --lever 0 0 0.32` → `mocap_aligned.csv`
+    (`gt_vx/gt_vy/gt_wz`, pelvis frame, on the flight clock). Clock from `|omega|` (invariant
+    to the frame), frame by Procrustes on `omega`, **never fitted on the linear velocity being
+    scored**. `--selftest` proves it end to end. ⚠ Reads raw Nexus *and* pre-processed flat
+    CSV; the latter's `w*_deg_s` is in the **world** frame, which no column name says.
+  - `scripts/analyze_cadence_settling.py` → commanded cadence by regime (with a PINNED guard)
+    and settling time with a **measured** floor and a **swept** threshold.
+  - `scripts/bench_flight_recorder.py` **refuses a multi-Run raw log** rather than pooling it
+    (`--entry N` selects one; bundles are already sliced). `15-00-37.csv` holds three Runs under
+    two experimental conditions and nothing in its name says so.
+  - `scripts/bench_flight_recorder.py` prefers **motion capture** as the velocity reference
+    whenever a bundle carries `mocap_aligned.csv` (≥50% coverage), so ground truth takes the sim
+    key names (`err_vx`, not `err_vx_est`) and the onboard estimator becomes the quantity under
+    test (`est_rms_vx/vy/wz`). `--no-mocap` reproduces a pre-capture number. Capture gaps are
+    **dropped from the error metrics and bridged in the distance integral** — skipping a gap
+    under-counts a denominator, averaging over a bridged one scores invented data. Measured
+    effect of switching to truth: tracking error falls in 11 of 12 cases and CoT by 2-4%, i.e.
+    the estimator under-reads walked distance by ~3%.
+  - `scripts/plot_thesis_figures.py --verify-csv` asserts every value drawn on `transData`
+    appears in that figure's panel CSV. It is not ceremony: on its first run it caught `f_chain`
+    plotting a hardware mean that was in no sidecar, so the CSVs could not re-plot the figure.
+  - `scripts/plot_thesis_figures.py --check-latex` → nine LaTeX-ready figures via matplotlib's
+    `pgf` backend, each a `.pgf` plus a decimated per-panel CSV. ⚠ The pgf writer does not
+    escape `_`, leaves `\mathdefault` undefined, and renders `|` as an em-dash.
 - **Radar comparison chart** (2026-08-10): `scripts/plot_radar.py <baseline.log> <run2.log>
   ...` (each a `play.py` stdout capture, or bare JSON, with exactly one `[BENCH]` line) →
   one figure, every run normalized to the baseline's `[BENCH]` metrics (baseline traces the
