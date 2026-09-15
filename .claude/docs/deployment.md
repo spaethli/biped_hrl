@@ -169,7 +169,10 @@ cp logs/.../policy.onnx deploy/robots/h1_2/config/policy/velocity/v0/exported/po
 without the viewer. Training saves also auto-export `policy.onnx` (with metadata)
 next to each checkpoint via `VelocityOnPolicyRunner._export_policy_onnx`.
 
-**Obs-dim contract: the deploy vector is 92, and NOTHING validates it (2026-08-26).** The 7
+**Obs-dim contract: the deploy vector is 92 (2026-08-26).** ✅ **Now validated at load on both
+states** — HRL since WP5d (2026-09-02, plus a per-step latch), A0 since 2026-09-15
+(`include/obs_contract.h`) — so a wrong export refuses to load instead of reading heap. The
+mechanism below is why that check exists. The 7
 proprioceptive terms in `deploy_real.yaml` total `3+3+3+2+27+27+27 = 92` floats.
 `isaaclab/algorithms/algorithms.h:81` sizes the ORT input tensor from the **ONNX declared
 shape** and never compares it against the vector the observation manager actually built. A

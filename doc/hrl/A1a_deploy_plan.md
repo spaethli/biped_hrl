@@ -971,8 +971,11 @@ staged into `exported/`** (checkpoint staging is out of scope for this WP).
   exist as fixtures for that session's load probe. The *decision* they would exercise is
   already unit-tested offline against the real code (`check_deploy_contract`, 7 refusal cases);
   what the fixtures add is proof that the ONNX metadata *reader* wires into it correctly.
-- **A0 (`State_RLBase`) is still unchecked.** WP5d scoped the fail-closed check to the HRL
-  state; A0 runs one unvalidated session and would still read heap on a wrong export.
+- ~~A0 (`State_RLBase`) is still unchecked.~~ **Closed 2026-09-15:** the constructor now
+  refuses to load a `policy.onnx` whose input names/widths or output width disagree with the
+  deploy yaml (`include/obs_contract.h`, `test/obs_contract_test.cpp`,
+  `tests/test_a0_io_contract.py`). Load-time only: A0's obs is fixed by the yaml, so there is
+  no run-time shape change for a `dim_fault_` layer to catch.
 
 ### Left for WP5 Phase 2
 

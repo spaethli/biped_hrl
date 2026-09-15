@@ -293,7 +293,9 @@ analysis and the proposed change first.
   ⚠ The runtime layer must NEVER throw — the policy thread is a bare `std::thread` with no
   handler, so an escaping exception is `std::terminate`: the process dies, `lowcmd` stops
   publishing, and the robot is left to the DDS timeout, i.e. fail-**dark**. Throwing is
-  correct only at load. **A0 (`State_RLBase`) is still unchecked.** The optional third
+  correct only at load. **A0 (`State_RLBase`) is load-checked since 2026-09-15** (input
+  names + widths and output width vs the yaml, `include/obs_contract.h`; throws in the
+  constructor, no per-step layer needed since its obs cannot change shape). The optional third
   session (`hrl.hl_obs_e` -> `adapt_encoder.onnx`, H-adapt's `phi`) takes the HL input
   94 -> 99; `phi` consumes `obs["policy"] ++ obs["command"]` = **92 floats** over a 50-frame,
   control-rate, oldest-first window. ⚠ **The A0 flat observation is the SAME 92 floats with
