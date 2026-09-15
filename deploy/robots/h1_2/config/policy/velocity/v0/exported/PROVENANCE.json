@@ -1,10 +1,11 @@
 {
-  "staged_at": "2026-08-04T13:38:44+02:00",
-  "checkpoint": "logs/rsl_rl/h1_2_velocity_v2/2026-07-15_08-29-26_a0_v2_optB_rs20_baseline/model_10000.pt",
-  "source_run": "2026-07-15_08-29-26_a0_v2_optB_rs20_baseline",
+  "staged_at": null,
+  "checkpoint": null,
+  "source_run": "2026-09-09_19-36-21_fmem_payload_standing12_s123",
   "md5": {
-    "policy.onnx": "8a3871d534030cadf7409f4c8fe08771"
+    "policy.onnx": "d3e4c03526884fe5426314972703e359"
   },
-  "staged_by": "scripts/deploy_provenance.py",
-  "checkpoint_verified_numerically": false
+  "staged_by": "copied by hand; identified post-hoc by scripts/deploy_provenance.py --check",
+  "checkpoint_verified_numerically": false,
+  "note": "This is A0_DR_s123, the policy flown as Runs 10/11 on 2026-09-14. The md5 is an EXACT match for logs/rsl_rl/h1_2_velocity_v2/2026-09-09_19-36-21_fmem_payload_standing12_s123/policy.onnx, which is what identifies it. `staged_at` and `checkpoint` are null because they are NOT known: the file was copied in by hand rather than through --stage, and a run directory holds one export with no record of which checkpoint produced it (that run's newest is model_9900.pt, and there is no exported/ subdirectory). Nulls rather than a plausible guess -- the manifest this replaces named the 2026-07-15 A0 v2 baseline and had been wrong since the copy. Run --stage, or onnx_parity.py --onnx-dir, to fill these in."
 }
