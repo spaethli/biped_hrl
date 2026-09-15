@@ -550,8 +550,13 @@ def view_estimator(runs, run_labels, out_dir, fmt, labels, downsample, **_):
 
 def view_command(runs, run_labels, out_dir, fmt, labels, downsample, **_):
   """cmd vs leg-odometry absolute velocity estimate (lo_*), + sim ground truth (gt_a*)
-  when available. lo_* is window-latched (piecewise-constant); plotted as-is."""
-  fig, axes = plt.subplots(2, 1, figsize=(9, 5.5), sharex=True)
+  when available. lo_* is window-latched (piecewise-constant); plotted as-is.
+
+  wz has no leg-odom/SportModeState counterpart (yaw rate isn't a leg-odom quantity and
+  no gt_awz column exists), so its achieved trace is `est_gyro_z` -- the raw torso IMU
+  gyro reading from the sibling base .csv, real on hardware (unlike gt_a*), logged only
+  when the A1 estimator channel is on (`with_estimator` in safety_logger.h)."""
+  fig, axes = plt.subplots(3, 1, figsize=(9, 7), sharex=True)
   for run, rlabel in zip(runs, run_labels):
     df, t = run.df, run.df["t"].to_numpy()
     for ax, cmd_col, lo_col, gt_col in (
@@ -565,9 +570,17 @@ def view_command(runs, run_labels, out_dir, fmt, labels, downsample, **_):
       if gt_col in df and not bool(np.all(df[gt_col].to_numpy() == 0)):
         tt, yy = envelope_downsample(t, df[gt_col].to_numpy(), downsample)
         ax.plot(tt, yy, ":", label=f"{rlabel} gt", linewidth=1)
+    if "cmd_wz" in df:
+      tt, yy = envelope_downsample(t, df["cmd_wz"].to_numpy(), downsample)
+      axes[2].plot(tt, yy, "--", label=f"{rlabel} cmd", linewidth=1)
+    base = _sibling_base_df(run, ["t", "est_gyro_z"])
+    if base is not None and "est_gyro_z" in base:
+      tt, yy = envelope_downsample(base["t"].to_numpy(), base["est_gyro_z"].to_numpy(), downsample)
+      axes[2].plot(tt, yy, label=f"{rlabel} gyro", linewidth=1)
   axes[0].set_ylabel(labels.ylabel or "m/s"); axes[0].set_title("vx", fontsize=9)
   axes[1].set_ylabel(labels.ylabel or "m/s"); axes[1].set_title("vy", fontsize=9)
-  axes[1].set_xlabel(labels.xlabel or "t (s)")
+  axes[2].set_ylabel(labels.ylabel or "rad/s"); axes[2].set_title("wz", fontsize=9)
+  axes[2].set_xlabel(labels.xlabel or "t (s)")
   for ax in axes:
     legend_if_any(ax, fontsize=6)
   fig.suptitle(labels.title or "Command tracking (leg odometry)")

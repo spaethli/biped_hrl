@@ -3,6 +3,7 @@
 outputs
 COLCON_IGNORE
 data
+figures
 logs
 wandb
 MUJOCO_LOG.TXT
