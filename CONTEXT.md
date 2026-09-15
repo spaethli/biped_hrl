@@ -334,3 +334,16 @@ never a constant offset: over a 170 s Run a constant offset drifts by most of a 
 period, and the pair then fails to correlate at all even when it is the right one.
 _Avoid_: "sync", "the offset" (both imply a single constant, which is the defect); "the
 session start time" (there are two, and neither filename records one).
+
+**Motion-capture ground truth** (`gt_*`):
+The pelvis twist recovered from the marker cluster: time-aligned on `|ω|` (invariant to the
+unknown marker-to-body rotation), frame solved by orthogonal Procrustes, then lever-corrected
+`v_pelvis = v_marker − ω × r`. Written per _Run_ as `mocap_aligned.csv` on the _Flight
+recorder_'s clock. It is **ground truth**, so it takes the sim key names (`err_vx`, not
+`err_vx_est`) and the _Fused base velocity_ becomes the quantity under test, reported
+separately as `est_rms_v*`. This is the only hardware reference that is not a function of the
+policy's own motion, which is what the `_est` suffix exists to warn about.
+Available for 3 Runs of 2026-09-14 only; a _Run_ without it still scores against the estimator
+and says so in `err_v_reference`, so the two are never silently mixed in one column.
+_Avoid_: "the Vicon data" (the raw capture is not this; the alignment and lever correction
+are what make it a pelvis twist); "validated" for a Run that has no capture.

@@ -337,12 +337,78 @@ def test_missing_traj_dir_fails_loudly(tmp_path):
         bfr.find_pair(flight, tmp_path / "no_such_dir")
 
 
-def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0):
+def _flight_csv(tmp_path, entries, n=200):
+    """A minimal but COMPLETE flight recorder: every column read_flight declares in `need`,
+    plus `entry`, so the Run guard is exercised on a file that would otherwise score."""
+    rows = n * len(entries)
+    cols = {"t": np.arange(rows) / 50.0, "alpha": np.ones(rows),
+            "entry": np.repeat(entries, n)}
+    for c in ("cmd_vx", "cmd_vy", "cmd_wz", "quat_x", "quat_y", "quat_z",
+              "phase_sin", "phase_cos", "ach_vx", "ach_vy",
+              "est_gyro_x", "est_gyro_y", "est_gyro_z"):
+        cols[c] = np.zeros(rows)
+    cols["quat_w"] = np.ones(rows)
+    for p_ in ("raw_q", "meas_q", "meas_dq"):
+        for j in range(27):
+            # raw_q must CHANGE or policy_steps finds no steps; tie it to the entry so a
+            # wrongly-sliced frame is visibly a different signal.
+            cols[f"{p_}{j}"] = (np.repeat(entries, n) + np.arange(rows) % 2) * 0.01
+    p = tmp_path / "2026-09-14_15-00-37.csv"
+    pd.DataFrame(cols).to_csv(p, index=False)
+    (tmp_path / "2026-09-14_15-00-37_meta.json").write_text(json.dumps(
+        {"hold_joint_ids": list(range(12, 27)),
+         "joints": [{"slot": j, "name": f"j{j}", "lower": -3.0, "upper": 3.0}
+                    for j in range(27)]}))
+    return p
+
+
+def test_a_multi_run_file_is_refused_rather_than_pooled(tmp_path):
+    """One flight recorder file per controller PROCESS, so 15-00-37.csv really holds three
+    Runs -- a broom-disturbance Run and two under a 7.5 kg payload. Their pooled mean
+    describes no experiment that was run, and nothing in the file's name says so."""
+    p = _flight_csv(tmp_path, entries=[0, 1, 2])
+    with pytest.raises(SystemExit, match="holds 3 Runs"):
+        bfr.read_flight(p, assume_hold=[], entry=None)
+
+
+def test_entry_selects_exactly_that_run(tmp_path):
+    """The selector must slice, not merely filter a mask used later: every downstream metric
+    indexes the frame positionally."""
+    p = _flight_csv(tmp_path, entries=[0, 1, 2], n=200)
+    F = bfr.read_flight(p, assume_hold=[], entry=1)
+    assert len(F["df"]) == 200
+    assert set(F["df"]["entry"].unique()) == {1}
+    assert len(F["t"]) == 200 and len(F["cmd"]) == 200
+
+
+def test_a_single_run_file_needs_no_selector(tmp_path):
+    """The guard must not make the ordinary case (one Run per file, every pre-2026-09-14
+    session) require a flag it never needed."""
+    F = bfr.read_flight(_flight_csv(tmp_path, entries=[0]), assume_hold=[], entry=None)
+    assert len(F["df"]) == 200
+
+
+def test_an_absent_entry_is_refused_not_silently_empty(tmp_path):
+    """A typo'd --entry used to be indistinguishable from a Run with no data."""
+    p = _flight_csv(tmp_path, entries=[0, 1])
+    with pytest.raises(SystemExit, match="no entry 7"):
+        bfr.read_flight(p, assume_hold=[], entry=7)
+
+
+def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0, lag_s=0.0):
     """One Run of `run_s` walking at a constant speed, paired with a `telem_s` telemetry log.
 
     Everything is constant, so the right answers are exact by construction: the credited
     distance is speed * run_s and the mean power is power_w, no matter how far past the Run
     the telemetry kept recording.
+
+    `lag_s` offsets the telemetry's OWN clock while leaving the physical overlap identical,
+    so `t_in_flight` still spans [0, telem_s]. The two clocks really are offset -- the
+    2026-09-14 session ran -3.2 to -10.2 s, and the 14-37-12 pair +1028 s -- and with the
+    identity alignment this helper used at first, a span mask written against the raw `ta`
+    instead of the mapped `t_in_flight` is a no-op here while excluding every real sample on
+    hardware. An invariant test that cannot see the mistake it exists to forbid is the
+    failure mode check_test_sensitivity.py exists to catch.
     """
     tf = np.arange(0.0, run_s, 1 / 500.0)
     n = len(tf)
@@ -352,13 +418,13 @@ def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0):
         "df": pd.DataFrame({"est_v_compl_x": np.full(n, speed),
                             "est_v_compl_y": np.zeros(n)}),
     }
-    ta = np.arange(0.0, telem_s, 1 / 50.0)
+    ta = lag_s + np.arange(0.0, telem_s, 1 / 50.0)
     m = len(ta)
     tau = np.zeros((m, 27))
     dq = np.zeros((m, 27))
     tau[:, 0] = power_w          # one joint carries all of it: sum |tau*dq| = power_w
     dq[:, 0] = 1.0
-    return F, {"t": ta, "tau": tau, "dq": dq, "knee": np.zeros(m)}, {"b": 0.0, "m": 0.0}
+    return F, {"t": ta, "tau": tau, "dq": dq, "knee": np.zeros(m)}, {"b": -lag_s, "m": 0.0}
 
 
 def test_energy_ignores_telemetry_recorded_outside_the_run():
@@ -380,8 +446,12 @@ def test_energy_ignores_telemetry_recorded_outside_the_run():
 def test_energy_is_unchanged_when_the_telemetry_fits_inside_the_run():
     """The guard must not shorten a pair that was already contained: the eight 2026-09-14
     Runs other than 14-48-55 reproduced to every printed digit after the fix, and that
-    invariant is what makes the correction safe to apply retroactively."""
-    F, T, align = _energy_inputs(run_s=30.0, telem_s=10.0)
+    invariant is what makes the correction safe to apply retroactively.
+
+    Run at the +1028 s clock offset the 14-37-12 pair actually had, so the containment test
+    is exercised on the MAPPED time and not on the telemetry's raw clock.
+    """
+    F, T, align = _energy_inputs(run_s=30.0, telem_s=10.0, lag_s=1028.0)
     out = bfr._energy(F, T, align, "est_v_compl")
     assert out["cot_distance_m"] == pytest.approx(5.0, abs=0.05)   # bounded by the telemetry
     assert out["mech_power_w"] == pytest.approx(100.0, rel=1e-6)

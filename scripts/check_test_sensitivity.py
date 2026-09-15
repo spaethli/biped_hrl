@@ -464,6 +464,37 @@ MUTATIONS = [
    "    if False:",
    "test_missing_traj_dir_fails_loudly"),
 
+  # bench_flight_recorder Run scoping (2026-09-15): one CSV per controller PROCESS, so a raw
+  # log can hold several Runs under different experimental conditions (15-00-37.csv: a broom
+  # push and two 7.5 kg payload Runs). Pooling them returns a confident number for no
+  # experiment that was run, and nothing in the file name says so.
+  ("a multi-Run flight recorder file is pooled instead of refused", BFR,
+   "        elif len(seen) > 1:",
+   "        elif False:",
+   "test_a_multi_run_file_is_refused_rather_than_pooled"),
+
+  ("--entry filters a mask but never slices, so positional indexing stays on the full file",
+   BFR,
+   '            df = df[df["entry"] == entry].reset_index(drop=True)',
+   "            pass",
+   "test_entry_selects_exactly_that_run"),
+
+  # bench_flight_recorder energy gating (2026-09-15): np.interp CLAMPS, so telemetry recorded
+  # after a Run that ENDED WALKING inherited the last gate (1) and the last speed. On
+  # 2026-09-14_14-48-55 that credited 45.12 m against a true 11.5 m -- CoT 0.166 where the
+  # session runs 0.55-0.68, the single most flattering number of the day, and it was fiction.
+  ("Run-span mask dropped: trailing telemetry inherits the clamped gate and earns distance",
+   BFR,
+   " & inside\n",
+   "\n",
+   "test_energy_ignores_telemetry_recorded_outside_the_run"),
+
+  ("Run-span mask applied to the telemetry's RAW clock, not the aligned one (the two differ "
+   "by -3.2 to +1028 s, so it excludes real samples)", BFR,
+   "    inside = (t_in_flight >= tf[0]) & (t_in_flight <= tf[-1])",
+   "    inside = (ta >= tf[0]) & (ta <= tf[-1])",
+   "test_energy_is_unchanged_when_the_telemetry_fits_inside_the_run"),
+
 
   # WP5 (2026-09-01): the Bar B statistic itself. None of these crash -- each returns a
   # plausible number and the thesis verdict is read off it.

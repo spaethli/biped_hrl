@@ -377,11 +377,59 @@ def ref_columns(vel_ref):
     `ach_v` breaks the `<prefix>_<axis>` pattern the estimator bank follows -- the columns
     are `ach_vx`/`ach_vy`, not `ach_v_x`/`ach_v_y`. Only the sim branch reaches that name
     (on hardware `ach_v*` is dead), so a naive suffix concat is a defect that hides until
-    the tool is pointed at a sim-bridge log.
+    the tool is pointed at a sim-bridge log. `gt_v` (motion capture) follows `ach_v`, not
+    the bank, because it is ground truth and takes the sim key names.
     """
-    if vel_ref == "ach_v":
-        return "ach_vx", "ach_vy"
+    if vel_ref in ("ach_v", "gt_v"):
+        return f"{vel_ref}x", f"{vel_ref}y"
     return f"{vel_ref}_x", f"{vel_ref}_y"
+
+
+GROUND_TRUTH_REFS = ("ach_v", "gt_v")
+MOCAP_NAME = "mocap_aligned.csv"
+MOCAP_GAP_S = 0.05        # no interpolation across a wider hole than this
+MOCAP_COVERAGE_FLOOR = 0.50
+
+
+def attach_mocap(F, csv_path, mocap_path=None):
+    """Resample a bundle's `mocap_aligned.csv` onto the flight grid as `gt_v*` columns.
+
+    `mocap_align.py` writes `t` already on the FLIGHT recorder's clock (affine fit on |w|),
+    so this is a resample, never a second alignment -- refitting here would be a second,
+    disagreeing estimate of the same offset. It is a resample and not a concat because the
+    two grids are not the same and are not even consistent within one session: 14-20-04's
+    flight log runs at 500 Hz (mocap rows == flight rows) while 14-48-55's runs at 50 Hz
+    against the same 500 Hz capture.
+
+    Gaps are dropped, not bridged. np.interp spans a dropout with a straight line, which on
+    a velocity trace reads as smooth motion the robot never made; any flight row further
+    than MOCAP_GAP_S from a real capture sample becomes NaN and is excluded from scoring by
+    the coverage mask rather than averaged in.
+    """
+    p = Path(mocap_path) if mocap_path else Path(csv_path).with_name(MOCAP_NAME)
+    if not p.exists():
+        return None
+    m = pd.read_csv(p)
+    tm = m["t"].to_numpy(float)
+    tf = F["t"]
+    ok = np.isfinite(tm) & np.isfinite(m["gt_vx"].to_numpy(float))
+    tm, m = tm[ok], m[ok]
+    if len(tm) < 100:
+        return None
+    # distance from each flight row to the nearest capture sample, gap detector and
+    # end-clamp guard in one: np.interp also CLAMPS outside its range (the _energy defect),
+    # so rows before the first or after the last capture sample fail this test too.
+    j = np.clip(np.searchsorted(tm, tf), 1, len(tm) - 1)
+    near = np.minimum(np.abs(tf - tm[j - 1]), np.abs(tf - tm[j]))
+    good = near <= MOCAP_GAP_S
+    for c in ("gt_vx", "gt_vy", "gt_wz", "gt_px", "gt_py", "gt_yaw"):
+        if c not in m.columns:
+            continue
+        v = np.interp(tf, tm, m[c].to_numpy(float))
+        F["df"][c] = np.where(good, v, np.nan)
+    F["gt_rows"] = good
+    return {"mocap_file": p.name, "gt_coverage": round(float(good.mean()), 4),
+            "gt_span_s": round(float(tm[-1] - tm[0]), 2)}
 
 
 def walking_mask(cmd):
@@ -399,9 +447,27 @@ def walking_mask(cmd):
     return total_command > CMD_THRESHOLD
 
 
-def read_flight(csv_path, assume_hold, pose_yaml=None):
-    """Flight recorder -> the arrays every metric is built from, on the POLICY-step grid."""
+def read_flight(csv_path, assume_hold, pose_yaml=None, entry=None):
+    """Flight recorder -> the arrays every metric is built from, on the POLICY-step grid.
+
+    `entry` selects one _Run_. A file holding several and no selector is REFUSED, not pooled:
+    the recorder writes one CSV per controller process, so 15-00-37.csv carries three Runs
+    under two experimental conditions (a broom push and a 7.5 kg payload) and their pooled
+    mean describes nothing that happened. A bundle from bundle_hardware_run.py is already
+    sliced, so this only fires on a raw log -- which is exactly the case that used to pool.
+    """
     df, hold, hold_src = load(csv_path, assume_hold)
+    if "entry" in df.columns:
+        seen = sorted(int(e) for e in df["entry"].unique())
+        if entry is not None:
+            if entry not in seen:
+                raise SystemExit(f"{Path(csv_path).name}: no entry {entry}; it has {seen}")
+            df = df[df["entry"] == entry].reset_index(drop=True)
+        elif len(seen) > 1:
+            raise SystemExit(
+                f"{Path(csv_path).name} holds {len(seen)} Runs (entry {seen}) -- scoring them "
+                "together pools distinct Runs and is always wrong (CONTEXT.md, 'Run'). Pass "
+                "--entry N, or bundle the session with scripts/bundle_hardware_run.py")
     meta_p = Path(csv_path).with_name(Path(csv_path).stem + "_meta.json")
     if not meta_p.exists():
         sib = sorted(Path(csv_path).parent.glob(f"{Path(csv_path).name[:19]}*meta*.json"))
@@ -483,10 +549,27 @@ def score_regime(F, T, align, regime, vel_ref):
     out["err_yaw"] = float(np.abs(F["cmd"][rows, 2] - gyro[:, 2]).mean())
 
     ref = df[list(ref_columns(vel_ref))].to_numpy(float)[rows]
-    suffix = "" if vel_ref == "ach_v" else "_est"
-    out["err_vx" + suffix] = float(np.abs(F["cmd"][rows, 0] - ref[:, 0]).mean())
-    out["err_vy" + suffix] = float(np.abs(F["cmd"][rows, 1] - ref[:, 1]).mean())
+    suffix = "" if vel_ref in GROUND_TRUTH_REFS else "_est"
+    # nanmean, not mean: only the mocap branch can produce NaN here (a capture dropout), and
+    # it is excluded rather than propagated -- a single gap would otherwise NaN the metric.
+    out["err_vx" + suffix] = float(np.nanmean(np.abs(F["cmd"][rows, 0] - ref[:, 0])))
+    out["err_vy" + suffix] = float(np.nanmean(np.abs(F["cmd"][rows, 1] - ref[:, 1])))
     out["err_v_reference"] = vel_ref
+
+    # With truth present the ONBOARD ESTIMATOR stops being the measuring instrument and
+    # becomes the thing measured (the WL-F circularity: leg-odometry error correlates with
+    # the policy's own motion at +0.213, so a policy scored against its own estimator can
+    # look accurate by moving in a way that estimator likes). Reported as RMS, which is the
+    # error convention the estimator worklines used, NOT the |.| mean above.
+    if vel_ref == "gt_v" and "est_v_compl_x" in df.columns:
+        for key, est_c, gt_c in (("est_rms_vx", "est_v_compl_x", "gt_vx"),
+                                 ("est_rms_vy", "est_v_compl_y", "gt_vy"),
+                                 ("est_rms_wz", "est_gyro_z", "gt_wz")):
+            d = df[est_c].to_numpy(float)[rows] - df[gt_c].to_numpy(float)[rows]
+            out[key] = float(np.sqrt(np.nanmean(d ** 2)))
+        n = int(np.isfinite(df["gt_vx"].to_numpy(float)[rows]).sum())
+        out["gt_rows_scored"] = n
+        out["gt_coverage_regime"] = round(n / max(int(rows.sum()), 1), 4)
 
     mq = df[[f"meas_q{j}" for j in range(27)]].to_numpy(float)[rows]
     mdq = df[[f"meas_dq{j}" for j in range(27)]].to_numpy(float)[rows]
@@ -577,8 +660,15 @@ def _energy(F, T, align, vel_ref):
     # which is why only one run in eleven looked wrong.
     inside = (t_in_flight >= tf[0]) & (t_in_flight <= tf[-1])
     gate = (np.interp(t_in_flight, tf, (lin > CMD_THRESHOLD).astype(float)) > 0.5) & inside
-    spd = np.interp(t_in_flight, tf,
-                    np.linalg.norm(F["df"][list(ref_columns(vel_ref))].to_numpy(float), axis=1))
+    ref_s = np.linalg.norm(F["df"][list(ref_columns(vel_ref))].to_numpy(float), axis=1)
+    # A capture dropout is bridged HERE and dropped in score_regime, deliberately: this is a
+    # distance INTEGRAL, so skipping a gap under-counts the denominator and inflates CoT,
+    # while an error metric averaged over a bridged gap is scoring invented data. The
+    # coverage fraction travels into the json so a heavily-gapped run stays visible.
+    fin = np.isfinite(ref_s)
+    if fin.sum() < 50:
+        return {}
+    spd = np.interp(t_in_flight, tf[fin], ref_s[fin])
     if gate.sum() < 50:
         return {}
     power = np.abs(T["tau"] * T["dq"]).sum(axis=1)
@@ -612,7 +702,7 @@ def command_block(F):
 def process(csv_path, args):
     csv_path = Path(csv_path)
     print(f"\n=== {csv_path.name} ===")
-    F = read_flight(csv_path, args.assume_hold, args.default_pose_yaml)
+    F = read_flight(csv_path, args.assume_hold, args.default_pose_yaml, args.entry)
     flag = "" if 40.0 <= F["step_hz"] <= 60.0 else "   <-- STEP RATE OFF, every rate below is meaningless"
     print(f"  policy steps {len(F['steps'])} at {F['step_hz']:.2f} Hz{flag}")
     if F["hold_src"] == "--assume-hold" and not F["hold"]:
@@ -624,8 +714,23 @@ def process(csv_path, args):
     # estimate gets `_est` (CONTEXT.md, "Fused base velocity").
     ach = F["df"][["ach_vx", "ach_vy"]].to_numpy(float)
     vel_ref = "ach_v" if np.any(ach != 0.0) else args.vel_reference
-    print(f"  velocity reference: {vel_ref}" + ("  (ground truth)" if vel_ref == "ach_v"
-          else "  (an ESTIMATE -> keys are err_vx_est/err_vy_est)"))
+    # Motion capture outranks both: it is the only reference on hardware that is not a
+    # function of the policy's own motion. Beaten only by `ach_v`, which is sim's true state.
+    mo = None if args.no_mocap else attach_mocap(F, csv_path, args.mocap)
+    if mo is not None and mo["gt_coverage"] >= MOCAP_COVERAGE_FLOOR:
+        vel_ref = "gt_v"
+    elif mo is not None:
+        print(f"  WARN {mo['mocap_file']} covers only {mo['gt_coverage'] * 100:.1f}% of the "
+              f"Run (floor {MOCAP_COVERAGE_FLOOR * 100:.0f}%) -> NOT used as the reference")
+        mo = None
+    print(f"  velocity reference: {vel_ref}"
+          + ("  (ground truth)" if vel_ref in GROUND_TRUTH_REFS
+             else "  (an ESTIMATE -> keys are err_vx_est/err_vy_est)"))
+    if vel_ref == "gt_v":
+        print(f"  motion capture: {mo['mocap_file']}  coverage {mo['gt_coverage'] * 100:.1f}%"
+              f"  span {mo['gt_span_s']:.0f}s"
+              "\n       -> err_vx/err_vy are vs TRUTH; the onboard estimator is scored "
+              "separately as est_rms_v*")
 
     T = align = None
     pair = find_pair(csv_path, args.traj_dir)
@@ -676,6 +781,8 @@ def process(csv_path, args):
         "session_joint_range": joint_ranges(F["steps"], F["joints"], LEG_SLOTS),
         "session_pinned_any_leg": round(pinned_any(F["steps"], F["joints"], LEG_SLOTS), 5),
     }
+    if mo is not None:
+        session.update(mo)
     if align is not None:
         session.update({"pair_lag_s": round(align["b"], 4),
                         "pair_coarse_lag_s": round(align["coarse_lag_s"], 3),
@@ -737,6 +844,15 @@ def main():
     ap.add_argument("--vel-reference", default="est_v_compl",
                     help="estimator column prefix used as the tracking reference when ach_v "
                          "is dead (default: est_v_compl, the WL-G arm B verdict)")
+    ap.add_argument("--entry", type=int, default=None,
+                    help="score only this FSM entry (one Run). Required when a raw flight "
+                         "recorder file holds more than one; bundles are already sliced")
+    ap.add_argument("--mocap", default=None,
+                    help=f"motion-capture ground truth ({MOCAP_NAME} from mocap_align.py); "
+                         "default: the file of that name beside the flight recorder")
+    ap.add_argument("--no-mocap", action="store_true",
+                    help="ignore a mocap sidecar and score against the estimator, to "
+                         "reproduce a pre-mocap number")
     ap.add_argument("--assume-hold", default=None,
                     help="hold slots for logs whose meta json predates the field, e.g. 12-26")
     ap.add_argument("--default-pose-yaml", default=None,
