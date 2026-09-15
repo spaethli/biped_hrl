@@ -4,6 +4,7 @@
 #include "isaaclab/envs/mdp/observations/observations.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
 #include "h1_2_observations.h"  // robot-local terms: keyboard_velocity_commands, gait_phase_cmd
+#include "obs_contract.h"       // A0 load-time I/O contract (2026-09-15)
 
 // [SAFETY FILTER] set to 0 to revert to unfiltered policy output
 #define SAFETY_FILTER 1
@@ -17,6 +18,28 @@
 // keyboard_velocity_commands + gait_phase_cmd moved to include/h1_2_observations.h
 // (2026-07-21) so State_RLHRL gets the same registrations without depending on which
 // object files the linker keeps.
+
+// Flattened I/O sizes of an ONNX file, read through a throwaway session at load. OrtRunner
+// keeps its own session and sizes private in the shared isaaclab header (not edited, so every
+// other robot builds unchanged), hence a second, load-path-only look. Never the control loop.
+static std::pair<std::vector<h1_2::OnnxTensor>, int64_t>
+onnx_io(const std::filesystem::path& path)
+{
+    Ort::Env ort_env(ORT_LOGGING_LEVEL_ERROR, "a0_io_probe");
+    Ort::SessionOptions so;
+    Ort::Session session(ort_env, path.c_str(), so);
+    Ort::AllocatorWithDefaultOptions alloc;
+    auto flat = [](const std::vector<int64_t>& shape) {
+        int64_t n = 1;
+        for (auto d : shape) n *= d;
+        return n;
+    };
+    std::vector<h1_2::OnnxTensor> inputs;
+    for (size_t i = 0; i < session.GetInputCount(); ++i)
+        inputs.push_back({session.GetInputNameAllocated(i, alloc).get(),
+                          flat(session.GetInputTypeInfo(i).GetTensorTypeAndShapeInfo().GetShape())});
+    return {inputs, flat(session.GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape())};
+}
 
 State_RLBase::State_RLBase(int state_mode, std::string state_string)
 : FSMState(state_mode, state_string) 
@@ -36,6 +59,22 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
         articulation->joint_offset = deploy_yaml["joint_offset"].as<std::vector<float>>();
     env = std::make_unique<isaaclab::ManagerBasedRLEnv>(deploy_yaml, articulation);
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
+
+    // A0 I/O contract (obs_contract.h). Fails loudly HERE, before the policy thread exists,
+    // instead of ORT reading adjacent heap as observations every step. compute() at load is
+    // safe: ObservationManager's constructor already ran every term function once, and enter()
+    // calls env->reset(), which zeroes global_phase and re-seeds every term's history. This slot
+    // is filled by hand (2026-09-14: A0_DR_s123 copied in, its PROVENANCE.json naming a
+    // different run), which is exactly the path no other gate watches.
+    {
+        const auto [inputs, out_size] = onnx_io(policy_dir / "exported" / "policy.onnx");
+        const std::string violation = h1_2::io_contract_violation(
+            inputs, env->observation_manager->compute(), out_size,
+            env->action_manager->total_action_dim());
+        if (!violation.empty())
+            throw std::runtime_error("[A0] REFUSING TO LOAD: " + violation);
+        spdlog::info("[A0] I/O contract OK: {} input(s), {} actions", inputs.size(), out_size);
+    }
 
     this->registered_checks.emplace_back(
         std::make_pair(

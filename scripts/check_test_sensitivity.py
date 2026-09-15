@@ -41,6 +41,8 @@ BFR = REPO / "scripts/bench_flight_recorder.py"
 SJH = REPO / "scripts/score_joint_hold.py"
 HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
 ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
+A0CPP = REPO / "deploy/robots/h1_2/src/State_RLBase.cpp"
+IOCH = REPO / "deploy/robots/h1_2/include/obs_contract.h"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -463,6 +465,29 @@ MUTATIONS = [
    "    if not d.is_dir():",
    "    if False:",
    "test_missing_traj_dir_fails_loudly"),
+
+  # A0 deploy I/O contract (2026-09-15). algorithms.h sizes the ORT tensor from the ONNX and
+  # reads the obs vector's data pointer, so a wide model reads adjacent HEAP -> limp robot. The
+  # A0 slot is filled by hand, and until now nothing checked it.
+  ("A0 contract violation only WARNS at load, so a wrong-width policy.onnx still runs", A0CPP,
+   '            throw std::runtime_error("[A0] REFUSING TO LOAD: " + violation);',
+   '            spdlog::warn("[A0] " + violation);',
+   "test_the_a0_contract_is_checked_at_load_and_refuses"),
+
+  ("A0 contract check never called from the constructor", A0CPP,
+   "        const std::string violation = h1_2::io_contract_violation(",
+   "        const std::string violation = std::string(); (void)h1_2::io_contract_violation;(",
+   "test_the_a0_contract_is_checked_at_load_and_refuses"),
+
+  ("contract accepts a model WIDER than the obs vector (the heap-read direction)", IOCH,
+   "        if (built != in.size)",
+   "        if (built > in.size)",
+   "test_the_cpp_contract_unit_test_passes"),
+
+  ("contract never compares the output width (process_action slices past the end)", IOCH,
+   "    if (onnx_output_size != action_dim)",
+   "    if (false)",
+   "test_the_cpp_contract_unit_test_passes"),
 
   # bench_flight_recorder Run scoping (2026-09-15): one CSV per controller PROCESS, so a raw
   # log can hold several Runs under different experimental conditions (15-00-37.csv: a broom
