@@ -88,21 +88,43 @@ the _Goal_, it is not a state target reached by L2 distance: the low level *entr
 it via the open-loop phase clock and the `feet_gait` reward. Deploy-clean, since the phase
 is a function of the commanded period and time, and the entrainment reward is sim-only.
 This is the channel the A3 gait library's footfall pattern plugs into.
+⚠ On the robot the channel can be **switched off without any error**: a non-zero `pin_period`
+in the deploy yaml holds the clock at a constant, and the HL's period output is then never
+decoded at all, so the commanded cadence is absent from behaviour *and* from the telemetry.
+A pinned session yields no evidence about cadence, which matters because this is the
+hierarchy's only actuated adaptation channel and the one every payload claim runs through.
 _Avoid_: goal, V* (those are the L2-reached state targets); step length (the reciprocal of
-cadence at a fixed speed, v = f*L, not an independent channel).
+cadence at a fixed speed, v = f*L, not an independent channel); reading a pinned session's
+logged period as the HL's choice.
 
-**Cost of transport** (`CoT`):
-The high level's efficiency objective (A1a onward): window mechanical energy / *actual
-walked* distance (`Σ ‖v_xy‖·dt`), engaged only when the commanded linear speed exceeds A0's
-`command_threshold` (0.1). Actual (not commanded) distance so that spending energy while
-going nowhere is correctly expensive; a small denominator floor guards the stuck-robot
-blow-up (it is not the engagement gate, which is the command threshold). Added (negative) to
-the HL reward *only*, so the low level stays a pure tracker. That decoupling (efficiency at
-the HL, tracking at the LL) is what justifies the hierarchy against a flat A0+energy baseline.
-The HL trims CoT through the _Gait reference_ at the commanded velocity.
+**Cost of transport (objective)** (`CoT`):
+The high level's efficiency objective (A1a onward): window mechanical energy / distance
+walked **along the command** (the *signed projection* `Σ (v_xy·ĉ_xy)·dt`, since 2026-07-10;
+the undirected form let the HL earn cheap metres sideways). Engaged only when the commanded
+linear speed exceeds A0's `command_threshold` (0.1). Achieved (not commanded) distance so
+that spending energy while going nowhere is correctly expensive; a small denominator floor
+guards the stuck-robot blow-up (it is not the engagement gate, which is the command
+threshold). Added (negative) to the HL reward *only*, so the low level stays a pure tracker.
+That decoupling (efficiency at the HL, tracking at the LL) is what justifies the hierarchy
+against a flat A0+energy baseline. The HL trims CoT through the _Gait reference_ at the
+commanded velocity.
+This is the quantity `hl_cot_coef` is calibrated against and the *only* one
+`hl_cot_cap_commanded` acts on (it caps the credited distance at the commanded distance).
 _Avoid_: energy, power (CoT is energy normalized by distance; raw energy has a stand-still
 attractor, the failure that killed `hl_reward_mode=task`); "LL energy term" (CoT never
-enters the LL reward).
+enters the LL reward); using it interchangeably with the _diagnostic_ below.
+
+**Cost of transport (diagnostic)**:
+The *reported* efficiency number: the same energy over **undirected** distance
+(`Σ ‖v_xy‖·dt`). This is what `metrics/cot` logs in training, what the sim benchmark's `cot`
+key holds, and what a hardware run yields once a ground-truth distance is available. It is
+the only form defined identically at training, sim and hardware **for both architectures**,
+because the projection needs a high level and A0 has none, so it is the form the
+training→sim→real comparison uses.
+⚠ It is **not** the trained objective and must never be cited as evidence about
+`hl_cot_cap_commanded`, which leaves it untouched by construction. A figure showing it must
+say which of the two it is.
+_Avoid_: calling it "CoT" unqualified in any claim about the HL's incentives.
 
 **Intrinsic reward**:
 The A1 low level's *training* signal: the goal-distance reward `-Σ_c w_c ‖V*_c - s_c‖`.
@@ -278,11 +300,37 @@ rather than a PD-law estimate. Its `vel_*`, `pos_*`, `body_height`, `foot_force_
 _Avoid_: "all_joints" bare, "the trajectory log" (nothing is a trajectory here);
 "the estimator log" (its estimator columns are the dead ones).
 
+**Run**:
+One continuous occupancy of an RL state on the robot: the operator enters the policy,
+it walks, it leaves. **This, not a file, is the unit every hardware metric is scored over.**
+It is identified by the _Flight recorder_'s `entry` column, which is process-wide and
+increments on every re-entry, so one _Flight recorder_ file holds as many Runs as the
+operator started without restarting the controller (three, in `15-00-37.csv` on 2026-09-14,
+under two different experimental conditions). Scoring a file whole pools distinct Runs and
+is always wrong.
+A Run's wall-clock extent comes from `t_wall` only. The `t` column is a tick counter that
+advances one control step per loop iteration and does not run while the robot sits in
+Passive, so the gaps *between* Runs are invisible in it.
+_Avoid_: "session" or "recording" for a single Run (a session is a day's work and a
+recording is a file, and both hold several); "a log" (one Run is a slice of two logs).
+
 **Session pair**:
-One hardware run's _Flight recorder_ and _Joint telemetry log_, matched and time-aligned so
-the commanded side and the torque can be read on the same clock. Matching is proposed by
-filename timestamp and *confirmed* by cross-correlating a shared measured joint, because the
-filename timestamp is not the first-sample time and carries no alignment information. The
-two clocks differ in RATE (measured -2600 to -3067 ppm), so the alignment is affine in time,
-never a constant offset: over a 308 s session a constant offset is wrong by 40 policy steps.
-_Avoid_: "sync", "the offset" (both imply a single constant, which is the defect).
+The alignment of one _Run_ with the _Joint telemetry log_ that was recording during it, so
+the commanded side and the torque can be read on the same clock. The relation is **not
+one-to-one in either direction**: several Runs share one _Flight recorder_ file, and one
+_Joint telemetry log_ can cover several consecutive Runs.
+Matching is decided by **cross-correlating a shared measured joint against every candidate**,
+fitting offset and rate together. Overlapping recording intervals are a *sanity flag only*,
+never the proposer: on 2026-09-14 the intervals excluded the correct partner for 4 of 12
+Runs, because the two loggers are started and stopped independently. A pair whose wall-clock
+offset sits far outside the rest of the day's is reported for a human decision and refused by
+default, since a quasi-periodic walking knee plus a free rate parameter can correlate highly
+against the *wrong* walking bout.
+Neither filename is a first-sample time: the _Flight recorder_'s is process launch, and
+logging begins whenever the RL state is entered, so the offset between the two logs is
+operator timing (-3.3 s and -10.3 s on two days; -6 s to +113 s across 2026-09-14). The two
+clocks also differ in RATE (measured -2462 to -6613 ppm), so the alignment is affine in time,
+never a constant offset: over a 170 s Run a constant offset drifts by most of a stride
+period, and the pair then fails to correlate at all even when it is the right one.
+_Avoid_: "sync", "the offset" (both imply a single constant, which is the defect); "the
+session start time" (there are two, and neither filename records one).
