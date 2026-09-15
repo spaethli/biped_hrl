@@ -188,6 +188,20 @@ v_P^P = Rz(ψ)·(v_I^T − ω_T × r)            pelvis linear velocity from the
 p^I   = Rz(−ψ)·p^P − r                     any pelvis-frame point, expressed in the IMU frame
 ```
 
+⚠ **"Base height" in the deploy stack is the IMU height, NOT the pelvis height.** `est_h` in the
+HRL telemetry, and the `nominal_root_height` it is anchored to, are both *pelvis-above-sole plus
+`r_imu.z` = 0.27756 m*. The convention is deliberate and is enforced: `State_RLHRL.cpp:237`
+refuses to start unless `nominal_root_height ≈ fk_h_nominal + kImuOffsetT.z()`. It is harmless
+for control, because `hl_target_mode: delta` makes the height goal a difference and the offset
+cancels on both sides.
+
+It is NOT harmless as a measurement. Measured on 2026-09-14, `est_h` reads **1.286 m** on a
+stand, while the true pelvis height is **~1.01 m** — confirmed three ways: `est_h` − 0.27756 =
+1.008; `HOME_KEYFRAME` z = 1.02 (`h1_2_constants.py:136`); and the straight-legged FK chain
+0.1632 + 0.4 + 0.4 + 0.02 + 0.045 = 1.028. Anything comparing `est_h` against an external
+absolute height (motion capture, a tape measure, a treadmill rig) must subtract `r_imu.z` first,
+or it lands 27 cm out.
+
 *Measured:* the last identity reproduces MuJoCo to **6.7e-16 m** over 300 random poses with
 |ψ| ≤ 1.5 rad, and the orientation form `R^I = Rz(−ψ)·R^P` to 3.3e-16.
 
