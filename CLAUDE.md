@@ -62,6 +62,37 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
 
 - `Unitree-H1_2-Flat` — A0 (flat PPO baseline)
 - `Unitree-H1_2-Flat-A1` — A1 (HIRO hierarchy; runner = `HierarchicalRunner`)
+- `Unitree-H1_2-Flat-Payload` / `Unitree-H1_2-Flat-A1-Payload` — the same two with the
+  coupled payload-mount DR registered (ADR-0010). The base tasks never register the event,
+  so existing checkpoints replay bit-identically.
+
+## Policy names (2026-09-14) — say these, not run directories
+
+| Name | What it is |
+|---|---|
+| **A1a** | THE keeper. `logs/rsl_rl/h1_2_velocity_a1_v2/2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42/model_10000.pt`. `cot5` + `rse 0.12`, stock jacc, no payload DR. The deploy policy. |
+| **A0** | flat v2 baseline, no payload DR |
+| **A0_DR** | A0 + coupled payload DR (was "F-mem") |
+| **A1a_DR_s42** / `_s123` | A1a + payload DR, keeper LL frozen (was "H-mem") |
+| **A1a_DR_cotcap_s42** / `_s123` | the same with `hl_cot_cap_commanded=True` |
+
+Sim bench arms in `data/2026-09-09-wp3-baseline-arms/` map as `nodr_*` = A1a,
+`fmem_*` = A0_DR, `hmem_*` = A1a_DR, `cotcap_*` = A1a_DR_cotcap, `hadapt*` = the `hl_obs_e`
+H-adapt arms.
+
+**Decision with the supervisor, 2026-09-14: A1a stays the deploy policy; the DR arms are not
+adopted.** On hardware the DR arms never came fully to rest at zero command (residual motion,
+mainly arm swing, no unplanned steps) and `A0_DR` under the backpack did not walk better than
+A1a. The DR arms are reported as a measured negative, not deleted.
+
+⚠ **No sim metric separates A1a from the DR arms, and the weak ones rank them backwards.**
+Base cell, 0 kg: `ub_arm_vel` A1a 0.307/0.316 sits inside A1a_DR's 0.322/0.331 and
+A1a_DR_cotcap's 0.320/0.305; on `act_legs` (0.618/0.627) and `err_vx` (0.127/0.126) A1a is the
+**worst** of the four hierarchical arms. The large upper-body gap (2.7x `ub_arm_vel`, 30x
+`ub_pose_dev`) is hierarchy-vs-flat, and A1a is on the hierarchical side of it. So the
+hardware preference is not predicted by anything the bench computes. Second instance of the
+pattern in ADR-0009, where v3 improved every pre-registered sim metric and failed on the
+robot. **Do not defend the A1a choice with sim numbers.**
 
 ## Project skills (`.claude/skills/`)
 
