@@ -50,6 +50,8 @@ HOLD_S = 2.0           # the signal must stay under the threshold this long to c
 FLOOR_TAIL_S = 5.0     # late part of a standing segment, used to MEASURE the settled floor
 FLOOR_MIN_SEG_S = 10.0 # a standing segment shorter than this cannot show a settled tail
 MIN_SETTLE_SEG_S = 10.0 # ...nor a settle; see settling_times()
+MOCAP_GAP_S = 0.05     # a flight row further than this from a capture sample is UNCOVERED
+                       # (same tolerance as bench_flight_recorder.attach_mocap)
 ARM_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)   # rad/s, swept
 BASE_THRESHOLDS = (0.03, 0.05, 0.10)        # m/s, swept
 PERIOD_RANGE = (0.35, 1.0)                  # cadence_period_range in the deploy yaml
@@ -102,8 +104,27 @@ def read_mocap(bundle):
   if not p.exists():
     return None
   d = np.genfromtxt(p, delimiter=",", names=True)
-  return {"t": np.atleast_1d(d["t"]),
-          "speed": np.hypot(np.atleast_1d(d["gt_vx"]), np.atleast_1d(d["gt_vy"]))}
+  t = np.atleast_1d(d["t"])
+  speed = np.hypot(np.atleast_1d(d["gt_vx"]), np.atleast_1d(d["gt_vy"]))
+  # Drop dropout samples HERE, before anything smooths them: moving_average's box filter would
+  # spread a single NaN across its whole SMOOTH_S window. A dropped sample is a gap, and gaps
+  # are handled where they can be seen -- covered_rows() in analyze().
+  ok = np.isfinite(t) & np.isfinite(speed)
+  return {"t": t[ok], "speed": speed[ok]}
+
+
+def covered_rows(t_flight, t_mocap):
+  """Flight rows within MOCAP_GAP_S of a real capture sample.
+
+  np.interp CLAMPS outside its range and bridges any hole with a straight line, so without
+  this a row past the end of the capture inherits the last captured speed and a dropout reads
+  as smooth motion. Measured on 14-48-55: the flight log runs 0.82 s past the capture end.
+  """
+  if len(t_mocap) < 2:
+    return np.zeros(len(t_flight), bool)
+  j = np.clip(np.searchsorted(t_mocap, t_flight), 1, len(t_mocap) - 1)
+  near = np.minimum(np.abs(t_flight - t_mocap[j - 1]), np.abs(t_flight - t_mocap[j]))
+  return near <= MOCAP_GAP_S
 
 
 def standing_segments(t, cmd):
@@ -244,9 +265,17 @@ def analyze(bundle):
   else:
     sp = moving_average(M["t"], M["speed"], SMOOTH_S)
     sp_on_f = np.interp(F["t"], M["t"], sp)
-    res["base"]["floor_m_s"] = settled_floor(F["t"], sp_on_f, segs)
+    # Score only standing segments the capture covers END TO END. Masking uncovered rows to NaN
+    # instead would move the defect rather than remove it: in settling_times `NaN <= thresh` is
+    # False, so a capture gap would read as the robot never settling and right-censor the
+    # segment -- a bias against exactly the policy being measured -- and np.median returns nan
+    # the moment one reaches settled_floor. A dropped segment is counted, never silent.
+    cov = covered_rows(F["t"], M["t"])
+    base_segs = [(i0, i1) for i0, i1 in segs if cov[i0:i1 + 1].all()]
+    res["base"]["n_segments_uncovered"] = len(segs) - len(base_segs)
+    res["base"]["floor_m_s"] = settled_floor(F["t"], sp_on_f, base_segs)
     for th in BASE_THRESHOLDS:
-      v, cen = settling_times(F["t"], sp_on_f, segs, th)
+      v, cen = settling_times(F["t"], sp_on_f, base_segs, th)
       res["base"][f"t_settle_{th}"] = {
         "median": float(np.median(v)) if v else None,
         "max": float(np.max(v)) if v else None,

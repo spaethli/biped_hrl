@@ -43,6 +43,7 @@ HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
 ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
 A0CPP = REPO / "deploy/robots/h1_2/src/State_RLBase.cpp"
 IOCH = REPO / "deploy/robots/h1_2/include/obs_contract.h"
+ACS = REPO / "scripts/analyze_cadence_settling.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -488,6 +489,24 @@ MUTATIONS = [
    "    if (onnx_output_size != action_dim)",
    "    if (false)",
    "test_the_cpp_contract_unit_test_passes"),
+
+  # analyze_cadence_settling capture coverage (2026-09-15): np.interp CLAMPS, so rows past the
+  # end of a capture inherit the last captured speed and a policy that came to rest reads as
+  # never settling. Latent on 2026-09-14; ADR-0013's floors rest on this metric.
+  ("settling scored over segments the capture does not cover (the clamp bias)", ACS,
+   "    base_segs = [(i0, i1) for i0, i1 in segs if cov[i0:i1 + 1].all()]",
+   "    base_segs = list(segs)",
+   "test_a_segment_the_capture_does_not_cover_is_dropped_not_censored"),
+
+  ("coverage tolerance unbounded, so any row counts as covered", ACS,
+   "  return near <= MOCAP_GAP_S",
+   "  return near <= 1e9",
+   "test_covered_rows_rejects_an_internal_dropout"),
+
+  ("NaN capture samples reach the smoother and smear across its window", ACS,
+   "  ok = np.isfinite(t) & np.isfinite(speed)",
+   "  ok = np.ones(len(t), bool)",
+   "test_read_mocap_drops_non_finite_samples"),
 
   # bench_flight_recorder Run scoping (2026-09-15): one CSV per controller PROCESS, so a raw
   # log can hold several Runs under different experimental conditions (15-00-37.csv: a broom
