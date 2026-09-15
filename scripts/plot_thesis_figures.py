@@ -271,10 +271,88 @@ def pick_runs(bundles: list[Bundle], need_torque: bool) -> dict[str, Bundle]:
 
 # ------------------------------------------------------------------------ output ----
 
+DRAWN: dict[str, list[float]] = {}
+
+
+def harvest_drawn(fig, name: str) -> None:
+  """Record every y value actually drawn in DATA coordinates, for --verify-csv.
+
+  Taken off the live figure rather than parsed back out of the .pgf, because a .pgf stores
+  path coordinates in inches after the axis transform: recovering data values from it means
+  re-deriving the transform, which is more machinery than the thing being checked.
+
+  Only artists on `ax.transData` count. Reference lines (axhline/axvline: the action-space
+  ceiling, the A0 anchor, the zero-command floor) sit on a BLENDED transform, and legend
+  proxies carry no data -- both are annotations, not series, and neither belongs in a panel
+  CSV. Filtering by transform says exactly that, where a point-count threshold would also
+  silently drop a real two-Run policy from the scalar figures.
+  """
+  vals: list[float] = []
+  for ax in fig.axes:
+    for ln in ax.get_lines():
+      if ln.get_transform() is not ax.transData:
+        continue
+      y = np.asarray(ln.get_ydata(), float)
+      vals += [float(v) for v in y[np.isfinite(y)]]
+    for cont in getattr(ax, "containers", []):
+      for patch in getattr(cont, "patches", []):
+        h = patch.get_height()
+        if np.isfinite(h):
+          vals.append(float(h))
+  DRAWN[name] = vals
+
+
+def check_panel_csv(out_dir: Path, names: list[str]) -> int:
+  """Every value drawn must appear in that figure's panel CSVs. Returns the failure count.
+
+  The CSVs are the archived numbers -- the thesis quotes them and a reader re-plots from
+  them -- so a series that is drawn but not written is a figure nobody can reproduce, and a
+  panel CSV built from a different array than the one plotted is worse than none. Values are
+  matched, not rows: the CSV schema differs per figure (long form here, one row per bar
+  there) and pinning this check to a schema would make it a restatement of the writer.
+  """
+  bad = 0
+  for name in names:
+    drawn = DRAWN.get(f"f_{name}")
+    if drawn is None:
+      continue
+    pool: list[float] = []
+    csvs = sorted(out_dir.glob(f"f_{name}_*.csv"))
+    for p in csvs:
+      with open(p, newline="") as fh:
+        for row in csv.DictReader(fh):
+          for v in row.values():
+            try:
+              f = float(v)
+            except (TypeError, ValueError):
+              continue
+            if np.isfinite(f):
+              pool.append(f)
+    arr = np.array(sorted(pool)) if pool else np.empty(0)
+    missing = 0
+    for v in drawn:
+      if len(arr) == 0:
+        missing += 1
+        continue
+      i = int(np.searchsorted(arr, v))
+      near = min(abs(v - arr[j]) for j in (max(i - 1, 0), min(i, len(arr) - 1)))
+      # The writers round to 4-6 decimals, so an exact match is not available; a genuinely
+      # different series misses by orders of magnitude, not by a rounding step.
+      if near > max(1e-3, 1e-3 * abs(v)):
+        missing += 1
+    ok = missing == 0 and len(csvs) > 0
+    note = "no panel CSV written" if not csvs else f"{missing}/{len(drawn)} drawn values absent"
+    print(f"[CSV] {'OK  ' if ok else 'FAIL'} f_{name}  {len(drawn)} drawn, "
+          f"{len(pool)} CSV values, {len(csvs)} panel file(s)" + ("" if ok else f"  <-- {note}"))
+    bad += 0 if ok else 1
+  return bad
+
+
 def save_pgf(fig, out_dir: Path, name: str) -> Path:
   out_dir.mkdir(parents=True, exist_ok=True)
   path = out_dir / f"{name}.pgf"
   fig.savefig(path)
+  harvest_drawn(fig, name)
   plt.close(fig)
   # matplotlib emits `\mathdefault` for any mathtext tick label (a log axis, a scientific
   # offset) but defines it only in the standalone document IT writes, never in the raw .pgf.
@@ -767,18 +845,22 @@ def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
   walk = walking_mask(df[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
   regimes = {"walking": walk, "standing": ~walk}
 
+  # The wz panel is a different test from the other two and the labels say so: est_v_compl is
+  # a fused ESTIMATE under scrutiny, while the gyro is a direct rate measurement, so its
+  # agreement with capture checks the FRAME alignment, not estimator drift. One shared
+  # legend entry would claim three estimator tests where there are two.
   panels = [
-    ("vx", "cmd_vx", "est_v_compl_x", "gt_vx", "m/s",
-     "onboard estimate (est\\_v\\_compl, an ESTIMATE)"),
-    ("vy", "cmd_vy", "est_v_compl_y", "gt_vy", "m/s",
-     "onboard estimate (est\\_v\\_compl, an ESTIMATE)"),
-    ("wz", "cmd_wz", "est_gyro_z", "gt_wz", "rad/s",
-     "gyro z (a DIRECT measurement, not an estimate)"),
+    ("vx", "cmd_vx", "est_v_compl_x", "gt_vx", "m/s", "$v_x$",
+     "onboard estimate (fused leg odometry + IMU)"),
+    ("vy", "cmd_vy", "est_v_compl_y", "gt_vy", "m/s", "$v_y$",
+     "onboard estimate (fused leg odometry + IMU)"),
+    ("wz", "cmd_wz", "est_gyro_z", "gt_wz", "rad/s", "$\\omega_z$",
+     "gyro $z$ (a direct measurement, not an estimate)"),
   ]
   fig, axes = plt.subplots(3, 1, figsize=(FIG_W, 4.4), sharex=True)
   rows = {}
   rms_report = {}
-  for ax, (axis, cmd_c, est_c, gt_c, unit, est_name) in zip(axes, panels):
+  for ax, (axis, cmd_c, est_c, gt_c, unit, sym, est_name) in zip(axes, panels):
     est, gt = df[est_c].to_numpy(float), G[gt_c]
     series = (("operator command", df[cmd_c].to_numpy(float), "0.25", "--", 0.8),
               (est_name, est, "#D55E00", "-", 0.7),
@@ -797,7 +879,7 @@ def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
     ax.text(0.005, 0.97, f"estimator RMS vs truth:  standing {r['standing']:.4f}, "
             f"walking {r['walking']:.4f} {unit}", transform=ax.transAxes, va="top",
             ha="left", fontsize=6, color="#D55E00")
-    ax.set_ylabel(f"{axis} ({unit})")
+    ax.set_ylabel(f"{sym} ({unit})")
     ax.margins(y=0.22)
   axes[-1].set_xlabel("time since Run start (s)")
   fig.suptitle(f"velocity tracking vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
@@ -828,7 +910,7 @@ def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
     OG = read_mocap(o, ot)
     ow = walking_mask(od[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
     txt = []
-    for axis, _c, est_c, gt_c, _u, _n in panels:
+    for axis, _c, est_c, gt_c, _u, _s, _n in panels:
       e, g = od[est_c].to_numpy(float), OG[gt_c]
       txt.append(f"{axis} stand {_rms(e, g, ~ow):.4f} walk {_rms(e, g, ow):.4f}")
     print(f"[PLOT] f_track: (not drawn) {o.policy} = {o.tag} ({o.dir.name}); "
@@ -1173,13 +1255,26 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
         hv.append(float(v))
         ax.plot(2, float(v), marker="o", markersize=2.4, color=style["color"], alpha=0.55,
                 zorder=2)
+        cav = "encoder-differentiated" if key == "jacc_legs" else ""
+        if key == "cot":
+          # The CoT denominator is a measured distance, and only the three Runs with motion
+          # capture have a true one; the rest integrate the onboard estimate, which
+          # under-reads by ~3% on the Runs where both are available. Small, but it is a
+          # different instrument per point in one column, so it travels with the number.
+          cav = f"distance from {b.regimes[regime].get('cot_distance_reference', 'unknown')}"
         rows.append({"policy": p, "stage": "hardware", "value": round(float(v), 6),
                      "source": f"{b.dir.name} {regime}.json" if key != "jacc_legs"
                                else f"{b.dir.name} flight recorder (meas_q, control rate)",
-                     "run": b.tag,
-                     "caveat": "encoder-differentiated" if key == "jacc_legs" else ""})
+                     "run": b.tag, "caveat": cav})
       if hv:
         xs.append(2); ys.append(float(np.mean(hv)))
+        # The LINE's hardware point is this mean, not any one Run, so it has to be archived
+        # too: without it the series a reader's eye follows across the three stages is the
+        # one number the panel CSV does not contain. Caught by --verify-csv.
+        rows.append({"policy": p, "stage": "hardware (mean)", "value": round(float(np.mean(hv)), 6),
+                     "source": f"mean of {len(hv)} {regime} Run(s), the plotted line point",
+                     "run": "", "caveat": "n=1, no spread" if len(hv) == 1 else
+                                          f"n={len(hv)}, spread {min(hv):.4g}-{max(hv):.4g}"})
       if xs:
         ax.plot(xs, ys, color=style["color"], linestyle=style["linestyle"],
                 marker=style["marker"], markersize=3.0, linewidth=0.9, zorder=3)
@@ -1207,6 +1302,9 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
     # The omitted KEYS are metric names, so they carry underscores: the pgf backend does not
     # escape those and the whole figure then fails to compile (it did).
     + "; ".join(f"{tex(k)} ({tex(v)})" for k, v in list(CHAIN_OMITTED.items())[:3]) + ".",
+    "cot's hardware denominator is motion-capture distance on the three captured Runs and "
+    "the onboard estimate on the rest (it under-reads $\\approx$3\\% where both exist); the "
+    "per-point instrument is in the panel CSV's caveat column.",
     "A missing point is absent, never zero: the flat A0\\_DR baseline trains under rsl\\_rl's "
     "own runner, which logs no Loss/metrics/* -- so it has no training point for cot, "
     "act\\_legs\\_rad or jacc\\_legs. mech\\_power\\_w is logged at no training stage at all.",
@@ -1280,6 +1378,8 @@ def main() -> int:
                   help="disable the min/max-envelope decimation on the time-series figures")
   ap.add_argument("--check-latex", action="store_true",
                   help="compile every written .pgf standalone with pdflatex")
+  ap.add_argument("--verify-csv", action="store_true",
+                  help="assert every value drawn in each figure appears in its panel CSVs")
   args = ap.parse_args()
 
   root = Path(args.root)
@@ -1323,6 +1423,11 @@ def main() -> int:
       written.append(fig_chain(bundles, out_dir, regime=args.chain_regime, root=root))
 
   print(f"[PLOT] {len(written)} figure(s) in {out_dir}")
+  if args.verify_csv:
+    bad = check_panel_csv(out_dir, names)
+    if bad:
+      print(f"[CSV] {bad} figure(s) have drawn values missing from their panel CSVs")
+      return 1
   if args.check_latex:
     bad = check_latex(written)
     if bad:
