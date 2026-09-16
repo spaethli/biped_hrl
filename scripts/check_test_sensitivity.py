@@ -659,6 +659,21 @@ MUTATIONS = [
    "  model.body_mass[env_ids, bid] = mass_new",
    "  model.body_mass[env_ids, bid] = mass",
    "test_env_latent_e_reports_realized_totals_after_the_coupled_event"),
+
+  # --- LL reward-term registry migration (2026-09-16) ---------------------------------
+  # The old hand-rolled loop applied no dt scaling to any ll_* term; A0's own manager
+  # defaults to scale_by_dt=True, so getting this flag wrong silently divides every
+  # migrated term by ~step_dt (~50x) without erroring. Substring picked to hit the
+  # actual constructor call, not the surrounding comments that also say "scale_by_dt=False".
+  ("ll_reward_manager_scale_by_dt_flip", HR,
+   "cfg=self._ll_reward_terms, env=env.unwrapped, scale_by_dt=False,",
+   "cfg=self._ll_reward_terms, env=env.unwrapped, scale_by_dt=True,",
+   "test_ll_reward_manager_constructed_with_scale_by_dt_false"),
+
+  ("ll_reward_registry_drops_cadence_term", HR,
+   'terms["cadence"] = RewardTermCfg(',
+   'terms["cadence_DISABLED"] = RewardTermCfg(',
+   "test_ll_reward_registry_contains_all_terms_when_hl_cadence_true"),
 ]
 
 
