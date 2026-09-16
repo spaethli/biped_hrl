@@ -380,39 +380,54 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     Pure: only reads attributes already resolved on ``self`` (asset cfgs, gait-param
     dicts, coefficients) -- no env calls or I/O -- so it can be exercised against a
     ``SimpleNamespace`` stub in tests, exactly like ``_load_frozen_ll``.
+
+    Sign note: the 9 non-cadence-family terms below (stand_still .. body_ang_vel) wrap
+    functions that return a non-negative COST (e.g. ``stand_still`` = squared joint
+    deviation) -- the hand-rolled loop this replaces always SUBTRACTED
+    ``coef * raw_value`` from ``r_lo``, matching how A0's own RewardManager registers
+    the identical functions (``velocity_env_cfg.py``: ``stand_still`` weight -1.0,
+    ``joint_pos_limits`` -10.0, ``foot_slip`` -0.25, etc. -- all negative). ``learn()``
+    ADDS ``compute()``'s output to ``r_lo`` unconditionally, so the weight here must be
+    ``-self.ll_X_coef`` to reproduce that subtraction; a positive weight would silently
+    flip these 9 terms into rewards. Verified empirically (2026-09-16 GPU smoke, fixed
+    seed, iteration 0 pre-divergence): un-negated weights reproduced every OTHER term's
+    magnitude bit-for-bit but flipped stand_still/footslip from -0.0043/-0.1602 to
+    +0.0043/+0.1602. The 4 cadence-family terms below (feet_gait, ankle_pushoff_*,
+    heel_toe_rollover_contact) are genuine rewards -- the old loop ADDED them -- so
+    their weight stays the unnegated coefficient.
     """
     terms: dict[str, RewardTermCfg] = {
       "stand_still": RewardTermCfg(
-        func=mdp_rewards.stand_still, weight=self.ll_stand_still_coef,
+        func=mdp_rewards.stand_still, weight=-self.ll_stand_still_coef,
         params={"command_name": "twist", "command_threshold": 0.1},
       ),
       "angmom": RewardTermCfg(
-        func=mdp_rewards.angular_momentum_penalty, weight=self.ll_angmom_coef,
+        func=mdp_rewards.angular_momentum_penalty, weight=-self.ll_angmom_coef,
         params={"sensor_name": "robot/root_angmom"},
       ),
       "footslip": RewardTermCfg(
-        func=mdp_rewards.feet_slip, weight=self.ll_footslip_coef,
+        func=mdp_rewards.feet_slip, weight=-self.ll_footslip_coef,
         params={"sensor_name": "feet_ground_contact", "command_name": "twist",
                 "command_threshold": 0.1, "asset_cfg": self._foot_asset_cfg},
       ),
       "footclear": RewardTermCfg(
-        func=mdp_rewards.feet_clearance, weight=self.ll_footclear_coef,
+        func=mdp_rewards.feet_clearance, weight=-self.ll_footclear_coef,
         params={"target_height": 0.10, "command_name": "twist",
                 "command_threshold": 0.1, "asset_cfg": self._foot_asset_cfg},
       ),
       "energy": RewardTermCfg(
-        func=mdp_rewards.cost_of_transport_penalty, weight=self.ll_energy_coef,
+        func=mdp_rewards.cost_of_transport_penalty, weight=-self.ll_energy_coef,
         params={"command_name": "twist", "command_threshold": 0.1},
       ),
-      "joint_acc": RewardTermCfg(func=joint_acc_l2, weight=self.ll_joint_acc_coef, params={}),
-      "joint_limits": RewardTermCfg(func=joint_pos_limits, weight=self.ll_joint_limits_coef, params={}),
+      "joint_acc": RewardTermCfg(func=joint_acc_l2, weight=-self.ll_joint_acc_coef, params={}),
+      "joint_limits": RewardTermCfg(func=joint_pos_limits, weight=-self.ll_joint_limits_coef, params={}),
       "soft_landing": RewardTermCfg(
-        func=mdp_rewards.soft_landing, weight=self.ll_soft_landing_coef,
+        func=mdp_rewards.soft_landing, weight=-self.ll_soft_landing_coef,
         params={"sensor_name": "feet_ground_contact", "command_name": "twist",
                 "command_threshold": 0.1},
       ),
       "body_ang_vel": RewardTermCfg(
-        func=mdp_rewards.body_angular_velocity_penalty, weight=self.ll_body_ang_vel_coef,
+        func=mdp_rewards.body_angular_velocity_penalty, weight=-self.ll_body_ang_vel_coef,
         params={"asset_cfg": self._torso_asset_cfg},
       ),
     }
@@ -801,11 +816,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     for it in range(start_it, total_it):
       start = time.time()
       intrinsic_sum = 0.0
-      goal_sum = posture_sum = action_rate_sum = cadence_sum = cot_pen_sum = 0.0
-      stand_still_sum = angmom_sum = footslip_sum = footclear_sum = energy_sum = 0.0
-      joint_acc_sum = 0.0
-      joint_limits_sum = soft_landing_sum = body_ang_vel_sum = 0.0
-      pitchref_sum = pushoff_sum = rollover_sum = 0.0
+      goal_sum = posture_sum = action_rate_sum = cot_pen_sum = 0.0
+      # Per-term LL registry sums (RewardManager-driven, see the `.compute()` call below) --
+      # keyed by active_terms, so the 4 hl_cadence-gated names are simply absent when off.
+      ll_term_sums: dict[str, float] = dict.fromkeys(self._ll_reward_manager.active_terms, 0.0)
       cot_energy = cot_dist = 0.0  # cost-of-transport metric accumulators (see loss_dict)
       # Deploy diagnostics (2026-08-07): coef-independent, logged unconditionally every
       # step -> `metrics/act_rate*`/`metrics/jacc*` below (see the per-step block).
@@ -916,45 +930,16 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
             ar_pen = self.ll_action_rate_coef * ar
             r_lo = r_lo - ar_pen
             action_rate_sum += -ar_pen.mean().item()  # signed reward contribution (<= 0)
-          # WL-D arm 3 (2026-07-17): stand-still gating - mirrors A0's stand_still term
-          # (joint deviation from default, gated |cmd| < threshold) into the LL intrinsic.
-          if self.ll_stand_still_coef != 0.0:
-            ss_pen = self.ll_stand_still_coef * mdp_rewards.stand_still(
-              uenv, command_name="twist", command_threshold=0.1)
-            r_lo = r_lo - ss_pen
-            stand_still_sum += -ss_pen.mean().item()
-          # WL-D arm 4a: mirror A0's angular_momentum_penalty (natural arm counter-swing).
-          if self.ll_angmom_coef != 0.0:
-            am_pen = self.ll_angmom_coef * mdp_rewards.angular_momentum_penalty(
-              uenv, sensor_name="robot/root_angmom")
-            r_lo = r_lo - am_pen
-            angmom_sum += -am_pen.mean().item()
-          # WL-D arm 4b: mirror A0's feet_slip (contact-time foot xy velocity penalty).
-          if self.ll_footslip_coef != 0.0:
-            fs_pen = self.ll_footslip_coef * mdp_rewards.feet_slip(
-              uenv, sensor_name="feet_ground_contact", command_name="twist",
-              command_threshold=0.1, asset_cfg=self._foot_asset_cfg)
-            r_lo = r_lo - fs_pen
-            footslip_sum += -fs_pen.mean().item()
-          # WL-D arm 4c: mirror A0's feet_clearance (0.10m swing-height target).
-          if self.ll_footclear_coef != 0.0:
-            fc_pen = self.ll_footclear_coef * mdp_rewards.feet_clearance(
-              uenv, target_height=0.10, command_name="twist",
-              command_threshold=0.1, asset_cfg=self._foot_asset_cfg)
-            r_lo = r_lo - fc_pen
-            footclear_sum += -fc_pen.mean().item()
-          # WL-D arm 4d: mirror the new cost_of_transport_penalty (the direct CoT mirror).
-          if self.ll_energy_coef != 0.0:
-            en_pen = self.ll_energy_coef * mdp_rewards.cost_of_transport_penalty(
-              uenv, command_name="twist", command_threshold=0.1)
-            r_lo = r_lo - en_pen
-            energy_sum += -en_pen.mean().item()
-          # WL-D (2026-07-24): mirror A0's joint_acc_l2 (whole-body joint-accel L2) - the
-          # missing half of A0's smoothness stack (action_rate + joint_acc).
-          if self.ll_joint_acc_coef != 0.0:
-            ja_pen = self.ll_joint_acc_coef * joint_acc_l2(uenv)
-            r_lo = r_lo - ja_pen
-            joint_acc_sum += -ja_pen.mean().item()
+          # LL intrinsic-reward registry (mjlab's real RewardManager, driven manually --
+          # see _build_ll_reward_terms): stand_still, angmom, footslip, footclear, energy,
+          # joint_acc, joint_limits, soft_landing, body_ang_vel always active; cadence,
+          # pitchref, pushoff, rollover gated on hl_cadence at dict-construction time.
+          # scale_by_dt=False, so compute()'s dt argument is inert -- passed for signature
+          # consistency with the rest of the loop.
+          ll_rewards = self._ll_reward_manager.compute(dt=uenv.step_dt)
+          r_lo = r_lo + ll_rewards
+          for idx, name in enumerate(self._ll_reward_manager.active_terms):
+            ll_term_sums[name] += self._ll_reward_manager._step_reward[:, idx].mean().item()
           # Deploy diagnostics (2026-08-07): coef-independent leg-restricted smoothness +
           # joint-accel metrics, unlike action_rate_pen/joint_acc_pen above (coef*value,
           # silently 0 when their coef is 0 -- useless for cross-run W&B comparison).
@@ -973,63 +958,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           else:
             diag_act_rate_legs_sum += float("nan")
             diag_jacc_legs_sum += float("nan")
-          # WL-D: mirror A0's joint_pos_limits (soft-limit crossing penalty) - the
-          # largest measured A1-vs-A0 episode-reward gap (~515x, WL-D reward-gap audit).
-          if self.ll_joint_limits_coef != 0.0:
-            jl_pen = self.ll_joint_limits_coef * joint_pos_limits(uenv)
-            r_lo = r_lo - jl_pen
-            joint_limits_sum += -jl_pen.mean().item()
-          # WL-D: mirror A0's soft_landing (first-contact impact-force penalty).
-          if self.ll_soft_landing_coef != 0.0:
-            sl_pen = self.ll_soft_landing_coef * mdp_rewards.soft_landing(
-              uenv, sensor_name="feet_ground_contact", command_name="twist",
-              command_threshold=0.1)
-            r_lo = r_lo - sl_pen
-            soft_landing_sum += -sl_pen.mean().item()
-          # WL-D: mirror A0's body_angular_velocity_penalty (torso xy angular velocity).
-          if self.ll_body_ang_vel_coef != 0.0:
-            bav_pen = self.ll_body_ang_vel_coef * mdp_rewards.body_angular_velocity_penalty(
-              uenv, asset_cfg=self._torso_asset_cfg)
-            r_lo = r_lo - bav_pen
-            body_ang_vel_sum += -bav_pen.mean().item()
-          # A1a cadence entrainment (ADR-0004): reward the LL for matching the contact
-          # schedule of the HL-commanded stride period. Positive feet_gait term.
-          if self.hl_cadence and self.ll_cadence_coef != 0.0:
-            cad = mdp_rewards.feet_gait(uenv, use_commanded_phase=True, **self._gait_params)
-            r_lo = r_lo + self.ll_cadence_coef * cad
-            cadence_sum += (self.ll_cadence_coef * cad).mean().item()
-          # WL-D arm 6 formulation A (2026-07-17): heel-to-toe ankle roll-over phase-lock
-          # to the probe-measured heel-strike/toe-off reference, gated command + SCHEDULED
-          # stance only (gate pin ii: phi is only well-defined on the schedule).
-          if self.hl_cadence and self.ll_pitchref_coef != 0.0:
-            pr = mdp_rewards.ankle_pushoff_pitchref(
-              uenv, asset_cfg=self._ankle_asset_cfg,
-              theta_hs=self.ll_pitchref_theta_hs, theta_to=self.ll_pitchref_theta_to,
-              k=self.ll_pitchref_k, sigma=self.ll_pitchref_sigma,
-              use_commanded_phase=True, **self._pitchref_gait_params)
-            r_lo = r_lo + self.ll_pitchref_coef * pr
-            pitchref_sum += (self.ll_pitchref_coef * pr).mean().item()
-          # WL-D arm 6 formulation B (2026-07-17): ankle push-off power burst, gated
-          # command + SCHEDULE AND ACTUAL CONTACT (stricter than A). Implemented but left
-          # untrained (coef 0) until formulation A's read (A1a_plan.md Arm 6 decision).
-          if self.hl_cadence and self.ll_pushoff_coef != 0.0:
-            po = mdp_rewards.ankle_pushoff_power(
-              uenv, asset_cfg=self._ankle_asset_cfg,
-              w=self.ll_pushoff_w, p_scale=self.ll_pushoff_p_scale,
-              use_commanded_phase=True, **self._gait_params)
-            r_lo = r_lo + self.ll_pushoff_coef * po
-            pushoff_sum += (self.ll_pushoff_coef * po).mean().item()
-          # WL-D arm 6 formulation C (2026-07-24, position-based redesign 2026-07-29):
-          # contact-sequence heel-to-toe roll-over, gated command + SCHEDULED stance
-          # only (gate pin ii: phi is only well-defined on the schedule).
-          if self.hl_cadence and self.ll_rollover_coef != 0.0:
-            ro = mdp_rewards.heel_toe_rollover_contact(
-              uenv, sensor_name="foot_subgeom_contact", asset_cfg=SceneEntityCfg("robot"),
-              geom_ids=self._rollover_geom_ids, body_ids=self._rollover_body_ids,
-              heel_x_max=self.ll_rollover_heel_x_max, toe_x_min=self.ll_rollover_toe_x_min,
-              w=self.ll_rollover_w, use_commanded_phase=True, **self._pitchref_gait_params)
-            r_lo = r_lo + self.ll_rollover_coef * ro
-            rollover_sum += (self.ll_rollover_coef * ro).mean().item()
           # A1a: cost-of-transport training metric (dimensionless; gated to commanded motion).
           # Power sub-formula deduped onto the shared helper (2026-07-17, WL-D) - the
           # window/floor/signed-distance logic below stays a deliberately separate
@@ -1135,19 +1063,15 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         "ll/goal_reward": goal_sum / n_steps,
         "ll/posture_pen": posture_sum / n_steps,
         "ll/action_rate_pen": action_rate_sum / n_steps,
-        "ll/cadence_rew": cadence_sum / n_steps,
-        "ll/stand_still_pen": stand_still_sum / n_steps,
-        "ll/angmom_pen": angmom_sum / n_steps,
-        "ll/footslip_pen": footslip_sum / n_steps,
-        "ll/footclear_pen": footclear_sum / n_steps,
-        "ll/energy_pen": energy_sum / n_steps,
-        "ll/joint_acc_pen": joint_acc_sum / n_steps,
-        "ll/joint_limits_pen": joint_limits_sum / n_steps,
-        "ll/soft_landing_pen": soft_landing_sum / n_steps,
-        "ll/body_ang_vel_pen": body_ang_vel_sum / n_steps,
-        "ll/pitchref_rew": pitchref_sum / n_steps,
-        "ll/pushoff_rew": pushoff_sum / n_steps,
-        "ll/rollover_rew": rollover_sum / n_steps,
+        "ll/stand_still_pen": ll_term_sums["stand_still"] / n_steps,
+        "ll/angmom_pen": ll_term_sums["angmom"] / n_steps,
+        "ll/footslip_pen": ll_term_sums["footslip"] / n_steps,
+        "ll/footclear_pen": ll_term_sums["footclear"] / n_steps,
+        "ll/energy_pen": ll_term_sums["energy"] / n_steps,
+        "ll/joint_acc_pen": ll_term_sums["joint_acc"] / n_steps,
+        "ll/joint_limits_pen": ll_term_sums["joint_limits"] / n_steps,
+        "ll/soft_landing_pen": ll_term_sums["soft_landing"] / n_steps,
+        "ll/body_ang_vel_pen": ll_term_sums["body_ang_vel"] / n_steps,
         "metrics/cot": cot_energy / (cot_dist * 75.0 * 9.81 + 1e-6),  # dimensionless E/(m g d)
         # Deploy diagnostics (2026-08-07): coef-independent, so runs are filterable in
         # W&B early regardless of ll_action_rate_coef/ll_joint_acc_coef (see per-step block).
@@ -1162,6 +1086,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         **{f"hl/{k}": v for k, v in hl_losses.items()},
       }
       if self.hl_cadence:
+        loss_dict["ll/cadence_rew"] = ll_term_sums["cadence"] / n_steps
+        loss_dict["ll/pitchref_rew"] = ll_term_sums["pitchref"] / n_steps
+        loss_dict["ll/pushoff_rew"] = ll_term_sums["pushoff"] / n_steps
+        loss_dict["ll/rollover_rew"] = ll_term_sums["rollover"] / n_steps
         loss_dict["hl/period_mean"] = uenv.hrl_period.mean().item()
       learn_time = time.time() - start
       self.current_learning_iteration = it
