@@ -27,6 +27,7 @@ import time
 import torch
 import wandb
 
+from mjlab.managers.reward_manager import RewardManager, RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.rl.exporter_utils import attach_metadata_to_onnx, get_base_metadata
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
@@ -231,6 +232,9 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self._ankle_asset_cfg = SceneEntityCfg(
       "robot", joint_names=("left_ankle_pitch_joint", "right_ankle_pitch_joint"))
     self._ankle_asset_cfg.resolve(env.unwrapped.scene)
+    # heel_toe_rollover_contact only reads asset_cfg.name (geom_ids/body_ids are passed
+    # separately) -- one unresolved instance, built once here instead of fresh every step.
+    self._rollover_asset_cfg = SceneEntityCfg("robot")
     self._ub_joint_ids = torch.as_tensor(ub_ids, device=device)
     # Stage D (2026-07-14): per-joint posture multipliers (pattern -> weight; unmatched
     # joints stay 1.0). NOT renormalized, so all-ones = the uniform penalty and raising
@@ -255,6 +259,15 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.freeze_ll: bool = self.freeze_ll_path is not None
     if self.warm_start_path and self.freeze_ll_path:
       raise ValueError("warm_start_path and freeze_ll_path are mutually exclusive.")
+
+    # Declarative LL intrinsic-reward registry (mjlab's real RewardManager, driven
+    # manually from `learn`'s loop -- not the env's own reward_manager slot).
+    # scale_by_dt=False: the hand-rolled loop this replaces applies no dt scaling to
+    # any ll_* term (contrast A0's own manager, which uses the True default).
+    self._ll_reward_terms = self._build_ll_reward_terms()
+    self._ll_reward_manager = RewardManager(
+      cfg=self._ll_reward_terms, env=env.unwrapped, scale_by_dt=False,
+    )
 
     # Declarative goal space -> goal_dim is derived (nothing hardcodes a dimension).
     self.goal_space = build_goal_space(
@@ -360,6 +373,79 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Freeze-LL mode: load a converged A1 LL in full and freeze it (only the HL learns).
     if self.freeze_ll_path:
       self._load_frozen_ll(self.freeze_ll_path)
+
+  def _build_ll_reward_terms(self) -> dict[str, RewardTermCfg]:
+    """The LL intrinsic-reward registry driving ``self._ll_reward_manager``.
+
+    Pure: only reads attributes already resolved on ``self`` (asset cfgs, gait-param
+    dicts, coefficients) -- no env calls or I/O -- so it can be exercised against a
+    ``SimpleNamespace`` stub in tests, exactly like ``_load_frozen_ll``.
+    """
+    terms: dict[str, RewardTermCfg] = {
+      "stand_still": RewardTermCfg(
+        func=mdp_rewards.stand_still, weight=self.ll_stand_still_coef,
+        params={"command_name": "twist", "command_threshold": 0.1},
+      ),
+      "angmom": RewardTermCfg(
+        func=mdp_rewards.angular_momentum_penalty, weight=self.ll_angmom_coef,
+        params={"sensor_name": "robot/root_angmom"},
+      ),
+      "footslip": RewardTermCfg(
+        func=mdp_rewards.feet_slip, weight=self.ll_footslip_coef,
+        params={"sensor_name": "feet_ground_contact", "command_name": "twist",
+                "command_threshold": 0.1, "asset_cfg": self._foot_asset_cfg},
+      ),
+      "footclear": RewardTermCfg(
+        func=mdp_rewards.feet_clearance, weight=self.ll_footclear_coef,
+        params={"target_height": 0.10, "command_name": "twist",
+                "command_threshold": 0.1, "asset_cfg": self._foot_asset_cfg},
+      ),
+      "energy": RewardTermCfg(
+        func=mdp_rewards.cost_of_transport_penalty, weight=self.ll_energy_coef,
+        params={"command_name": "twist", "command_threshold": 0.1},
+      ),
+      "joint_acc": RewardTermCfg(func=joint_acc_l2, weight=self.ll_joint_acc_coef, params={}),
+      "joint_limits": RewardTermCfg(func=joint_pos_limits, weight=self.ll_joint_limits_coef, params={}),
+      "soft_landing": RewardTermCfg(
+        func=mdp_rewards.soft_landing, weight=self.ll_soft_landing_coef,
+        params={"sensor_name": "feet_ground_contact", "command_name": "twist",
+                "command_threshold": 0.1},
+      ),
+      "body_ang_vel": RewardTermCfg(
+        func=mdp_rewards.body_angular_velocity_penalty, weight=self.ll_body_ang_vel_coef,
+        params={"asset_cfg": self._torso_asset_cfg},
+      ),
+    }
+
+    if self.hl_cadence:
+      terms["cadence"] = RewardTermCfg(
+        func=mdp_rewards.feet_gait, weight=self.ll_cadence_coef,
+        params={"use_commanded_phase": True, **self._gait_params},
+      )
+      terms["pitchref"] = RewardTermCfg(
+        func=mdp_rewards.ankle_pushoff_pitchref, weight=self.ll_pitchref_coef,
+        params={"asset_cfg": self._ankle_asset_cfg, "command_name": "twist",
+                "command_threshold": 0.1, "theta_hs": self.ll_pitchref_theta_hs,
+                "theta_to": self.ll_pitchref_theta_to, "k": self.ll_pitchref_k,
+                "sigma": self.ll_pitchref_sigma, "use_commanded_phase": True,
+                **self._pitchref_gait_params},
+      )
+      terms["pushoff"] = RewardTermCfg(
+        func=mdp_rewards.ankle_pushoff_power, weight=self.ll_pushoff_coef,
+        params={"asset_cfg": self._ankle_asset_cfg, "sensor_name": "feet_ground_contact",
+                "command_name": "twist", "command_threshold": 0.1,
+                "w": self.ll_pushoff_w, "p_scale": self.ll_pushoff_p_scale,
+                "use_commanded_phase": True, **self._pitchref_gait_params},
+      )
+      terms["rollover"] = RewardTermCfg(
+        func=mdp_rewards.heel_toe_rollover_contact, weight=self.ll_rollover_coef,
+        params={"sensor_name": "foot_subgeom_contact", "asset_cfg": self._rollover_asset_cfg,
+                "geom_ids": self._rollover_geom_ids, "body_ids": self._rollover_body_ids,
+                "heel_x_max": self.ll_rollover_heel_x_max, "toe_x_min": self.ll_rollover_toe_x_min,
+                "w": self.ll_rollover_w, "use_commanded_phase": True,
+                **self._pitchref_gait_params},
+      )
+    return terms
 
   def _warm_start_low_level(self, path: str) -> None:
     """Initialise the LL PPO actor/critic from an A0 checkpoint.
