@@ -523,34 +523,6 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   """Formulation C: a contact counts as "toe" if its local x exceeds this - past the
   midfoot, into the region foot1/foot7 (the two short, toe-only capsules) always occupy
   when in contact. Free knob, not yet probe-measured."""
-  ll_symmetry_coef: float = 0.0
-  """WL-D arm 10, formulation B (2026-07-20, primary training arm): step-time
-  left/right symmetry index penalty, ``r = exp(-SI^2/sigma_si^2)``, ``SI =
-  |t_LR-t_RL|/(t_LR+t_RL)`` from the alternating left/right touchdown intervals.
-  Targets the observed double-tap defect directly - a double-tap drives one interval
-  toward 0, SI -> 1, reward -> 0. Dense (available every step once both intervals
-  are known), contact-based, no history buffer. See ``mdp.foot_step_symmetry`` and
-  ``A1a_plan.md`` "Arm 10". 0 disables (byte-identical)."""
-  ll_symmetry_sigma_si: float = 0.06
-  """SI tolerance - arm-10 probe (2026-07-20): healthy checkpoints (D2/arm4d/old-
-  fix0p8) measure SI 0.010-0.016; the one severely double-tapping checkpoint measured
-  0.235. 0.06 keeps healthy gaits near r~0.9-1.0 while strongly penalizing the
-  observed defect magnitude. Free knob (not itself probe-measured)."""
-  ll_mirror_coef: float = 0.0
-  """WL-D arm 10, formulation A (2026-07-20): half-period phase-shifted joint mirror,
-  ``r = exp(-mean_pairs(q_L(t) - q_R(t-tau))^2/sigma^2)``, ``tau = hrl_period/2``. The
-  CRITICAL adaptation vs. the dead-code reference ``joint_mirror`` (A1a_plan.md "Arm
-  10"): same-instant ``(q_L-q_R)^2`` would force the antiphase legs INTO phase
-  (hopping); this compares to the OTHER leg's state half a stride ago instead.
-  Implemented but left UNTRAINED (stays 0) pending formulation B's read - the arm 6
-  pattern. Requires ``hl_cadence`` (reads ``env.hrl_period``). Sagittal pairs only
-  (hip_pitch, knee, ankle_pitch) - the posture anchor already pins hip_yaw/hip_roll,
-  so lateral pairs would partly duplicate existing machinery. See
-  ``mdp.phaseshift_joint_mirror``."""
-  ll_mirror_sigma: float = 0.15
-  """Exp-kernel tolerance (rad) on the mirror-tracking error. Free knob (not probe-
-  measured); anchored to ``ll_pitchref_sigma``'s own choice (same joint-angle
-  tolerance family, ``env_cfgs.py``'s ``std_walking`` ankle_pitch tolerance)."""
   ll_goal_kernel: Literal["l2", "exp"] = "exp"
   """LL intrinsic reward kernel (``GoalSpace.reward``). ``l2`` = HIRO's negative goal
   distance (all warm-started baselines; requires ``fell_over=time_out``). ``exp`` =
