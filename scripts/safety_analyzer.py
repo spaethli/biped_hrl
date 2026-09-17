@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_flight_recorder import resolve_run_entry  # noqa: E402
+
 
 def _resolve_paths(args):
     if len(args) == 1:
@@ -71,6 +74,8 @@ def _violation_stats(df, prefix, joints, t):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("paths", nargs="+", help="<base>  OR  <csv> <meta.json>")
+    ap.add_argument("--entry", type=int, default=None,
+                    help="select one FSM Run when the file holds several; refused if omitted")
     args = ap.parse_args()
 
     csv_path, meta_path, base = _resolve_paths(args.paths)
@@ -79,6 +84,10 @@ def main():
 
     meta = json.loads(meta_path.read_text())
     df = pd.read_csv(csv_path)
+    if "entry" in df.columns:
+        resolved = resolve_run_entry(df["entry"].to_numpy(), args.entry, csv_path.name,
+                                      default="refuse")
+        df = df[df["entry"] == resolved].reset_index(drop=True)
     joints = meta["joints"]
     t = df["t"].to_numpy()
     control_dt = meta["control_dt"]
@@ -89,7 +98,7 @@ def main():
     # by exactly 1 every control cycle regardless of decimation, so t[-1] = last_tick *
     # control_dt reconstructs the true count exactly (and matches n_rows on older,
     # pre-decimation CSVs where every tick was logged).
-    n_ticks = int(round(float(t[-1]) / control_dt)) + 1 if n_rows else 0
+    n_ticks = int(round(float(t[-1] - t[0]) / control_dt)) + 1 if n_rows else 0
 
     # --- filter engagement ---
     alpha = df["alpha"].to_numpy()
