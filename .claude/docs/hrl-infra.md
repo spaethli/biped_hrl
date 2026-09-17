@@ -271,6 +271,12 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
     CSV; the latter's `w*_deg_s` is in the **world** frame, which no column name says, and its
     `a*_mm_s2` is just d/dt of its velocity. Measured 2026-09-14/16: 25/25 takes align,
     window agreement 0.3-2.4 deg, gravity 0.2-1.8 deg; one flagged (T15, 5.0 / 4.1).
+    Optional **geometric frame** (`--c3d --marker-template`, `--frame geometric`): the torso frame
+    from a tape-measured marker layout, IMU-free, built by `scripts/mocap_marker_template.py`
+    (template + tape file in `doc/hrl/mocap/`, needs `pip install -e '.[mocap]'`). The 2026-09-17
+    tape set is good to ~7 deg, so it is the cross-check, not the default. Method, all formulas and
+    the measurement protocol (incl. the viewer/robot left-right convention):
+    `doc/hrl/mocap_alignment.md`.
   - `scripts/analyze_cadence_settling.py` → commanded cadence by regime (with a PINNED guard)
     and settling time with a **measured** floor and a **swept** threshold.
   - `scripts/bench_flight_recorder.py` **refuses a multi-Run raw log** rather than pooling it

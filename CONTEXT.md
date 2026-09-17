@@ -347,7 +347,9 @@ so it takes the sim key names (`err_vx`, not `err_vx_est`) and the _Fused base v
 becomes the quantity under test, reported separately as `est_rms_v*`. This is the only
 hardware reference that is not a function of the policy's own motion, which is what the `_est`
 suffix exists to warn about. Its quality travels with it in `run.json` (`mocap_align`: window
-agreement, gravity check, `flags`); a flagged Run is written but low quality.
+agreement, gravity check, `flags`); a flagged Run is written but low quality. The torso frame is
+fitted from the gyro by default; a **geometric frame** from the measured marker layout is the
+IMU-free alternative and cross-check. Method and formulas: `doc/hrl/mocap_alignment.md`.
 Available for 4 Runs of 2026-09-14 and all 21 of 2026-09-16; the bench uses it only above 50%
 coverage. A _Run_ without it scores against the estimator and says so in `err_v_reference`, so
 the two are never silently mixed in one column.

@@ -1,0 +1,94 @@
+{
+  "_comment": "Torso-frame marker template (x forward, y left, z up; metres) for mocap_align.py --marker-template. Built by scripts/mocap_marker_template.py.",
+  "measurements": "h1_2_torso_markers_tape.json",
+  "c3d": [
+    "T1.c3d",
+    "T9.c3d",
+    "T20.c3d"
+  ],
+  "convention": "viewer",
+  "markers": {
+    "front_right": [
+      0.09939,
+      0.075,
+      0.415
+    ],
+    "front_left": [
+      0.09939,
+      -0.065,
+      0.285
+    ],
+    "back_upper_left": [
+      -0.13939,
+      0.0485,
+      0.45431
+    ],
+    "back_lower_left": [
+      -0.17939,
+      0.0405,
+      0.28431
+    ],
+    "back_right": [
+      -0.17939,
+      -0.0755,
+      0.26431
+    ]
+  },
+  "fitted": {
+    "depth": 0.1648,
+    "back_dz": 0.0543,
+    "back_dy": -0.015
+  },
+  "distance_rms_mm": 15.4,
+  "fit_rms_mm": 17.1,
+  "mirror_fit_rms_mm": 68.4,
+  "tape_gap_mm": {
+    "front_right": [
+      -3.9,
+      1.8,
+      -4.5
+    ],
+    "front_left": [
+      -0.3,
+      -4.2,
+      5.3
+    ],
+    "back_upper_left": [
+      6.5,
+      12.5,
+      9.9
+    ],
+    "back_lower_left": [
+      -4.0,
+      -2.3,
+      16.3
+    ],
+    "back_right": [
+      1.9,
+      -7.5,
+      -27.1
+    ]
+  },
+  "checks": [
+    {
+      "what": "front markers to the two lower back markers, along x",
+      "a": [
+        "front_right",
+        "front_left"
+      ],
+      "b": [
+        "back_lower_left",
+        "back_right"
+      ],
+      "axis": "x",
+      "value": 0.27,
+      "actual": 0.2777,
+      "template": 0.2788
+    }
+  ],
+  "frame_uncertainty_deg": {
+    "sigma_mm": 9.9,
+    "median": 6.76,
+    "p90": 12.91
+  }
+}

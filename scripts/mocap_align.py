@@ -31,6 +31,11 @@ decoupled here by choosing signals that see only one unknown at a time:
      which the fit never sees, checks R's roll/pitch against gravity on quasi-static rows
      (gravity_tilt); above 3 deg is flagged the same way.
 
+OPTIONAL GEOMETRIC FRAME (step 2b, `--c3d --marker-template`): the torso frame from a measured
+marker layout, per take by Kabsch on the raw C3D markers, reported against the gyro frame and
+usable as the output frame (`--frame geometric`). Formulas and the measurement protocol:
+doc/hrl/mocap_alignment.md.
+
 Measured on 2026-09-14/16 (25 takes, dropouts of up to 28 s where the robot left the volume):
 all 25 align, kept windows agree to <= 8 ms, per-window R to 0.3-2.4 deg and gravity to
 0.2-1.8 deg; one take (2026-09-16 T15) is flagged by both. The previous tick-counter,
@@ -89,9 +94,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -125,6 +132,8 @@ TILT_STILL_GYRO = 0.15  # rad/s; |gyro| below this counts as quasi-static for th
 TILT_STILL_ACC = 0.3    # m/s^2; and | |acc| - g | below this
 TILT_MIN_ROWS = 200     # quasi-static rows needed before the gravity check reports
 TILT_FLAG_DEG = 3.0     # deg; accelerometer-vs-mocap tilt above this is FLAGGED (still written)
+GEOM_FIT_MAX_MM = 30.0  # mm; template-to-marker fit rms above this refuses the geometric frame
+GEOM_POSE_MAX_DEG = 2.0 # deg; per-frame disagreement with the Vicon pose above this refuses it
 
 
 # --------------------------------------------------------------------------- vicon reader
@@ -597,6 +606,97 @@ def procrustes_rotation(a, b):
   return U @ np.diag([1.0, 1.0, d]) @ Vt, S, d
 
 
+def kabsch(A, B):
+  """(R, t) with B ~ R A + t, rows are points; the same Procrustes as the frame fit, on centred points."""
+  ca, cb = A.mean(0), B.mean(0)
+  R = procrustes_rotation(B - cb, A - ca)[0]
+  return R, cb - R @ ca
+
+
+def read_c3d_markers(path):
+  """(xyz [F,M,3] m, visible [F,M], rate, labels) of the LABELLED markers of a C3D file.
+
+  Nexus also writes unlabelled trajectories (`*5`, `*6`, ...); those are dropped. The `c3d`
+  package is an optional dependency, needed only for the geometric frame.
+  """
+  try:
+    import c3d
+  except ImportError:
+    raise SystemExit("--c3d needs the `c3d` package: pip install 'c3d==0.6.0' "
+                     "(or pip install -e '.[mocap]')")
+  with open(path, "rb") as fh, warnings.catch_warnings():
+    warnings.simplefilter("ignore")                 # "no analog data" on every Nexus file
+    r = c3d.Reader(fh)
+    labels = [l.strip() for l in r.point_labels]
+    keep = [i for i, l in enumerate(labels) if l and not l.startswith("*")]
+    units = r.get("POINT:UNITS")
+    scale = 1e-3 if units is None or units.string_value.strip() in ("", "mm") else 1.0
+    P = np.array([pts[keep, :4].copy() for _, pts, _ in r.read_frames()])
+    rate = float(r.point_rate)
+  return P[:, :, :3] * scale, P[:, :, 3] >= 0, rate, [labels[i] for i in keep]
+
+
+def match_markers(xyz, vis, template, n_check=40):
+  """Which C3D trajectory is which template marker: (order, distance_rms_mm, fit_rms_mm).
+
+  Vicon's labels are not stable (2026-09-16: marker4/marker5 swap between takes), so the
+  assignment is recomputed per take from the inter-marker distances, which are labelling-free.
+  Distances cannot tell a layout from its MIRROR image, so the best few distance matches are
+  ranked by the rigid fit instead (2026-09-16: correct convention 17 mm, mirrored 64 mm).
+  """
+  n = len(template)
+  ok = vis.all(1)
+  if ok.sum() < n_check or xyz.shape[1] < n:
+    raise SystemExit(f"GEOMETRIC FRAME REJECTED: only {int(ok.sum())} frames see all "
+                     f"{xyz.shape[1]} labelled markers (template has {n}).")
+  X = xyz[ok]
+  D = np.median(np.linalg.norm(X[:, :, None] - X[:, None, :], axis=-1), 0)
+  Dt = np.linalg.norm(template[:, None] - template[None], axis=-1)
+  iu = np.triu_indices(n, 1)
+  cands = sorted((float(np.sqrt(np.mean((D[np.ix_(o, o)][iu] - Dt[iu]) ** 2))), o)
+                 for o in itertools.permutations(range(xyz.shape[1]), n))[:6]
+  sample = X[np.linspace(0, len(X) - 1, n_check).astype(int)]
+  best = None
+  for d_rms, o in cands:
+    fit = []
+    for x in sample[:, list(o)]:
+      R, t = kabsch(template, x)
+      fit.append(np.sqrt(np.mean(np.sum((template @ R.T + t - x) ** 2, 1))))
+    f = float(np.median(fit)) * 1e3
+    if best is None or f < best[2]:
+      best = (list(o), d_rms * 1e3, f)
+  return best
+
+
+def geometric_frame(xyz, vis, rate, template, t_m, R_wm):
+  """The Vicon rigid body's rotation relative to the TEMPLATE torso frame, from raw markers.
+
+  Per C3D frame, Kabsch(template -> markers) gives R_world<-geom. The export's attitude R_wm
+  is the same rigid cluster, so R_wm^T R_world<-geom is one constant per take; its per-frame
+  scatter is a check that the right take and labelling were used. Frames map to export rows
+  by time (row t = frame / rate, both zeroed on the take's first frame).
+  """
+  order, d_rms, f_rms = match_markers(xyz, vis, template)
+  X, ok = xyz[:, order], vis[:, order].all(1)
+  fi = np.rint(t_m * rate).astype(int)
+  use = (fi >= 0) & (fi < len(X))
+  use[use] = ok[fi[use]]
+  rows = np.flatnonzero(use)
+  if len(rows) < 50:
+    raise SystemExit(f"GEOMETRIC FRAME REJECTED: only {len(rows)} export rows have all "
+                     f"markers in the C3D file; is it the same take?")
+  M = np.zeros((3, 3))
+  Rrel = []
+  for j in rows[:: max(len(rows) // 2000, 1)]:
+    Rg, _ = kabsch(template, X[fi[j]])
+    Rrel.append(R_wm[j].T @ Rg)
+    M += Rrel[-1]
+  R = procrustes_rotation(M.T, np.eye(3))[0]           # the rotation nearest the mean (polar)
+  pose = float(np.median([np.degrees(np.linalg.norm(so3_log(R.T @ x))) for x in Rrel]))
+  return dict(R=R, order=order, dist_rms_mm=d_rms, fit_rms_mm=f_rms, rows=len(rows),
+              pose_spread_deg=pose)
+
+
 def pivot_lever(t, p_w, R_wt, still, win_s=PIVOT_WIN_S, step_s=0.1):
   """Lever arm r fitted from the mocap alone: pivot calibration over zero-command segments.
 
@@ -682,7 +782,7 @@ def gravity_tilt(acc, gyro, up_t, mask):
 def align(bundle, mocap_path, lever, xcorr_floor=PAIR_CORR_FLOOR,
           proc_angle_max=PROC_ANGLE_MAX, min_excitation=MIN_EXCITATION, smooth=0.0,
           write=True, quiet=False, coarse_seed=None, use_wall=True, erode_s=GAP_ERODE_S,
-          **reader_kw):
+          c3d_path=None, template_path=None, frame="gyro", **reader_kw):
   """Full pipeline for one bundle. Returns the result dict; writes the csv and run.json.
 
   `use_wall=False` and `erode_s=0` exist for the self-test, which proves both are needed.
@@ -814,17 +914,54 @@ def align(bundle, mocap_path, lever, xcorr_floor=PAIR_CORR_FLOOR,
     flags.append(f"frame windows disagree by {frame_spread:.1f} deg (median) > "
                  f"{FRAME_SPREAD_MAX:.0f}: treat this ground truth as low quality")
   # Gravity: R_wm^T z is 'up' in the marker frame (third row of R_wm); R^T takes it to torso.
-  tilt, tilt_n = float("nan"), 0
+  # Always a check of the GYRO fit, whichever frame is used for the output.
+  tilt, tilt_n, geo_tilt = float("nan"), 0, float("nan")
+  up_m = np.stack([np.interp(tc, tf_of_m, R_wm[:, 2, i]) for i in range(3)], 1)
   if acc is not None:
-    up_m = np.stack([np.interp(tc, tf_of_m, R_wm[:, 2, i]) for i in range(3)], 1)
     tilt, tilt_n = gravity_tilt(acc[cover], gyro[cover], up_m @ R, np.ones(len(tc), bool))
     if tilt > TILT_FLAG_DEG:
       flags.append(f"accelerometer gravity disagrees with mocap tilt by {tilt:.1f} deg > "
                    f"{TILT_FLAG_DEG:.0f}: roll/pitch of R suspect")
+  R_gyro = R
+
+  # ---- step 2b: the geometric frame (optional): torso frame from the measured marker layout
+  geo = None
+  if c3d_path is not None:
+    tpl = json.loads(Path(template_path).read_text())
+    T_pts = np.array([tpl["markers"][k] for k in tpl["markers"]], float)
+    xyz, vis, c3d_rate, _ = read_c3d_markers(c3d_path)
+    geo = geometric_frame(xyz, vis, c3d_rate, T_pts, t_m, R_wm)
+    R_tg = R_gyro.T @ geo["R"]                         # torso(gyro) <- torso(geometric)
+    geo.update(names=list(tpl["markers"]), rotvec_deg=np.degrees(so3_log(R_tg)),
+               angle_deg=float(np.degrees(np.linalg.norm(so3_log(R_tg)))),
+               template_sigma_deg=tpl.get("frame_uncertainty_deg", {}).get("median"))
+    if acc is not None:
+      geo_tilt = gravity_tilt(acc[cover], gyro[cover], up_m @ geo["R"],
+                              np.ones(len(tc), bool))[0]
+    if not quiet:
+      print(f"  [2b] geom   template {Path(template_path).name}: markers "
+            f"{[geo['names'][i] + '=' + str(k + 1) for i, k in enumerate(geo['order'])]}; "
+            f"distance rms {geo['dist_rms_mm']:.1f} mm, fit rms {geo['fit_rms_mm']:.1f} mm, "
+            f"pose scatter {geo['pose_spread_deg']:.2f} deg over {geo['rows']} rows")
+      unc = geo["template_sigma_deg"]
+      print(f"              geometric -> gyro frame: {geo['angle_deg']:.2f} deg, rotvec "
+            f"{np.array2string(geo['rotvec_deg'], precision=2)}"
+            + (f" (template uncertainty ~{unc:.1f} deg)" if unc is not None else "")
+            + (f";  accelerometer vs geometric up {geo_tilt:.2f} deg" if np.isfinite(geo_tilt) else ""))
+    if geo["fit_rms_mm"] > GEOM_FIT_MAX_MM or geo["pose_spread_deg"] > GEOM_POSE_MAX_DEG:
+      raise SystemExit(
+        f"GEOMETRIC FRAME REJECTED: template fit {geo['fit_rms_mm']:.1f} mm (limit "
+        f"{GEOM_FIT_MAX_MM:.0f}), pose scatter {geo['pose_spread_deg']:.2f} deg (limit "
+        f"{GEOM_POSE_MAX_DEG:.0f}). Wrong take, wrong template, or a left/right convention "
+        f"mirrored in the measurements.\n  Nothing written.")
+    if frame == "geometric":
+      R = geo["R"]
+  elif frame == "geometric":
+    raise SystemExit("--frame geometric needs --c3d and --marker-template")
   rpy = np.degrees(so3_log(R))
   if not quiet:
-    print(f"  [2] frame   R (torso -> mocap body), rotvec {np.array2string(rpy, precision=2)}"
-          f" deg   det {det:+.0f}")
+    print(f"  [2] frame   R (torso -> mocap body) from the {frame} frame, rotvec "
+          f"{np.array2string(rpy, precision=2)} deg   gyro fit det {det:+.0f}")
     print(f"              residual {med_ang:.2f} deg median over {scored} "
           f"({int(fast.sum())} samples), {rel * 100:.2f}% rel;  excitation sv "
           f"{S[0]:.3g}/{S[1]:.3g}/{S[2]:.3g} (ratio {exc:.3f})")
@@ -896,7 +1033,8 @@ def align(bundle, mocap_path, lever, xcorr_floor=PAIR_CORR_FLOOR,
   c, s = np.cos(psi), np.sin(psi)
   v = np.stack([c * v[:, 0] - s * v[:, 1], s * v[:, 0] + c * v[:, 1], v[:, 2]], 1)
   out = dict(t=t_f, v=v, wz=onto_flight(wz), p=onto_flight(p_pelvis), yaw=onto_flight(yaw),
-             cover=cover, align=al, global_lag=gl, map=(b, mrate), R=R, flags=flags,
+             cover=cover, align=al, global_lag=gl, map=(b, mrate), R=R, R_gyro=R_gyro,
+             geo=geo, frame=frame, flags=flags,
              proc=dict(median_angle_deg=med_ang, rel_resid=rel, excitation=exc, det=det,
                        sv=S.tolist(), spread_deg=frame_spread, tilt_deg=tilt,
                        tilt_rows=tilt_n), pivot=piv)
@@ -955,6 +1093,15 @@ def align(bundle, mocap_path, lever, xcorr_floor=PAIR_CORR_FLOOR,
       "frame_spread_deg": None if np.isnan(frame_spread) else round(frame_spread, 2),
       "gravity_tilt_deg": None if np.isnan(tilt) else round(tilt, 2),
       "gravity_rows": tilt_n,
+      "frame": frame,
+      "geom_frame": geo and {
+        "c3d": Path(c3d_path).name, "template": Path(template_path).name,
+        "markers": {geo["names"][i]: f"trajectory {k + 1}" for i, k in enumerate(geo["order"])},
+        "distance_rms_mm": round(geo["dist_rms_mm"], 2), "fit_rms_mm": round(geo["fit_rms_mm"], 2),
+        "pose_spread_deg": round(geo["pose_spread_deg"], 3),
+        "geom_to_gyro_rotvec_deg": [round(float(x), 3) for x in geo["rotvec_deg"]],
+        "geom_to_gyro_deg": round(geo["angle_deg"], 3),
+        "accel_vs_geom_up_deg": None if np.isnan(geo_tilt) else round(float(geo_tilt), 3)},
       "excitation": round(exc, 4),
       "n_samples": n_ok,
       "coarse_seed_s": coarse_seed,
@@ -1086,6 +1233,7 @@ def selftest():
   # of garbage the export's filter smeared in: attitude 25 deg off, position 4 cm off. Only
   # the GAP_ERODE_S margin keeps those rows out.
   gaps = [(25.0, 28.0), (58.0, 59.0)]
+  Rm_true, pm_true = Rm.copy(), pm.copy()               # the raw markers (8) see no smear
   frames = np.arange(1, len(t_mocap) + 1)
   hole = np.zeros(len(t_mocap), bool)
   for g0, g1 in gaps:
@@ -1286,6 +1434,84 @@ def selftest():
         print(f"  {name:22s} {'fires' if hit else 'WRONG MESSAGE'}: {str(e).splitlines()[0]}")
         fails += not hit
 
+    # (8) geometric frame from raw markers: a C3D with the labels shuffled, an unlabelled
+    # ghost trajectory and the export's dropouts. The template must reproduce the planted
+    # frame and find the labelling; a template rotated by 5 deg must read 5 deg; a mirrored one
+    # must be refused (distances alone cannot tell it apart, the rigid fit can).
+    print("\n-- (8) geometric frame from raw markers (C3D + template)")
+    try:
+      import c3d
+    except ImportError:
+      c3d = None
+      print("  SKIPPED: the optional `c3d` package is not installed (pip install 'c3d==0.6.0')")
+    if c3d is not None:
+      tpl = np.array([[0.099, 0.075, 0.415], [0.099, -0.065, 0.285], [-0.139, 0.048, 0.454],
+                      [-0.179, 0.040, 0.284], [-0.179, -0.076, 0.264]])   # 2026-09-17 H1-2 layout
+      R_wt_m = Rm_true @ R_plant
+      mk = pm_true[:, None, :] + np.einsum("nij,kj->nki", R_wt_m, tpl - lever)
+      shuffle = [3, 0, 4, 1, 2]                        # trajectory j carries template marker shuffle[j]
+      w = c3d.Writer(point_rate=rate)
+      frames_c3d = []
+      for k in range(len(mk)):
+        pts = np.zeros((6, 5), np.float32)
+        pts[:5, :3] = mk[k, shuffle] * 1e3
+        pts[:5, 3] = -1.0 if hole[k] else 0.0
+        pts[5, 3] = -1.0                               # the ghost is never valid
+        frames_c3d.append((pts, np.zeros((0, 0), np.float32)))
+      w.add_frames(frames_c3d)
+      w.set_point_labels([f"marker{j + 1}" for j in range(5)] + ["*6"])
+      cfile = td / "take.c3d"
+      with open(cfile, "wb") as fh:
+        w.write(fh)
+
+      def tjson(name, pts):
+        f = td / name
+        f.write_text(json.dumps({"markers": {chr(65 + i): list(map(float, x))
+                                             for i, x in enumerate(pts)}}))
+        return f
+      want = [shuffle.index(i) for i in range(5)]
+      o8 = align(bundle, vfile, lever, quiet=True, write=False, c3d_path=cfile,
+                 template_path=tjson("tpl.json", tpl + 0.5))   # the origin must not matter
+      g8 = o8["geo"]
+      print(f"  labelling {g8['order']} (planted {want}); fit {g8['fit_rms_mm']:.3f} mm; "
+            f"geometric -> gyro {g8['angle_deg']:.4f} deg; pose scatter {g8['pose_spread_deg']:.4f}")
+      fails += g8["order"] != want or g8["angle_deg"] > 0.15 or g8["fit_rms_mm"] > 0.5   # C3D stores float32 mm
+      # a TAPE-measured template is never exact (2026-09-17: 17 mm rms), and the labelling must
+      # survive that: the correct candidate then fits at ~10 mm, not 0, and has to win anyway
+      tape = tpl + np.array([[0.006, -0.004, 0.008], [-0.007, 0.005, -0.003], [0.004, 0.009, -0.006],
+                             [-0.005, -0.006, 0.007], [0.008, 0.003, -0.009]])
+      try:
+        ot = align(bundle, vfile, lever, quiet=True, write=False, c3d_path=cfile,
+                   template_path=tjson("tape.json", tape))
+        print(f"  tape-like template (~12 mm off): labelling {ot['geo']['order']}, fit "
+              f"{ot['geo']['fit_rms_mm']:.1f} mm, frame {ot['geo']['angle_deg']:.2f} deg off")
+        fails += ot["geo"]["order"] != want
+      except SystemExit as e:
+        print(f"  tape-like template REFUSED: {str(e).splitlines()[0]}")
+        fails += 1
+      og = align(bundle, vfile, lever, quiet=True, write=False, c3d_path=cfile,
+                 template_path=tjson("tpl.json", tpl), frame="geometric")
+      kk = np.isfinite(og["v"]).all(1)
+      rg = np.stack([np.interp(t_f[kk], tt, v_true[:, i]) for i in range(3)], 1)
+      e_g = float(np.sqrt(((og["v"][kk] - rg) ** 2).sum(1).mean()))
+      a_g = float(np.degrees(np.linalg.norm(so3_log(og["R"].T @ R_plant))))
+      print(f"  --frame geometric: R to planted {a_g:.4f} deg, velocity rms {e_g * 1e3:.2f} mm/s")
+      fails += a_g > 0.15 or e_g > 0.010
+      Q = so3_exp(np.deg2rad([5.0, 0.0, 0.0]))
+      o5 = align(bundle, vfile, lever, quiet=True, write=False, c3d_path=cfile,
+                 template_path=tjson("tpl5.json", tpl @ Q.T))
+      print(f"  template rotated 5 deg about x -> reads {o5['geo']['angle_deg']:.3f} deg")
+      fails += abs(o5["geo"]["angle_deg"] - 5.0) > 0.1
+      try:
+        align(bundle, vfile, lever, quiet=True, write=False, c3d_path=cfile,
+              template_path=tjson("tplm.json", tpl * [1, -1, 1]))
+        print("  mirrored template NOT refused")
+        fails += 1
+      except SystemExit as e:
+        hit = "GEOMETRIC FRAME REJECTED" in str(e)
+        print(f"  mirrored template {'refused' if hit else 'WRONG MESSAGE'}: {str(e).splitlines()[0]}")
+        fails += not hit
+
   # (7) pivot calibration, on its own trajectory: the pipeline one above never turns while
   # standing, so it has nothing to fit. Turning in place at 0.3 rad/s with roll/pitch sway,
   # while the pelvis creeps 3 cm/s FORWARD in the body frame (a slow circle) and wobbles 5 mm,
@@ -1347,6 +1573,16 @@ def main():
                        "offset (the per-window search then looks +-1 s around it). Rarely "
                        "needed: the masked search found every 2026-09-16 take on its own. "
                        "Every window and frame gate still runs, so a wrong seed is caught.")
+  ap.add_argument("--c3d", type=Path, metavar="FILE",
+                  help="the take's raw C3D file (same take as the export): enables the geometric "
+                       "frame check, step [2b]. Needs --marker-template and the `c3d` package.")
+  ap.add_argument("--marker-template", type=Path, metavar="JSON",
+                  help="torso-frame marker template from scripts/mocap_marker_template.py")
+  ap.add_argument("--frame", choices=("gyro", "geometric"), default="gyro",
+                  help="which frame the output is expressed in: the gyro-fitted IMU frame "
+                       "(default, measured 0.3-2.4 deg consistent) or the template frame "
+                       "(IMU-free, accurate only to the tape measurements, several deg). The "
+                       "other one is always reported as the cross-check.")
   ap.add_argument("--smooth", type=float, default=0.0, metavar="S",
                   help="boxcar (s) on the differentiated mocap velocity; 0 = off")
   ap.add_argument("--rot-cols", help="override: 'RX,RY,RZ' or column indices '2,3,4'")
@@ -1363,10 +1599,13 @@ def main():
   if args.lever is None:
     ap.error("--lever X Y Z is required: the marker cluster is not the pelvis, and an "
              "omega x r term of the same magnitude as the measurement cannot be guessed")
+  if (args.c3d is None) != (args.marker_template is None):
+    ap.error("--c3d and --marker-template go together")
   align(args.bundle, args.mocap, np.asarray(args.lever, float),
         xcorr_floor=args.xcorr_floor, proc_angle_max=args.proc_angle_max,
         min_excitation=args.min_excitation, smooth=args.smooth,
-        coarse_seed=args.coarse_seed,
+        coarse_seed=args.coarse_seed, c3d_path=args.c3d, template_path=args.marker_template,
+        frame=args.frame,
         rot_cols=args.rot_cols, pos_cols=args.pos_cols, rot_format=args.rot_format,
         pos_units=args.pos_units, rate=args.rate)
   return 0

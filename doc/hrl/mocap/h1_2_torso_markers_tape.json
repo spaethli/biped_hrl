@@ -1,0 +1,26 @@
+{
+  "_comment": "H1-2 torso marker cluster, tape-measured by the operator on 2026-09-17 (marker CENTRES, metres). u = horizontal distance from the face's left edge AS SEEN BY A PERSON FACING THAT FACE (convention viewer); v = height above that face's bottom edge; offset = marker centre in front of the face surface. Front marker names are the operator's (viewer's) right/left. Protocol: doc/hrl/mocap_alignment.md.",
+  "robot": "H1-2",
+  "measured": "2026-09-17",
+  "convention": "viewer",
+  "faces": {
+    "front": {"width": 0.21},
+    "back": {"width": 0.205}
+  },
+  "markers": [
+    {"name": "front_right", "face": "front", "u": 0.18, "v": 0.415, "offset": 0.017,
+     "raw": "4.2 cm below the top edge, 3 cm from the right edge, 13 cm above and 14 cm right of front_left"},
+    {"name": "front_left", "face": "front", "u": 0.04, "v": 0.285, "offset": 0.017,
+     "raw": "4 cm from the left edge, 28.5 cm above the bottom edge"},
+    {"name": "back_upper_left", "face": "back", "u": 0.039, "v": 0.40, "offset": 0.057,
+     "raw": "on the top edge, 3.9 cm from the left edge, 17 cm above back_lower_left, 5.7 cm off the torso"},
+    {"name": "back_lower_left", "face": "back", "u": 0.047, "v": 0.23, "offset": 0.097,
+     "raw": "4.7 cm from the left edge, 2 cm above and 11.6 cm left of back_right, 9.7 cm off the torso"},
+    {"name": "back_right", "face": "back", "u": 0.163, "v": 0.21, "offset": 0.097,
+     "raw": "4.2 cm from the right edge, 21 cm above the bottom edge, 9.7 cm off the torso"}
+  ],
+  "check_distances": [
+    {"what": "front markers to the two lower back markers, along x", "a": ["front_right", "front_left"],
+     "b": ["back_lower_left", "back_right"], "axis": "x", "value": 0.27}
+  ]
+}

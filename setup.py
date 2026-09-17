@@ -13,4 +13,6 @@ setup(
     packages=["src"],
     version="0.0.1",
     install_requires=INSTALL_REQUIRES,
+    # scripts/mocap_align.py --c3d and scripts/mocap_marker_template.py read raw Vicon C3D files
+    extras_require={"mocap": ["c3d==0.6.0"]},
 )
