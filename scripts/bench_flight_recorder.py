@@ -306,6 +306,32 @@ def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0, coarse_seed=None):
             "windows_total": int(len(ts))}
 
 
+def resolve_run_entry(entries, requested, source_name, *, default="refuse"):
+    """Which Run (FSM `entry`) to score (ADR-0012). Always returns a definite int;
+    the caller filters its own container (pandas DataFrame vs. raw numpy array +
+    column-index dict differ across the three call sites, so this function never
+    touches the row container itself)."""
+    seen = sorted(int(e) for e in np.unique(np.asarray(entries)))
+    if requested is not None:
+        if requested not in seen:
+            raise SystemExit(f"{source_name}: no entry {requested}; it has {seen}")
+        return requested
+    if len(seen) == 1:
+        return seen[0]
+    if default == "refuse":
+        raise SystemExit(
+            f"{source_name} holds {len(seen)} Runs (entry {seen}) -- scoring them "
+            "together pools distinct Runs and is always wrong (CONTEXT.md, 'Run'). "
+            "Pass --entry N, or bundle the session with scripts/bundle_hardware_run.py")
+    if default == "last":
+        pick = seen[-1]
+        n = int(np.sum(np.asarray(entries).astype(int) == pick))
+        print(f"  [{source_name}] {len(seen)} FSM entries present {seen}; "
+              f"using {pick} ({n} rows). Pass --entry to choose another.")
+        return pick
+    raise ValueError(f"resolve_run_entry: unknown default={default!r}")
+
+
 def projected_gravity_xy(qw, qx, qy, qz):
     """||proj_gravity_b[:2]||, the same quantity play.py reads off `robot.projected_gravity_b`."""
     gx = 2.0 * (qx * qz - qw * qy)
