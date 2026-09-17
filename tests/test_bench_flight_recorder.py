@@ -395,6 +395,40 @@ def test_an_absent_entry_is_refused_not_silently_empty(tmp_path):
         bfr.read_flight(p, assume_hold=[], entry=7)
 
 
+def test_resolve_run_entry_unambiguous_file_needs_no_selector_and_is_silent(capsys):
+    """A single-Run file must not print anything -- that would spam every ordinary call."""
+    entries = np.array([0, 0, 0])
+    assert bfr.resolve_run_entry(entries, None, "f.csv") == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_resolve_run_entry_refuses_ambiguous_by_default():
+    entries = np.array([0, 0, 1, 1, 2])
+    with pytest.raises(SystemExit, match=r"holds 3 Runs.*\[0, 1, 2\]"):
+        bfr.resolve_run_entry(entries, None, "f.csv", default="refuse")
+
+
+def test_resolve_run_entry_ambiguous_last_picks_max_and_prints_notice(capsys):
+    entries = np.array([0, 0, 1, 1, 2])
+    resolved = bfr.resolve_run_entry(entries, None, "f.csv", default="last")
+    assert resolved == 2
+    out = capsys.readouterr().out
+    assert "f.csv" in out and "2" in out and "FSM entries present" in out
+
+
+@pytest.mark.parametrize("default", ["refuse", "last"])
+def test_resolve_run_entry_requested_valid_returns_it_regardless_of_default(default):
+    entries = np.array([0, 0, 1, 1, 2])
+    assert bfr.resolve_run_entry(entries, 1, "f.csv", default=default) == 1
+
+
+@pytest.mark.parametrize("default", ["refuse", "last"])
+def test_resolve_run_entry_requested_invalid_raises_regardless_of_default(default):
+    entries = np.array([0, 0, 1, 1, 2])
+    with pytest.raises(SystemExit, match=r"no entry 7.*\[0, 1, 2\]"):
+        bfr.resolve_run_entry(entries, 7, "f.csv", default=default)
+
+
 def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0, lag_s=0.0):
     """One Run of `run_s` walking at a constant speed, paired with a `telem_s` telemetry log.
 

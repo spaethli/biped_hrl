@@ -38,6 +38,7 @@ BSN = REPO / "scripts/bridge_session.py"
 PPS = REPO / "scripts/period_payload_stats.py"
 PI = REPO / "src/tasks/velocity/mdp/payload_inertia.py"
 BFR = REPO / "scripts/bench_flight_recorder.py"
+SA = REPO / "scripts/safety_analyzer.py"
 SJH = REPO / "scripts/score_joint_hold.py"
 HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
 ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
@@ -512,15 +513,22 @@ MUTATIONS = [
   # log can hold several Runs under different experimental conditions (15-00-37.csv: a broom
   # push and two 7.5 kg payload Runs). Pooling them returns a confident number for no
   # experiment that was run, and nothing in the file name says so.
-  ("a multi-Run flight recorder file is pooled instead of refused", BFR,
-   "        elif len(seen) > 1:",
-   "        elif False:",
+  # Updated 2026-09-17 (ADR-0012 resolve_run_entry extraction): read_flight's own guard is
+  # now a call site, not the inline logic these two used to target -- the site-specific risk
+  # decision #3 warns about is a call passing the wrong `default`, not refuse logic itself
+  # (that's covered separately, on resolve_run_entry directly, below).
+  ("read_flight's call site drifts from default=\"refuse\" to \"last\" (site pools instead "
+   "of refusing, even though resolve_run_entry itself is untouched)", BFR,
+   'resolved = resolve_run_entry(df["entry"].to_numpy(), entry, Path(csv_path).name,\n'
+   '                                      default="refuse")',
+   'resolved = resolve_run_entry(df["entry"].to_numpy(), entry, Path(csv_path).name,\n'
+   '                                      default="last")',
    "test_a_multi_run_file_is_refused_rather_than_pooled"),
 
   ("--entry filters a mask but never slices, so positional indexing stays on the full file",
    BFR,
-   '            df = df[df["entry"] == entry].reset_index(drop=True)',
-   "            pass",
+   '        df = df[df["entry"] == resolved].reset_index(drop=True)',
+   "        pass",
    "test_entry_selects_exactly_that_run"),
 
   # bench_flight_recorder energy gating (2026-09-15): np.interp CLAMPS, so telemetry recorded
@@ -674,6 +682,17 @@ MUTATIONS = [
    'terms["cadence"] = RewardTermCfg(',
    'terms["cadence_DISABLED"] = RewardTermCfg(',
    "test_ll_reward_registry_contains_all_terms_when_hl_cadence_true"),
+
+  # --- resolve_run_entry extraction (ADR-0012, 2026-09-17) ---------------------------
+  ("n_ticks reverts to t[-1]/control_dt, ignoring a non-zero t[0] after --entry filtering",
+   SA,
+   "int(round(float(t[-1] - t[0]) / control_dt)) + 1 if n_rows else 0",
+   "int(round(float(t[-1]) / control_dt)) + 1 if n_rows else 0",
+   "test_entry_filters_and_n_ticks_uses_t0_of_the_filtered_slice"),
+
+  ("resolve_run_entry's refuse policy silently pools instead of raising", BFR,
+   'if default == "refuse":', 'if False:  # default == "refuse"',
+   "test_resolve_run_entry_refuses_ambiguous_by_default"),
 ]
 
 
