@@ -329,21 +329,28 @@ against the *wrong* walking bout.
 Neither filename is a first-sample time: the _Flight recorder_'s is process launch, and
 logging begins whenever the RL state is entered, so the offset between the two logs is
 operator timing (-3.3 s and -10.3 s on two days; -6 s to +113 s across 2026-09-14). The two
-clocks also differ in RATE (measured -2462 to -6613 ppm), so the alignment is affine in time,
+time bases also differ in RATE (measured -2462 to -6613 ppm; mostly the recorder's `t`, a tick
+counter that runs 0.27-1% slow of `t_wall`), so the alignment is affine in time,
 never a constant offset: over a 170 s Run a constant offset drifts by most of a stride
 period, and the pair then fails to correlate at all even when it is the right one.
 _Avoid_: "sync", "the offset" (both imply a single constant, which is the defect); "the
 session start time" (there are two, and neither filename records one).
 
 **Motion-capture ground truth** (`gt_*`):
-The pelvis twist recovered from the marker cluster: time-aligned on `|ω|` (invariant to the
-unknown marker-to-body rotation), frame solved by orthogonal Procrustes, then lever-corrected
-`v_pelvis = v_marker − ω × r`. Written per _Run_ as `mocap_aligned.csv` on the _Flight
-recorder_'s clock. It is **ground truth**, so it takes the sim key names (`err_vx`, not
-`err_vx_est`) and the _Fused base velocity_ becomes the quantity under test, reported
-separately as `est_rms_v*`. This is the only hardware reference that is not a function of the
-policy's own motion, which is what the `_est` suffix exists to warn about.
-Available for 3 Runs of 2026-09-14 only; a _Run_ without it still scores against the estimator
-and says so in `err_v_reference`, so the two are never silently mixed in one column.
+The pelvis twist recovered from the marker cluster: time-aligned on `|ω|` against the
+_Flight recorder_'s `t_wall` (invariant to the unknown marker-to-body rotation), frame solved
+by orthogonal Procrustes, then lever-corrected `v_pelvis = v_marker − ω × r`. Only **clean**
+capture is used: a row seen on fewer than 3 markers, or within 0.2 s of a dropout, is excluded
+from both fits and written as NaN, never interpolated. Written per _Run_ as
+`mocap_aligned.csv`, one row per flight-recorder row, keyed by its `t`. It is **ground truth**,
+so it takes the sim key names (`err_vx`, not `err_vx_est`) and the _Fused base velocity_
+becomes the quantity under test, reported separately as `est_rms_v*`. This is the only
+hardware reference that is not a function of the policy's own motion, which is what the `_est`
+suffix exists to warn about. Its quality travels with it in `run.json` (`mocap_align`: window
+agreement, gravity check, `flags`); a flagged Run is written but low quality.
+Available for 4 Runs of 2026-09-14 and all 21 of 2026-09-16; the bench uses it only above 50%
+coverage. A _Run_ without it scores against the estimator and says so in `err_v_reference`, so
+the two are never silently mixed in one column.
 _Avoid_: "the Vicon data" (the raw capture is not this; the alignment and lever correction
-are what make it a pelvis twist); "validated" for a Run that has no capture.
+are what make it a pelvis twist); "validated" for a Run that has no capture; aligning on `t`
+(a tick counter: slow and bent against real time).

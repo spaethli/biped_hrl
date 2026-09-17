@@ -257,12 +257,20 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
     12 Runs, and a *constant* lag misses 9 of 12 because the clocks differ by -3337..-6613 ppm
     (most of a stride period over a 170 s Run). Fail-closed on a >2% fitted rate and on a
     wall-offset outlier; `--accept-outliers` overrides, and each use must be justified in
-    `run.json`.
+    `run.json`. A label's `trajectory` key (telemetry stem) names the partner outright; a
+    re-bundle keeps the Run's mocap record.
   - `scripts/mocap_align.py <bundle> <capture> --lever 0 0 0.32` → `mocap_aligned.csv`
-    (`gt_vx/gt_vy/gt_wz`, pelvis frame, on the flight clock). Clock from `|omega|` (invariant
-    to the frame), frame by Procrustes on `omega`, **never fitted on the linear velocity being
-    scored**. `--selftest` proves it end to end. ⚠ Reads raw Nexus *and* pre-processed flat
-    CSV; the latter's `w*_deg_s` is in the **world** frame, which no column name says.
+    (`gt_vx/gt_vy/gt_wz`, pelvis frame, one row per flight row, NaN where the capture had a
+    dropout). Clock from `|omega|` against **`t_wall`, never `t`** (a tick counter: 0.27-1%
+    slow and bent by up to 1.8 s), by a masked whole-take search then per-20 s-window lags;
+    frame by Procrustes on clean `omega`; **never fitted on the linear velocity being scored**.
+    Quality in `run.json`: per-window R agreement (flag > 4 deg) and an accelerometer gravity
+    check of roll/pitch (flag > 3 deg); a flagged Run is still written. The pivot lever-arm
+    fit is report-only (not precise enough to check anything). `--selftest` proves clock,
+    dropout handling, frame and lever end to end. ⚠ Reads raw Nexus *and* pre-processed flat
+    CSV; the latter's `w*_deg_s` is in the **world** frame, which no column name says, and its
+    `a*_mm_s2` is just d/dt of its velocity. Measured 2026-09-14/16: 25/25 takes align,
+    window agreement 0.3-2.4 deg, gravity 0.2-1.8 deg; one flagged (T15, 5.0 / 4.1).
   - `scripts/analyze_cadence_settling.py` → commanded cadence by regime (with a PINNED guard)
     and settling time with a **measured** floor and a **swept** threshold.
   - `scripts/bench_flight_recorder.py` **refuses a multi-Run raw log** rather than pooling it
@@ -280,7 +288,9 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
     appears in that figure's panel CSV. It is not ceremony: on its first run it caught `f_chain`
     plotting a hardware mean that was in no sidecar, so the CSVs could not re-plot the figure.
   - `scripts/plot_thesis_figures.py --check-latex` → nine LaTeX-ready figures via matplotlib's
-    `pgf` backend, each a `.pgf` plus a decimated per-panel CSV. ⚠ The pgf writer does not
+    `pgf` backend, each a `.pgf` plus a decimated per-panel CSV. `--bundles <glob>...` pools
+    sessions. `f_hier`'s "LL achieved" is whichever arm `hrl.base_estimator` selects (read
+    from `_meta.json`; `lo_vx` is a legacy name), plus the gyro for wz. ⚠ The pgf writer does not
     escape `_`, leaves `\mathdefault` undefined, and renders `|` as an em-dash.
 - **Radar comparison chart** (2026-08-10): `scripts/plot_radar.py <baseline.log> <run2.log>
   ...` (each a `play.py` stdout capture, or bare JSON, with exactly one `[BENCH]` line) →

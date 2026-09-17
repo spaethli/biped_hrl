@@ -157,20 +157,32 @@ def coarse_lag(t_f, knee_f, t_a, knee_a, win_s=20.0, min_corr=0.9):
     a walking head at -119 s (corr 0.52) against a true -10.3 s. The two logs read the SAME
     encoder, so even a quiet standing window carries shared noise and matches at 0.99.
     Returns None when fewer than two windows agree.
+
+    `a` shorter than `win_s` (2026-09-16: a mocap take covering only the last few seconds of
+    a Run, e.g. the robot walking INTO the capture volume) used to return None unconditionally
+    here, which is why the fine search in `fit_alignment` never looked past its own +-maxlag
+    of zero and could not find a real ~50 s lag. The window still slides across the FULL
+    flight series either way (`np.correlate(F, w, "valid")`), so shrinking it to fit `a` finds
+    the same answer -- there is just no second independent window to cross-check it against,
+    so a single high-confidence (>0.9) match is accepted on its own rather than requiring
+    two to agree.
     """
     g = CTRL_DT
     F = np.interp(np.arange(t_f[0], t_f[-1], g), t_f, knee_f)
     ga = np.arange(t_a[0], t_a[-1], g)
     A = np.interp(ga, t_a, knee_a)
     M = int(win_s / g)
-    if len(F) <= M or len(A) < M:
+    single_window = len(A) < M
+    if single_window:
+        M = len(A)
+    if len(F) <= M or M < 1:
         return None
     c1 = np.concatenate(([0.0], np.cumsum(F)))
     c2 = np.concatenate(([0.0], np.cumsum(F * F)))
     mu = (c1[M:] - c1[:-M]) / M
     sd = np.sqrt(np.maximum((c2[M:] - c2[:-M]) / M - mu * mu, 0.0))
     lags = []
-    for i in range(0, len(A) - M + 1, M // 2):
+    for i in range(0, len(A) - M + 1, max(M // 2, 1)):
         w = A[i:i + M]
         if w.std() < 1e-6:
             continue
@@ -180,21 +192,32 @@ def coarse_lag(t_f, knee_f, t_a, knee_a, win_s=20.0, min_corr=0.9):
         j = int(np.argmax(corr))
         if corr[j] > min_corr:
             lags.append((t_f[0] + j * g) - ga[i])
+    if single_window:
+        return lags[0] if lags else None
     return float(np.median(lags)) if len(lags) >= 2 else None
 
 
-def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0):
+def fit_alignment(t_f, knee_f, t_a, knee_a, maxlag=8.0, coarse_seed=None):
     """Affine time map  t_flight = t_aj + (b + m * t_aj), fitted on windowed cross-correlation.
 
     A single constant offset is NOT sufficient: the two loggers' clocks differ in rate by a
     measured -2600 to -3067 ppm, which over a 308 s session is 0.8 s -- 40 policy steps. The
     per-window lags are fitted with one robust pass (drop >0.5 s outliers) because a quiet
     standing stretch has a nearly flat autocorrelation and occasionally peaks at a false lag.
+
+    `coarse_seed`, when given, is used as b0 directly instead of calling `coarse_lag` -- for
+    a capture too short or too occluded to clear `coarse_lag`'s own confidence bar on its own
+    (2026-09-16: a mocap take covering only the last few seconds of a Run, whose best-match
+    correlation against the full flight series was a plausible but sub-floor 0.86) but whose
+    approximate offset is independently known (an operator account of the route). Everything
+    downstream -- the fine per-window fit, the polish step, and every fail-closed gate
+    (xcorr floor, frame residual, excitation) -- still runs unchanged, so a wrong seed is
+    caught there, not trusted here.
     """
     # Coarse first: the fine search below is +-maxlag per window, and the offset between the
     # two loggers' t=0 is operator timing (-3.3..-4.4 s on 2026-08-27, -10.3 s on 2026-09-07,
     # unbounded in principle). Pre-shift by it, fit the residual lag and the rate, compose.
-    b0 = coarse_lag(t_f, knee_f, t_a, knee_a) or 0.0
+    b0 = coarse_seed if coarse_seed is not None else (coarse_lag(t_f, knee_f, t_a, knee_a) or 0.0)
     t_a = t_a + b0
     lo, hi = max(t_f[0], t_a[0]), min(t_f[-1], t_a[-1])
     grid = np.arange(lo, hi, CTRL_DT)
@@ -394,7 +417,8 @@ MOCAP_COVERAGE_FLOOR = 0.50
 def attach_mocap(F, csv_path, mocap_path=None):
     """Resample a bundle's `mocap_aligned.csv` onto the flight grid as `gt_v*` columns.
 
-    `mocap_align.py` writes `t` already on the FLIGHT recorder's clock (affine fit on |w|),
+    `mocap_align.py` writes one row per flight-recorder row, keyed by the recorder's own `t`
+    (it fits against `t_wall` internally, and leaves NaN wherever the mocap had a dropout),
     so this is a resample, never a second alignment -- refitting here would be a second,
     disagreeing estimate of the same offset. It is a resample and not a concat because the
     two grids are not the same and are not even consistent within one session: 14-20-04's

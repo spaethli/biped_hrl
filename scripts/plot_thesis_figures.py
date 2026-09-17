@@ -27,15 +27,21 @@ drawn, as the archival record.
   f_stand    metric F1: world-frame drift during zero-command holds, from ground truth,
              plus the MEASURED residual speed at rest per Run.
   f_hier     the hierarchy's error decomposition: operator command vs the HL's target V*
-             vs the LL's leg-odometry delivery vs ground truth, plus goal saturation.
+             vs the LL's delivered velocity (vx/vy: whichever arm the deploy config's
+             `hrl.base_estimator` feeds to obs["hl_vel"], read per-Run from its meta.json,
+             not assumed; wz: the direct gyro reading, since the estimator bank is vx/vy
+             only) vs ground truth, plus goal saturation.
   f_chain    training -> sim bench -> hardware, per metric, for metrics defined identically
              at all three stages. Carries its caveats on the figure.
 
 Sources (nothing here is recomputed that already exists):
-  logs/robot_logs/2026_09_14-*/    one _Run_ bundle each: sliced flight recorder, optional
+  logs/robot_logs/<glob>/          one _Run_ bundle each: sliced flight recorder, optional
                                    HRL telemetry, optional _Joint telemetry log_, run.json
                                    (the ONLY authority on `policy_tag`), and the
                                    already-scored `*.standing.json` / `*.walking.json`.
+                                   `--bundles` sets the glob(s); default is the
+                                   2026-09-14 session alone, so a later session (e.g. the
+                                   seed-band runs) must be named explicitly or merged in.
   data/2026-09-14-hardware-session/cadence_settling.json
                                    scripts/analyze_cadence_settling.py's output; f_cadence,
                                    f_settle and f_stand's residual speed READ it, they do
@@ -66,6 +72,8 @@ Usage:
   python scripts/plot_thesis_figures.py --figures track --run "run 4"
   python scripts/plot_thesis_figures.py --figures cadence,settle
   python scripts/plot_thesis_figures.py --out figures --check-latex
+  python scripts/plot_thesis_figures.py --bundles "logs/robot_logs/2026_09_14-*/" \\
+      "logs/robot_logs/2026_09_2?-*/"                         # pool multiple sessions
 """
 
 import argparse
@@ -173,6 +181,10 @@ class Bundle:
   joints: Path | None
   mocap: Path | None = None     # mocap_aligned.csv, present on 3 of the 11 Runs
   regimes: dict = field(default_factory=dict)
+  # The arm feeding obs["hl_vel"] (safety_logger.h), i.e. what `lo_vx`/`lo_vy` actually
+  # ARE -- "none" for A0 (no HL, bank runs passively). Read per-Run, never assumed: the
+  # `lo_` column name predates the 7-arm bank and is not evidence of which one is live.
+  base_estimator: str = "none"
 
   @property
   def walk_s(self) -> float:
@@ -218,9 +230,10 @@ def policy_label(run: dict) -> str:
   return run["policy_tag"] + (f" +{kg:g}kg" if kg > 0 else "")
 
 
-def load_bundles(root: Path) -> list[Bundle]:
+def load_bundles(root: Path, globs: list[str] = (BUNDLE_GLOB,)) -> list[Bundle]:
   out = []
-  for d in sorted(root.glob(BUNDLE_GLOB)):
+  dirs = sorted({d for pattern in globs for d in root.glob(pattern)})
+  for d in dirs:
     # A bundle IS a run.json. A sibling directory matching the date glob without one is not a
     # Run (e.g. parked motion capture for an aborted attempt) and is skipped silently.
     if not (d / "run.json").exists():
@@ -232,6 +245,10 @@ def load_bundles(root: Path) -> list[Bundle]:
       continue
     hrl = flight.with_name(flight.stem + "_hrl.csv")
     joints = d / run["all_joints"] if run.get("all_joints") else None
+    meta_path = flight.with_name(flight.stem + "_meta.json")
+    base_estimator = "none"
+    if meta_path.exists():
+      base_estimator = json.loads(meta_path.read_text()).get("base_estimator", "none")
     b = Bundle(dir=d, run=run, policy=policy_label(run),
                # `note` is free text and can run to a paragraph (run 4 carries the
                # label-correction story); the point label is only ever its leading id.
@@ -241,7 +258,8 @@ def load_bundles(root: Path) -> list[Bundle]:
                # The ALIGNED capture is the authority, not run.json's `mocap` field: run 6
                # names a trial whose capture was rejected, so the field is set and the
                # aligned file is absent.
-               mocap=(d / MOCAP_CSV) if (d / MOCAP_CSV).exists() else None)
+               mocap=(d / MOCAP_CSV) if (d / MOCAP_CSV).exists() else None,
+               base_estimator=base_estimator)
     for regime in ("standing", "walking"):
       p = d / f"{flight.stem}.{regime}.json"
       if p.exists():
@@ -1029,26 +1047,44 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
   capture) is what makes the second half of the decomposition answerable. `lo_*` is
   window-latched, so it is sampled on the HL FIRE rows and drawn as the piecewise-constant
   signal it is -- reading it per row would invent intermediate values the LL never saw.
+
+  `lo_vx`/`lo_vy` are NOT necessarily leg odometry: safety_logger.h feeds obs["hl_vel"]
+  from whichever of the seven base-estimator arms the deploy config's `hrl.base_estimator`
+  names (`none` for A0, which runs the bank passively), and only that column name is a
+  holdover from before the bank existed. Every live A1 deploy config ships `ekf_rot`. The
+  label below reads `b.base_estimator` (from the Run's own meta.json) rather than assuming.
   """
   b = pick_mocap_run(bundles, need_hrl=True, run=run)
   hdf = pd.read_csv(b.hrl)
   th = hdf["t"].to_numpy(float)
-  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz"])
+  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz", "est_gyro_z"])
   t = df["t"].to_numpy(float)
   G = read_mocap(b, t)
   fire = _window_starts(hdf)
+  ll_label = f"LL achieved ({b.base_estimator}, window-latched)"
+  gyro_label = "LL achieved (gyro, direct measurement)"
 
   fig, axes = plt.subplots(4, 1, figsize=(FIG_W, 5.0), sharex=True)
   rows = {}
+  # wz has no counterpart in the base-estimator bank (vx/vy only, safety_logger.h) --
+  # est_gyro_z is a direct torso-IMU rate measurement, not a filtered "arm", and is read
+  # straight off `df` at the flight recorder's own rate rather than window-latched off
+  # `hdf`/`fire` like lo_vx/lo_vy: there is no HL window to latch it to.
   panels = [("vx", "cmd_vx", "tgt0", "lo_vx", "gt_vx", "m/s"),
             ("vy", "cmd_vy", "tgt1", "lo_vy", "gt_vy", "m/s"),
-            ("wz", "cmd_wz", "tgt2", None, "gt_wz", "rad/s")]
+            ("wz", "cmd_wz", "tgt2", "est_gyro_z", "gt_wz", "rad/s")]
   for ax, (axis, cmd_c, tgt_c, lo_c, gt_c, unit) in zip(axes, panels):
     rows[axis] = []
     drawn = [("operator command", t - t[0], df[cmd_c].to_numpy(float), "0.25", "--", {}),
              ("HL target V*", th - t[0], hdf[tgt_c].to_numpy(float), "#009E73", "-", {})]
-    if lo_c and lo_c in hdf:
-      drawn.append(("LL achieved (leg odometry, window-latched)", th[fire] - t[0],
+    if axis == "wz":
+      if lo_c in df:
+        drawn.append((gyro_label, t - t[0], df[lo_c].to_numpy(float), "#D55E00", "-", {}))
+      else:
+        ax.text(0.005, 0.03, "no gyro column in this flight recorder (with_estimator off)",
+                transform=ax.transAxes, fontsize=5.6, color="#D55E00", va="bottom")
+    elif lo_c and lo_c in hdf:
+      drawn.append((ll_label, th[fire] - t[0],
                     hdf[lo_c].to_numpy(float)[fire], "#D55E00", "-",
                     dict(drawstyle="steps-post")))
     drawn.append(("motion-capture ground truth", t - t[0], G[gt_c], "#0072B2", "-", {}))
@@ -1063,9 +1099,6 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
                       "series": label, "t_s": round(float(x), 4),
                       "value": round(float(v), 6), "unit": unit}
                      for x, v in zip(tt, yy)]
-    if lo_c is None:
-      ax.text(0.005, 0.03, "no leg-odometry counterpart for yaw rate", transform=ax.transAxes,
-              fontsize=5.6, color="#D55E00", va="bottom")
     ax.set_ylabel(f"{axis} ({unit})")
     ax.margins(y=0.2)
 
@@ -1094,7 +1127,8 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
   bottom_legend(fig, [
     plt.Line2D([], [], color="0.25", linestyle="--", label="operator command"),
     plt.Line2D([], [], color="#009E73", label="HL target V*"),
-    plt.Line2D([], [], color="#D55E00", label="LL achieved (leg odometry)"),
+    plt.Line2D([], [], color="#D55E00",
+               label=f"LL achieved ({b.base_estimator} vx/vy / gyro wz)"),
     plt.Line2D([], [], color="#0072B2", label="motion-capture ground truth")],
     ncol=2, height=0.20)
   fig.text(0.5, 0.185, _mocap_note(bundles), ha="center", va="top", fontsize=5.6,
@@ -1358,6 +1392,11 @@ def main() -> int:
   ap = argparse.ArgumentParser(description=__doc__,
                                formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--root", default=str(REPO), help="repo root holding logs/ and data/")
+  ap.add_argument("--bundles", nargs="+", default=None,
+                  help="one or more globs under --root for Run bundle directories "
+                       f"(default: {BUNDLE_GLOB!r}, the 2026-09-14 session alone); pass "
+                       "several to pool bundles from more than one hardware session, e.g. "
+                       "the B0 seed-band runs")
   ap.add_argument("--out", default=None, help="output directory (default: <root>/figures)")
   ap.add_argument("--figures", default=None,
                   help="comma-separated subset of: " + ",".join(FIGURES))
@@ -1384,9 +1423,10 @@ def main() -> int:
 
   root = Path(args.root)
   out_dir = Path(args.out) if args.out else root / "figures"
-  bundles = load_bundles(root)
+  globs = args.bundles if args.bundles else [BUNDLE_GLOB]
+  bundles = load_bundles(root, globs)
   if not bundles:
-    raise SystemExit(f"no run bundles under {root / BUNDLE_GLOB}")
+    raise SystemExit("no run bundles under " + ", ".join(str(root / g) for g in globs))
   print(f"[PLOT] {len(bundles)} Run bundle(s): " + ", ".join(
     f"{b.tag}={b.policy}" for b in bundles))
 

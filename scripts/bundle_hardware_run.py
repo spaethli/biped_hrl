@@ -32,7 +32,9 @@ labels.json maps "<flight stem>:<entry>" to the run's identity, e.g.
     "2026-09-14_15-00-37:1": {"tag": "A1a", "note": "7.5 kg backpack", "payload_kg": 7.5},
     "2026-09-14_15-16-46:0": {"tag": "A0_DR_s123"}
   }
-Optional per-run keys: note, payload_kg, checkpoint, pin_period, skip (true = not a run).
+Optional per-run keys: note, payload_kg, checkpoint, pin_period, skip (true = not a run),
+trajectory (the joint-telemetry stem, e.g. "2026-09-16_10-08-24": the operator's pairing
+overrides the correlation search; the knee fit still runs, for the pair statistics only).
 """
 
 import argparse
@@ -192,6 +194,26 @@ def hrl_entry_bounds(path, entry):
     return None if lo is None else (lo, hi)
 
 
+def labelled_pair(flight, lo, hi, stem, traj_dir):
+    """(path, align or None) for an operator-named telemetry log.
+
+    The label decides identity, so the pair is kept even when the knee fit cannot score it
+    (a short entry, or a rate outside MAX_SKEW); run.json then carries no pair statistics.
+    """
+    p = Path(traj_dir) / f"all_joints_{stem}.csv"
+    if not p.exists():
+        raise SystemExit(f"labelled trajectory {p} does not exist")
+    d = np.genfromtxt(p, delimiter=",", names=True)
+    t_f, knee_f = entry_knee(flight, lo, hi)
+    try:
+        al = fit_alignment(t_f, knee_f, np.atleast_1d(d["time"]), np.atleast_1d(d[f"q{KNEE_SLOT}"]))
+    except Exception:
+        al = None
+    if al is not None and (not np.isfinite(al.get("xcorr", np.nan)) or abs(al["m"]) > MAX_SKEW):
+        al = None
+    return p, al
+
+
 def bundle(flight, entry, lo, hi, w0, w1, label, pair, multi):
     stem = flight.stem
     tag = label.get("tag", "UNKNOWN")
@@ -228,17 +250,34 @@ def bundle(flight, entry, lo, hi, w0, w1, label, pair, multi):
     }
     if pair:
         p, al = pair
+        for old in out.glob("all_joints_*.csv"):
+            if old.name != p.name:
+                old.unlink()
         shutil.copy2(p, out / p.name)
-        run.update(all_joints=p.name, pair_lag_s=round(al["b"], 3),
-                   pair_skew_ppm=round(al["m"] * 1e6, 1),
-                   pair_xcorr=round(al["xcorr"], 4),
-                   pair_resid_ms=round(al["resid_ms"], 2),
-                   pair_windows=f"{al['windows']}/{al['windows_total']}")
+        run["all_joints"] = p.name
+        if label.get("trajectory"):
+            run["pair_source"] = "label"
+        if al is not None:
+            run.update(pair_lag_s=round(al["b"], 3),
+                       pair_skew_ppm=round(al["m"] * 1e6, 1),
+                       pair_xcorr=round(al["xcorr"], 4),
+                       pair_resid_ms=round(al["resid_ms"], 2),
+                       pair_windows=f"{al['windows']}/{al['windows_total']}")
+        else:
+            run["pair_note"] = "operator-labelled; the knee fit could not score this pair"
     else:
         run["torque_unavailable"] = (
             "no joint-telemetry log passed the knee cross-correlation floor; mech_power_w "
             "and cot cannot be computed for this run")
-    (out / "run.json").write_text(json.dumps(run, indent=2) + "\n")
+    # A re-bundle must not erase mocap_align's record of a slice it did not change: the
+    # aligned csv is a function of (flight slice, mocap take) only.
+    prev_path = out / "run.json"
+    prev = json.loads(prev_path.read_text()) if prev_path.exists() else {}
+    if (prev.get("flight_recorder"), prev.get("entry")) == (flight.name, entry):
+        for k in ("mocap", "mocap_align"):
+            if prev.get(k) is not None:
+                run[k] = prev[k]
+    prev_path.write_text(json.dumps(run, indent=2) + "\n")
     return out, run
 
 
@@ -349,6 +388,15 @@ def main():
         if lab.get("skip"):
             print(f"[skip] {key}: marked skip ({lab.get('note', '')})")
             continue
+        if lab.get("trajectory"):
+            auto = pair[0].name if pair else None
+            pair = labelled_pair(f, lo, hi, lab["trajectory"], args.traj_dir)
+            if auto != pair[0].name:
+                print(f"[label] {key}: trajectory {pair[0].name} from the label "
+                      f"(correlation search picked {auto})")
+            if pair[1] is None:
+                print(f"[label] {key}: ⚠ knee fit could not score {pair[0].name}; "
+                      f"attached on the label alone")
         out, run = bundle(f, entry, lo, hi, w0, w1, lab, pair, per_file[f] > 1)
         print(f"[bundle] {out.name}  ({run['duration_s']}s, "
               f"hrl={'y' if run['has_hrl_telemetry'] else 'n'}, "

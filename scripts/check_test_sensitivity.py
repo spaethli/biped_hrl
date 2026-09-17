@@ -448,8 +448,8 @@ MUTATIONS = [
   # bench_flight_recorder pairing/alignment (2026-09-14): the 2026-09-07 A1a session broke
   # both assumptions the tool had inherited from how the 2026-08-27 runs were operated.
   ("alignment coarse stage removed (a -10.3 s offset is outside the +-8 s fine search)", BFR,
-   "    b0 = coarse_lag(t_f, knee_f, t_a, knee_a) or 0.0",
-   "    b0 = 0.0",
+   "    b0 = coarse_seed if coarse_seed is not None else (coarse_lag(t_f, knee_f, t_a, knee_a) or 0.0)",
+   "    b0 = coarse_seed if coarse_seed is not None else 0.0",
    "test_alignment_on_real_session_pairs"),
 
   ("alignment rejection back to a fixed 0.5 s gate (bends round a transient: -1648 ppm)", BFR,
