@@ -45,6 +45,9 @@ from src.tasks.velocity.rl.hrl.leg_odom import (  # noqa: E402
   leg_fk,
 )
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bench_flight_recorder import resolve_run_entry  # noqa: E402
+
 R_IMU = np.array([-0.04452, -0.01891, 0.27756])  # imu site in the torso frame, h1_2.xml:145
 GRAVITY = np.array([0.0, 0.0, -9.81])            # base_state.h kGravity
 
@@ -246,15 +249,11 @@ def load_session(csv_path: Path, entry: int | None = None) -> Session:
 
   suffix = ""
   if "entry" in idx:
-    entries = np.unique(arr[:, idx["entry"]]).astype(int)
-    if len(entries) > 1:
-      pick = entries[-1] if entry is None else entry
-      if pick not in entries:
-        raise SystemExit(f"entry {pick} not in {csv_path.name}; present: {list(entries)}")
-      arr = arr[arr[:, idx["entry"]] == pick]
-      suffix = f"#entry{pick}"
-      print(f"  [{csv_path.stem}] {len(entries)} FSM entries present {list(entries)}; "
-            f"using {pick} ({len(arr)} rows). Pass --entry to choose another.")
+    raw_entries = arr[:, idx["entry"]]
+    if len(np.unique(raw_entries)) > 1:
+      resolved = resolve_run_entry(raw_entries, entry, csv_path.name, default="last")
+      arr = arr[arr[:, idx["entry"]] == resolved]
+      suffix = f"#entry{resolved}"
 
   meta_path = csv_path.with_name(csv_path.stem + "_meta.json")
   joint_offset = []
