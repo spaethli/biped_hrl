@@ -508,16 +508,9 @@ def read_flight(csv_path, assume_hold, pose_yaml=None, entry=None):
     """
     df, hold, hold_src = load(csv_path, assume_hold)
     if "entry" in df.columns:
-        seen = sorted(int(e) for e in df["entry"].unique())
-        if entry is not None:
-            if entry not in seen:
-                raise SystemExit(f"{Path(csv_path).name}: no entry {entry}; it has {seen}")
-            df = df[df["entry"] == entry].reset_index(drop=True)
-        elif len(seen) > 1:
-            raise SystemExit(
-                f"{Path(csv_path).name} holds {len(seen)} Runs (entry {seen}) -- scoring them "
-                "together pools distinct Runs and is always wrong (CONTEXT.md, 'Run'). Pass "
-                "--entry N, or bundle the session with scripts/bundle_hardware_run.py")
+        resolved = resolve_run_entry(df["entry"].to_numpy(), entry, Path(csv_path).name,
+                                      default="refuse")
+        df = df[df["entry"] == resolved].reset_index(drop=True)
     meta_p = Path(csv_path).with_name(Path(csv_path).stem + "_meta.json")
     if not meta_p.exists():
         sib = sorted(Path(csv_path).parent.glob(f"{Path(csv_path).name[:19]}*meta*.json"))
