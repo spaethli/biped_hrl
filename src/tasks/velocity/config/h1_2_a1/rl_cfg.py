@@ -17,6 +17,7 @@ from mjlab.rl import (
   RslRlPpoAlgorithmCfg,
 )
 
+from src.tasks.velocity.rl.hrl import base_estimators
 from src.tasks.velocity.rl.hrl.goal_space import DEFAULT_GOAL_COMPONENTS
 
 
@@ -197,6 +198,43 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
     if parent_post is not None:
       parent_post()
     self.gamma_hi = 0.99**self.c
+
+    if self.hl_cadence_source == "hl" and not (self.hl_cadence and self.hl_algorithm == "td3"):
+      raise ValueError("hl_cadence_source='hl' requires hl_cadence=True and hl_algorithm='td3'.")
+    if self.hl_velocity_goals_only and self.hl_algorithm == "ppo":
+      raise ValueError("hl_velocity_goals_only is not implemented for hl_algorithm='ppo'.")
+    if self.warm_start_path and self.freeze_ll_path:
+      raise ValueError("warm_start_path and freeze_ll_path are mutually exclusive.")
+    if self.hl_vel_jitter.enable and not self.hl_obs_vel:
+      raise ValueError("hl_vel_jitter requires hl_obs_vel=True (obs['hl_vel'] is never "
+                        "read otherwise, so the jitter would be a silent no-op).")
+    _valid_sources = ("state", "leg_odom") + base_estimators.ARM_NAMES
+    if self.hl_vel_source not in _valid_sources:
+      raise ValueError(f"hl_vel_source must be one of {_valid_sources}, got {self.hl_vel_source!r}")
+    if self.hl_vel_source != "state" and not self.hl_obs_vel:
+      raise ValueError(f"hl_vel_source={self.hl_vel_source!r} requires hl_obs_vel=True "
+                       "(obs['hl_vel'] is never read otherwise, so the estimator would be "
+                       "a silent no-op).")
+    if self.hl_vel_source != "state" and self.hl_vel_jitter.enable:
+      raise ValueError(f"hl_vel_source={self.hl_vel_source!r} and hl_vel_jitter are ARMS "
+                       "of the WL-F comparison, not composable: enabling both stacks "
+                       "exogenous noise on the endogenous estimator and makes neither "
+                       "measurable.")
+    if self.hl_vel_source != "state" and self.hl_vel_residual.enable and not (
+      self.hl_vel_residual.bias_vx or self.hl_vel_residual.bias_vy
+      or self.hl_vel_residual.jitter_std_vx or self.hl_vel_residual.jitter_std_vy
+    ):
+      raise ValueError("hl_vel_residual is enabled but every magnitude is 0 — a silent "
+                       "no-op that would still be recorded in agent.yaml as 'residual on'.")
+    if self.hl_vel_source == "state" and self.hl_vel_residual.enable:
+      raise ValueError("hl_vel_residual only applies on top of the simulated estimator; with "
+                       f"hl_vel_source={self.hl_vel_source!r} it is a silent no-op. Use "
+                       "hl_vel_jitter for the exogenous arm.")
+    if self.num_steps_per_env % self.c != 0:
+      raise ValueError(
+        f"num_steps_per_env ({self.num_steps_per_env}) must be a multiple "
+        f"of c ({self.c}) so rollouts contain whole HL windows."
+      )
 
   # Observation routing: LL actor sees proprio+goal (no command); critic privileged+goal.
   obs_groups: dict[str, tuple[str, ...]] = field(

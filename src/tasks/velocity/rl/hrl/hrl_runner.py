@@ -145,15 +145,11 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # S1c: period source. "random" = per-episode uniform (S2); "hl" = the TD3 HL's
     # +1 action dim (goal_dim+1 nets — old checkpoints stay loadable via the default).
     self.hl_cadence_source: str = train_cfg.get("hl_cadence_source", "random")
-    if self.hl_cadence_source == "hl" and not (self.hl_cadence and self.hl_algorithm == "td3"):
-      raise ValueError("hl_cadence_source='hl' requires hl_cadence=True and hl_algorithm='td3'.")
     # 2026-07-09 posture-sag fix (default True): the HL learns only the velocity goal
     # columns; orientation/height targets are pinned to nominal (the oracle path — see
     # GoalSpace.to_target task_only). Inert for the oracle (it already targets nominal
     # for non-task components); only ppo lacks the machinery.
     self.hl_velocity_goals_only: bool = train_cfg.get("hl_velocity_goals_only", False)
-    if self.hl_velocity_goals_only and self.hl_algorithm == "ppo":
-      raise ValueError("hl_velocity_goals_only is not implemented for hl_algorithm='ppo'.")
     # Eval-only: pin the commanded stride period (for the CoT(period) sweep). None ->
     # mid-range constant (oracle/random-trained LL) or, later, the learned HL's action (S1c).
     self.eval_cadence_period: float | None = None
@@ -257,8 +253,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     self.warm_start_path: str | None = train_cfg.get("warm_start_path")
     self.freeze_ll_path: str | None = train_cfg.get("freeze_ll_path")
     self.freeze_ll: bool = self.freeze_ll_path is not None
-    if self.warm_start_path and self.freeze_ll_path:
-      raise ValueError("warm_start_path and freeze_ll_path are mutually exclusive.")
 
     # Declarative LL intrinsic-reward registry (mjlab's real RewardManager, driven
     # manually from `learn`'s loop -- not the env's own reward_manager slot).
@@ -285,9 +279,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # must never share a code path (a jitter leak into state_n would corrupt the LL's
     # goal delta, the one channel measured accurate on the bridge).
     self.hl_vel_jitter = HlVelJitter(train_cfg.get("hl_vel_jitter"), env.num_envs, device)
-    if self.hl_vel_jitter.enable and not self.hl_obs_vel:
-      raise ValueError("hl_vel_jitter requires hl_obs_vel=True (obs['hl_vel'] is never "
-                        "read otherwise, so the jitter would be a silent no-op).")
     # WL-F (2026-08-09): where obs["hl_vel"] comes from. 'state' (default) keeps the
     # historical path -- ground truth + the optional exogenous HlVelJitter. 'leg_odom'
     # replaces it with the SIMULATED ESTIMATOR (rl/hrl/leg_odom.py, a transcription of the
@@ -301,24 +292,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # which sim reproduces). Ignored unless hl_vel_source='leg_odom'.
     self.hl_vel_residual = HlVelJitter(train_cfg.get("hl_vel_residual"), env.num_envs, device)
     self.hl_vel_source: str = train_cfg.get("hl_vel_source", "state")
-    _valid_sources = ("state", "leg_odom") + base_estimators.ARM_NAMES
-    if self.hl_vel_source not in _valid_sources:
-      raise ValueError(f"hl_vel_source must be one of {_valid_sources}, got {self.hl_vel_source!r}")
     if self.hl_vel_source != "state":
-      if not self.hl_obs_vel:
-        raise ValueError(f"hl_vel_source={self.hl_vel_source!r} requires hl_obs_vel=True "
-                         "(obs['hl_vel'] is never read otherwise, so the estimator would be "
-                         "a silent no-op).")
-      if self.hl_vel_jitter.enable:
-        raise ValueError(f"hl_vel_source={self.hl_vel_source!r} and hl_vel_jitter are ARMS "
-                         "of the WL-F comparison, not composable: enabling both stacks "
-                         "exogenous noise on the endogenous estimator and makes neither "
-                         "measurable.")
-      if self.hl_vel_residual.enable and not any(
-        (self.hl_vel_residual.jitter_std != 0).tolist() + (self.hl_vel_residual.bias != 0).tolist()
-      ):
-        raise ValueError("hl_vel_residual is enabled but every magnitude is 0 — a silent "
-                         "no-op that would still be recorded in agent.yaml as 'residual on'.")
       if self.hl_vel_source == "leg_odom":
         if not hasattr(env.unwrapped, "leg_odom"):
           raise ValueError("hl_vel_source='leg_odom' needs the env's per-substep "
@@ -334,10 +308,10 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
                            "(config/h1_2_a1/env_cfgs.py). Missing here, which means the "
                            "estimator would silently read zeros forever.")
         env.unwrapped.estimator_bank.activate(self.hl_vel_source)
-    elif self.hl_vel_residual.enable:
-      raise ValueError("hl_vel_residual only applies on top of the simulated estimator; with "
-                       f"hl_vel_source={self.hl_vel_source!r} it is a silent no-op. Use "
-                       "hl_vel_jitter for the exogenous arm.")
+    # hl_vel_source validity, hl_obs_vel/jitter/residual-magnitude/non-state legality,
+    # and num_steps_per_env % c are all validated in HrlRunnerCfg.__post_init__ now --
+    # these two checks stay here because they need the constructed env (hasattr on
+    # env.unwrapped), which doesn't exist yet when the cfg is built.
 
     # Initialise the goal buffer BEFORE the base builds models, so the env's `goal`
     # observation group resolves to the right dimension at construction time.
@@ -352,12 +326,6 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # Base builds self.alg = low-level PPO (using top-level actor/critic/algorithm/
     # obs_groups, which describe the LL) plus self.logger.
     super().__init__(env, train_cfg, log_dir, device)
-
-    if self.cfg["num_steps_per_env"] % self.c != 0:
-      raise ValueError(
-        f"num_steps_per_env ({self.cfg['num_steps_per_env']}) must be a multiple "
-        f"of c ({self.c}) so rollouts contain whole HL windows."
-      )
 
     self.hl: HighLevel = self._make_high_level()
     # Per-window absolute target V* in goal space (set when the HL fires).

@@ -39,6 +39,7 @@ PPS = REPO / "scripts/period_payload_stats.py"
 PI = REPO / "src/tasks/velocity/mdp/payload_inertia.py"
 BFR = REPO / "scripts/bench_flight_recorder.py"
 SA = REPO / "scripts/safety_analyzer.py"
+RLC = REPO / "src/tasks/velocity/config/h1_2_a1/rl_cfg.py"
 SJH = REPO / "scripts/score_joint_hold.py"
 HRLH = REPO / "deploy/robots/h1_2/include/FSM/State_RLHRL.h"
 ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
@@ -693,6 +694,59 @@ MUTATIONS = [
   ("resolve_run_entry's refuse policy silently pools instead of raising", BFR,
    'if default == "refuse":', 'if False:  # default == "refuse"',
    "test_resolve_run_entry_refuses_ambiguous_by_default"),
+
+  # --- HrlRunnerCfg.__post_init__ legality checks (candidate E, 2026-09-18) --------------
+  # 10 cross-field checks moved from HierarchicalRunner.__init__ into __post_init__ so they
+  # are reachable from a bare HrlRunnerCfg(**kwargs), no env/GPU (tests/test_hrl_runner_cfg.py).
+  ("hl_cadence_source='hl' pairing check disabled", RLC,
+   'if self.hl_cadence_source == "hl" and not (self.hl_cadence and self.hl_algorithm == "td3"):',
+   'if False and self.hl_cadence_source == "hl" and not (self.hl_cadence and self.hl_algorithm == "td3"):',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_velocity_goals_only/hl_algorithm='ppo' check disabled", RLC,
+   'if self.hl_velocity_goals_only and self.hl_algorithm == "ppo":',
+   'if False and self.hl_velocity_goals_only and self.hl_algorithm == "ppo":',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("warm_start_path/freeze_ll_path mutual-exclusion check disabled", RLC,
+   "if self.warm_start_path and self.freeze_ll_path:",
+   "if False and self.warm_start_path and self.freeze_ll_path:",
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_jitter/hl_obs_vel check disabled", RLC,
+   "if self.hl_vel_jitter.enable and not self.hl_obs_vel:",
+   "if False and self.hl_vel_jitter.enable and not self.hl_obs_vel:",
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_source validity check disabled", RLC,
+   "if self.hl_vel_source not in _valid_sources:",
+   "if False and self.hl_vel_source not in _valid_sources:",
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_source!='state' requires hl_obs_vel check disabled", RLC,
+   'if self.hl_vel_source != "state" and not self.hl_obs_vel:',
+   'if False and self.hl_vel_source != "state" and not self.hl_obs_vel:',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_source!='state'/hl_vel_jitter composability check disabled", RLC,
+   'if self.hl_vel_source != "state" and self.hl_vel_jitter.enable:',
+   'if False and self.hl_vel_source != "state" and self.hl_vel_jitter.enable:',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_residual zero-magnitude-when-active check disabled", RLC,
+   'if self.hl_vel_source != "state" and self.hl_vel_residual.enable and not (',
+   'if False and self.hl_vel_source != "state" and self.hl_vel_residual.enable and not (',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("hl_vel_residual requires-non-state check disabled", RLC,
+   'if self.hl_vel_source == "state" and self.hl_vel_residual.enable:',
+   'if False and self.hl_vel_source == "state" and self.hl_vel_residual.enable:',
+   "test_invalid_combination_raises_at_construction"),
+
+  ("num_steps_per_env % c divisibility check disabled", RLC,
+   "if self.num_steps_per_env % self.c != 0:",
+   "if False and self.num_steps_per_env % self.c != 0:",
+   "test_invalid_combination_raises_at_construction"),
 ]
 
 
