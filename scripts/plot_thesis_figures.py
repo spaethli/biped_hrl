@@ -31,8 +31,17 @@ drawn, as the archival record.
              `hrl.base_estimator` feeds to obs["hl_vel"], read per-Run from its meta.json,
              not assumed; wz: the direct gyro reading, since the estimator bank is vx/vy
              only) vs ground truth, plus goal saturation.
-  f_chain    training -> sim bench -> hardware, per metric, for metrics defined identically
-             at all three stages. Carries its caveats on the figure.
+  f_seedband does payload domain randomisation hurt on the robot? Per unloaded Run, by variant
+             and seed: standing cadence, arm settling, residual speed, arm velocity, walking
+             cot against achieved speed, plus the sim 15 kg standing hold. Built for the
+             two-seed 2026-09-16 session: an effect must beat the seed spread.
+  f_chain    training bench -> bridge sim -> hardware, per metric, for metrics defined
+             identically at all three points: the deterministic benchmark in the training
+             environment, the exported policy in the C++ controller over DDS against the
+             MuJoCo plant, the robot. The steps change the instrument but NOT only that: the
+             command profile differs at each point (random-command bench, one fixed 253 s
+             battery, a joystick session), so a slope is not attributable to the stack alone.
+             Carries its caveats.
 
 Sources (nothing here is recomputed that already exists):
   logs/robot_logs/<glob>/          one _Run_ bundle each: sliced flight recorder, optional
@@ -49,13 +58,14 @@ Sources (nothing here is recomputed that already exists):
   <bundle>/mocap_aligned.csv       mocap_align.py's pelvis ground truth, already on the
                                    flight recorder's `t` grid. Present on 3 of 11 Runs; the
                                    figures that need it SAY which Runs lack it.
-  data/2026-09-09-wp3-baseline-arms/*_bench.json
-                                   the sim point of f_chain. Each arm carries its checkpoint
-                                   path, so the training run is read FROM it -- the chain's
-                                   three points are provably the same policy.
-  logs/rsl_rl/**/events.out.tfevents*
-                                   the training point of f_chain, via tensorboard's
-                                   EventAccumulator (tbparse is not installed).
+  data/2026-09-09-wp3-baseline-arms/*_bench.json, data/2026-09-18-a0-baseline-bench/
+                                   the training-bench point of f_chain (play.py's deterministic
+                                   benchmark, `base_p0`). Each arm carries its checkpoint path,
+                                   so the chain's simulated points are provably one policy.
+  logs/sim_logs/chain/<policy tag>/<ts>.{walking,standing}.json
+                                   the bridge-sim point of f_chain: a deploy_readiness bridge
+                                   capture scored with bench_flight_recorder.py --sim, with the
+                                   joint-telemetry log beside it so cot / mech_power_w exist.
 
 Metric names follow bench_flight_recorder's output schema and CONTEXT.md. Two deliberate
 renames, both following that tool's own `err_vx -> err_vx_est` precedent of renaming when
@@ -68,7 +78,7 @@ No cost of transport is plotted here; when one is added it must say which of CON
 two CoT terms it is (the bundles' `cot` key is the DIAGNOSTIC, undirected distance).
 
 Usage:
-  python scripts/plot_thesis_figures.py                      # all nine into figures/
+  python scripts/plot_thesis_figures.py                      # all ten into figures/
   python scripts/plot_thesis_figures.py --figures track --run "run 4"
   python scripts/plot_thesis_figures.py --figures cadence,settle
   python scripts/plot_thesis_figures.py --out figures --check-latex
@@ -84,6 +94,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -110,7 +121,7 @@ PERIOD_RANGE = (0.35, 1.0)      # analyze_cadence_settling.PERIOD_RANGE (deploy 
 ARM_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)  # rad/s, analyze_cadence_settling.ARM_THRESHOLDS
 FIG_W = 5.9                     # in; ~15 cm thesis column
 FIGURES = ("cadence", "settle", "upper", "smooth", "power",
-           "track", "stand", "hier", "chain")
+           "track", "stand", "hier", "chain", "seedband")
 
 # Okabe-Ito, colour-blind safe. One colour per policy, shared by every figure.
 POLICY_COLOR = {
@@ -1061,7 +1072,7 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
   t = df["t"].to_numpy(float)
   G = read_mocap(b, t)
   fire = _window_starts(hdf)
-  ll_label = f"LL achieved ({b.base_estimator}, window-latched)"
+  ll_label = f"LL achieved ({tex(b.base_estimator)}, window-latched)"
   gyro_label = "LL achieved (gyro, direct measurement)"
 
   fig, axes = plt.subplots(4, 1, figsize=(FIG_W, 5.0), sharex=True)
@@ -1128,7 +1139,7 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
     plt.Line2D([], [], color="0.25", linestyle="--", label="operator command"),
     plt.Line2D([], [], color="#009E73", label="HL target V*"),
     plt.Line2D([], [], color="#D55E00",
-               label=f"LL achieved ({b.base_estimator} vx/vy / gyro wz)"),
+               label=f"LL achieved ({tex(b.base_estimator)} vx/vy / gyro wz)"),
     plt.Line2D([], [], color="#0072B2", label="motion-capture ground truth")],
     ncol=2, height=0.20)
   fig.text(0.5, 0.185, _mocap_note(bundles), ha="center", va="top", fontsize=5.6,
@@ -1145,31 +1156,53 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
 
 # ================================================================= f_chain ====
 
-# Hardware policy -> the sim bench arm that ran the SAME checkpoint. The arm files carry the
-# checkpoint path, so the training run is read from them rather than guessed: the chain's
-# three points are then provably the same policy.
-CHAIN_ARMS = {
-  "A0_DR_s123": ("all_bench.json", "fmem_s123"),
-  "A1a": ("nodr_bench.json", "nodr_s42"),
-  "A1a_DR_s123": ("all_bench.json", "hmem_s123"),
-  "A1a_DR_cotcap_s42": ("cotcap_bench.json", "cotcap_s42"),
+# Three instruments, each a step closer to the robot:
+#   training bench  play.py's deterministic benchmark of the trained checkpoint, in the
+#                   training environment (MuJoCo-Warp, Python inference). The exploration
+#                   noise of the training curves is gone; nothing else has changed.
+#   bridge sim      the exported ONNX in the shipped C++ controller over DDS against the MuJoCo
+#                   plant (bridge_session.py, scored by bench_flight_recorder --sim): the
+#                   deploy stack and a realistic plant, still simulated.
+#   hardware        the robot.
+# The first step adds the deploy pipeline and a realistic plant, the second is the sim-to-real
+# gap. Neither is instrument-only: the bench draws random commands, the bridge runs ONE fixed
+# battery, hardware is a joystick session, so the command profile changes with the instrument
+# (stated on the figure). Matching them would need the bench run on the battery.
+# Both simulated points are keyed to the SAME checkpoint: the arm files carry its path.
+BENCH_DIR = "data/2026-09-09-wp3-baseline-arms"
+A0_BENCH = "data/2026-09-18-a0-baseline-bench/a0_bench.json"
+CHAIN_ARMS = {                # hardware policy tag -> (deterministic bench json, arm key)
+  "A0_s42": (A0_BENCH, "a0_s42"),
+  "A0_s123": (A0_BENCH, "a0_s123"),
+  "A0_DR_s123": (f"{BENCH_DIR}/all_bench.json", "fmem_s123"),
+  "A1a": (f"{BENCH_DIR}/nodr_bench.json", "nodr_s42"),        # the 09-14 tag of A1a_s42
+  "A1a_s42": (f"{BENCH_DIR}/nodr_bench.json", "nodr_s42"),
+  "A1a_s123": (f"{BENCH_DIR}/nodr_bench.json", "nodr_s123"),
+  "A1a_DR_s42": (f"{BENCH_DIR}/all_bench.json", "hmem_s42"),
+  "A1a_DR_s123": (f"{BENCH_DIR}/all_bench.json", "hmem_s123"),
+  "A1a_DR_cotcap_s42": (f"{BENCH_DIR}/cotcap_bench.json", "cotcap_s42"),
+  "A1a_DR_cotcap_s123": (f"{BENCH_DIR}/cotcap_bench.json", "cotcap_s123"),
 }
-SIM_BENCH_DIR = "data/2026-09-09-wp3-baseline-arms"
 SIM_CONDITION = "base_p0"     # the unloaded baseline condition of each arm
-KAPPA_LEG = 0.25              # action scale, leg joints (uniform) -- raw action units -> rad
-TRAIN_TAIL = 500              # iterations averaged at the end of training
+BRIDGE_DIR = "logs/sim_logs/chain"   # <tag>/<ts>.{walking,standing}.json, from --sim scoring
+BRIDGE_TAG = {"A1a": "A1a_s42"}      # the 09-14 tag names the same checkpoint
+CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": POLICY_COLOR["A0_DR_s123"], "A1a": POLICY_COLOR["A1a"],
+               "A1a_DR": POLICY_COLOR["A1a_DR_s123"],
+               "A1a_DR_cotcap": POLICY_COLOR["A1a_DR_cotcap_s42"]}
+STAGES = ["training bench", "bridge sim", "hardware"]
 
-# (key, axis label, training tag, converter, stochastic-at-training?)
+# (key, axis label). Every panel has a training-bench point; cot and mech_power_w need
+# measured torque, which the bridge only has when a joint-telemetry log ran beside it.
 CHAIN_METRICS = [
-  ("cot", "cot (diagnostic)", "Loss/metrics/cot", 1.0, False),
-  ("mech_power_w", "mech\\_power\\_w (W)", None, 1.0, False),
-  ("act_legs_rad", "act\\_legs\\_rad (rad)", "Loss/metrics/act_rate_legs", KAPPA_LEG, True),
-  ("jacc_legs", "jacc\\_legs (rad/s$^2$)", "Loss/metrics/jacc_legs", 1.0, True),
-  ("err_yaw", "err\\_yaw (rad/s)", "Metrics/twist/error_vel_yaw", 1.0, False),
-  ("orient_dev", "orient\\_dev (-)", None, 1.0, False),
-  ("omega_xy", "omega\\_xy (rad/s)", None, 1.0, False),
-  ("ub_pose_dev", "ub\\_pose\\_dev (rad$^2$)", None, 1.0, False),
-  ("ub_arm_vel", "ub\\_arm\\_vel (rad/s)", None, 1.0, False),
+  ("cot", "cot (diagnostic)"),
+  ("mech_power_w", "mech\\_power\\_w (W)"),
+  ("act_legs_rad", "act\\_legs\\_rad (rad)"),
+  ("jacc_legs", "jacc\\_legs (rad/s$^2$)"),
+  ("err_yaw", "err\\_yaw (rad/s)"),
+  ("orient_dev", "orient\\_dev (-)"),
+  ("omega_xy", "omega\\_xy (rad/s)"),
+  ("ub_pose_dev", "ub\\_pose\\_dev (rad$^2$)"),
+  ("ub_arm_vel", "ub\\_arm\\_vel (rad/s)"),
 ]
 # Stated, never substituted (bench_flight_recorder.OMITTED carries the same reasons).
 CHAIN_OMITTED = {
@@ -1182,25 +1215,20 @@ CHAIN_OMITTED = {
 }
 
 
-def _train_scalars(run_dir: Path, tag: str, tail: int = TRAIN_TAIL):
-  """Tail-mean of one tfevents scalar, or None when the tag or the reader is absent."""
-  try:
-    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-  except ImportError:
-    return None
-  files = sorted(run_dir.glob("events.out.tfevents*"))
-  if not files:
-    return None
-  ea = EventAccumulator(str(files[0]), size_guidance={"scalars": 0})
-  ea.Reload()
-  if tag not in ea.Tags()["scalars"]:
-    return None
-  v = np.array([s.value for s in ea.Scalars(tag)], float)
-  return float(np.mean(v[-tail:])) if len(v) else None
+def chain_style(label: str) -> dict:
+  """Colour by variant (A0, A0_DR, A1a, A1a_DR, A1a_DR_cotcap), marker by seed (o = 42,
+  triangle = 123), dashed when the hardware Run was loaded. Ten policies do not fit the
+  four-colour scheme the other figures use, and colour alone cannot carry two seeds."""
+  base = label.split(" +")[0]
+  head, _, seed = base.rpartition("_s")
+  variant, seed = (head, seed) if seed.isdigit() else (base, "42")
+  return {"color": CHAIN_COLOR.get(variant, "0.4"), "linestyle": "--" if " +" in label else "-",
+          "marker": "^" if seed == "123" else "o"}
 
 
 def _hw_jacc_legs(b: Bundle, regime: str) -> float:
-  """Hardware `jacc_legs`: second difference of MEASURED leg q at the control rate.
+  """Leg `jacc_legs` from MEASURED q: second difference at the control rate, on hardware AND
+  on a bridge capture (same flight-recorder file, so `b` only has to carry `.flight`).
 
   bench_flight_recorder OMITS this key deliberately (sim uses analytic MuJoCo `qacc` at the
   physics rate), so the number does not exist in the regime jsons and is computed here --
@@ -1216,65 +1244,122 @@ def _hw_jacc_legs(b: Bundle, regime: str) -> float:
 
 
 def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
-  """training -> sim bench -> hardware, per metric, for metrics defined the same way at all
-  three points. One panel per metric, one line per policy; a stage a metric does not exist
-  at is simply absent.
+  """training bench -> bridge sim -> hardware, per metric, for metrics defined the same way at
+  all three points. One panel per metric, one line per policy; a point a metric does not
+  exist at is simply absent, never zero.
 
-  Read the caveats printed on the figure before reading a slope: the training column is a
-  STOCHASTIC policy, the hardware flat-policy Runs carried a 7.5 kg _Mounted payload_ while
-  the sim column is unloaded, and hardware `jacc_legs` is differentiated encoder velocity
-  against sim's analytic `qacc`.
+  Read the caveats printed on the figure before reading a slope: the hardware flat-policy
+  Runs of 2026-09-14 carried a 7.5 kg _Mounted payload while both simulated columns are
+  unloaded, and jacc_legs is analytic qacc at the training bench but differentiated encoder
+  velocity at the bridge and on the robot.
   """
   policies = sorted({b.policy for b in bundles}, key=policy_sort_key)
-  stages = ["training", "sim bench", "hardware"]
-  sim_cache, train_cache, hw_jacc = {}, {}, {}
+  bench_cache, bench_src, bridge_cache, bridge_jacc = {}, {}, {}, {}
 
   for p in policies:
     base = p.split(" +")[0]
     arm = CHAIN_ARMS.get(base)
-    if not arm:
-      print(f"[PLOT] NOTE: f_chain: {p}: no sim-bench arm mapped -- sim/training absent")
-      continue
-    d = json.loads((root / SIM_BENCH_DIR / arm[0]).read_text())
-    cell = d.get(f"{arm[1]}__{SIM_CONDITION}")
-    if cell is None:
-      print(f"[PLOT] NOTE: f_chain: {p}: {arm[1]}__{SIM_CONDITION} absent from {arm[0]}")
-      continue
-    sim_cache[p] = cell["bench"]
-    ckpt = Path(str(cell["bench"].get("label", "")))
-    train_cache[p] = (root / ckpt.parent) if ckpt.parent.name else None
+    if arm and (root / arm[0]).exists():
+      cell = json.loads((root / arm[0]).read_text()).get(f"{arm[1]}__{SIM_CONDITION}")
+      if cell is not None:
+        bench_cache[p] = cell["bench"]
+        bench_src[p] = f"{Path(arm[0]).name}:{arm[1]}__{SIM_CONDITION}"
+    if p not in bench_cache:
+      print(f"[PLOT] NOTE: f_chain: {p}: no deterministic bench for this policy -- point absent")
+    files = sorted((root / BRIDGE_DIR / BRIDGE_TAG.get(base, base)).glob(f"*.{regime}.json"))
+    if files:
+      js = json.loads(files[-1].read_text())
+      # A capture whose robot fell scores a robot lying down for the rest of the battery
+      # (orient_dev 0.32 against 0.04 for the same policy family). The fall is read from the
+      # controller's own tilt trigger, the evidence deploy_gate_analyzer uses; `trig_fall` is
+      # the accelerometer one and also fires on a stumble that recovers (gt_h stayed >1.1 m).
+      fl = pd.read_csv(root / "logs/deploy_safety" / js["flight_recorder"],
+                       usecols=["t_wall", "trig_tilt"])
+      hit = np.flatnonzero(fl["trig_tilt"].to_numpy() != 0)
+      js["_fell_s"] = float(fl["t_wall"].iloc[hit[0]] - fl["t_wall"].iloc[0]) if len(hit) else None
+      bridge_cache[p] = js
+    else:
+      print(f"[PLOT] NOTE: f_chain: {p}: no scored bridge capture in "
+            f"{BRIDGE_DIR}/{BRIDGE_TAG.get(base, base)} -- point absent")
 
-  fig, axes = plt.subplots(3, 3, figsize=(FIG_W, 5.6))
+  hw_jacc = {}
+  notes = [
+    "training bench: play.py's deterministic benchmark of the trained checkpoint in the "
+    "training environment (0 kg, 64 envs x 2 seeds, 600 steps, no exploration noise). bridge "
+    "sim: the exported ONNX in the shipped C++ controller over DDS against the MuJoCo plant "
+    "(0 kg, the 253 s command battery, deploy\\_est.yaml, i.e. the estimator the robot runs). "
+    "Colour = variant, triangle = seed 123.",
+    "$\\dagger$ jacc\\_legs is analytic qacc at the physics rate at the training bench, but "
+    "encoder velocity differentiated at the control rate at the bridge and on the robot. "
+    "TRENDS compare between the last two points, levels do not.",
+    "Hardware A0\\_DR\\_s123 Runs and the 7.5 kg Runs of A1a carried a mounted payload "
+    "(dashed lines); both simulated columns are the 0 kg condition. That step is loaded vs "
+    "unloaded.",
+    "Hardware column = " + regime + " regime only (regimes are never pooled); points are "
+    "Runs, the line joins their mean. The simulated columns are one random-command bench and "
+    "one command battery, not regime-matched to a joystick session. Omitted: "
+    # The omitted KEYS are metric names, so they carry underscores: the pgf backend does not
+    # escape those and the whole figure then fails to compile (it did).
+    + "; ".join(f"{tex(k)} ({tex(v)})" for k, v in list(CHAIN_OMITTED.items())[:3]) + ".",
+    "cot's hardware denominator is motion-capture distance on the captured Runs and the "
+    "onboard estimate on the rest (it under-reads $\\approx$3\\% where both exist); the "
+    "bridge's is the simulator's true velocity. The per-point instrument is in the panel "
+    "CSV's caveat column.",
+    "A missing point is absent, never zero; the reason is in the panel CSV. cot and "
+    "mech\\_power\\_w at the bridge need a paired joint-telemetry log (tau\\_est). A policy "
+    "whose bridge capture fell (the controller's tilt trigger) has no bridge point at all.",
+  ]
+  # `wrap=True` measures against the FIGURE, not the tight bbox savefig crops to, so long
+  # caveat lines ran off the page. Wrapped explicitly at a width that fits 15 cm at 5 pt.
+  import textwrap
+  lines = [w for n in notes for w in textwrap.wrap(n, 118)]
+  # Heights in inches, so the axes stay the same size however many policies (legend rows) and
+  # note lines there are; they were guessed fractions and the notes ran into the legend.
+  legend_rows = -(-len(policies) // 5)
+  leg_in, note_in, axes_in = 0.2 * legend_rows + 0.1, 0.0975 * len(lines), 3.9
+  fig_h = axes_in + leg_in + note_in + 0.45
+  band = (leg_in + note_in + 0.2) / fig_h
+  fig, axes = plt.subplots(3, 3, figsize=(FIG_W, fig_h))
   axes = list(axes.flat)
-  for ax, (key, ylabel, tag, conv, stoch) in zip(axes, CHAIN_METRICS):
+  for ax, (key, ylabel) in zip(axes, CHAIN_METRICS):
     rows = []
     for p in policies:
-      style = policy_style(p)
+      base = p.split(" +")[0]
+      style = chain_style(p)
       xs, ys = [], []
-      tv = None
-      if tag and train_cache.get(p):
-        tv = _train_scalars(train_cache[p], tag)
-        if tv is not None:
-          tv *= conv
-      if tv is not None:
-        xs.append(0); ys.append(tv)
-        rows.append({"policy": p, "stage": "training", "value": round(tv, 6),
-                     "source": f"{tag} x{conv:g}, mean of last {TRAIN_TAIL} iters",
-                     "run": train_cache[p].name if train_cache[p] else "",
-                     "caveat": "stochastic (sampled) action" if stoch else ""})
-      elif tag and train_cache.get(p):
-        # An absent training point is a fact about the RUNNER, not about the policy: the
-        # flat A0 baseline trains under rsl_rl's own runner, which logs no `Loss/metrics/*`
-        # (those are HierarchicalRunner's). Recorded as absent with the reason, never 0.
-        rows.append({"policy": p, "stage": "training", "value": "",
-                     "source": f"{tag} not logged by this run's runner",
-                     "run": train_cache[p].name, "caveat": "absent, not zero"})
-      sv = sim_cache.get(p, {}).get(key)
-      if sv is not None and np.isfinite(sv):
-        xs.append(1); ys.append(float(sv))
-        rows.append({"policy": p, "stage": "sim bench", "value": round(float(sv), 6),
-                     "source": f"{CHAIN_ARMS[p.split(' +')[0]][0]}:{CHAIN_ARMS[p.split(' +')[0]][1]}__{SIM_CONDITION}",
-                     "run": "", "caveat": "0 kg payload"})
+      tv = bench_cache.get(p, {}).get(key)
+      if tv is not None and np.isfinite(tv):
+        xs.append(0); ys.append(float(tv))
+        rows.append({"policy": p, "stage": STAGES[0], "value": round(float(tv), 6),
+                     "source": bench_src[p], "run": Path(str(bench_cache[p].get("label", ""))).parent.name,
+                     "caveat": "deterministic, 0 kg, training environment"
+                               + ("; analytic qacc at the physics rate" if key == "jacc_legs" else "")})
+      js = bridge_cache.get(p)
+      if js is not None and js["_fell_s"] is not None:
+        rows.append({"policy": p, "stage": STAGES[1], "value": "",
+                     "source": f"{js['flight_recorder']}: tilt trigger at {js['_fell_s']:.0f} s",
+                     "run": "", "caveat": "absent, not zero: the robot fell, later samples are a "
+                                          "robot lying down"})
+      elif js is not None:
+        flight = root / "logs/deploy_safety" / js["flight_recorder"]
+        if key == "jacc_legs":
+          sv = bridge_jacc.setdefault(flight.name, _hw_jacc_legs(SimpleNamespace(flight=flight), regime))
+        else:
+          sv = js.get(key)
+        note = "; ".join(filter(None, [
+          "C++ controller + ONNX over DDS, MuJoCo plant, 0 kg",
+          "encoder-differentiated" if key == "jacc_legs" else "",
+          f"distance from {js.get('cot_distance_reference')}" if key == "cot" else ""]))
+        if sv is not None and np.isfinite(float(sv)):
+          xs.append(1); ys.append(float(sv))
+          rows.append({"policy": p, "stage": STAGES[1], "value": round(float(sv), 6),
+                       "source": f"{js['flight_recorder']} {regime}.json"
+                                 if key != "jacc_legs" else f"{js['flight_recorder']} (meas_q, control rate)",
+                       "run": "", "caveat": note})
+        elif key in ("cot", "mech_power_w"):
+          rows.append({"policy": p, "stage": STAGES[1], "value": "",
+                       "source": f"{js['flight_recorder']}: no paired joint telemetry (needs tau_est)",
+                       "run": "", "caveat": "absent, not zero"})
       hv = []
       for b in bundles:
         if b.policy != p or regime not in b.regimes:
@@ -1287,11 +1372,11 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
         if v is None or not np.isfinite(float(v)):
           continue
         hv.append(float(v))
-        ax.plot(2, float(v), marker="o", markersize=2.4, color=style["color"], alpha=0.55,
-                zorder=2)
+        ax.plot(2, float(v), marker=style["marker"], markersize=2.4, color=style["color"], alpha=0.55,
+                zorder=2, linestyle="")
         cav = "encoder-differentiated" if key == "jacc_legs" else ""
         if key == "cot":
-          # The CoT denominator is a measured distance, and only the three Runs with motion
+          # The CoT denominator is a measured distance, and only the Runs with motion
           # capture have a true one; the rest integrate the onboard estimate, which
           # under-reads by ~3% on the Runs where both are available. Small, but it is a
           # different instrument per point in one column, so it travels with the number.
@@ -1312,45 +1397,171 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
       if xs:
         ax.plot(xs, ys, color=style["color"], linestyle=style["linestyle"],
                 marker=style["marker"], markersize=3.0, linewidth=0.9, zorder=3)
-    mark = ("$\\ast$" if stoch else "") + ("$\\dagger$" if key == "jacc_legs" else "")
+    mark = "$\\dagger$" if key == "jacc_legs" else ""
     ax.set_title(f"{ylabel} {mark}", fontsize=7)
     ax.set_xticks(range(3))
-    ax.set_xticklabels(stages, rotation=20, ha="right", fontsize=6)
+    ax.set_xticklabels(STAGES, rotation=20, ha="right", fontsize=6)
     ax.set_xlim(-0.35, 2.35)
     ax.margins(y=0.2)
     ax.tick_params(labelsize=6)
     write_panel_csv(out_dir, name, key,
                     ["policy", "stage", "value", "source", "run", "caveat"], rows)
 
-  bottom_legend(fig, policy_handles(policies), ncol=len(policies), height=0.36)
+  from matplotlib.lines import Line2D
+  bottom_legend(fig, [Line2D([], [], markersize=3.5, linewidth=1.0, label=tex(p), **chain_style(p))
+                      for p in policies], ncol=min(len(policies), 5), height=band)
+  for i, n in enumerate(lines):
+    fig.text(0.012, (leg_in + note_in + 0.05) / fig_h - 0.0975 / fig_h * i, n, fontsize=5.0,
+             color="0.3", ha="left", va="top")
+  print("[PLOT] f_chain: training bench / bridge sim points for "
+        + ", ".join(f"{p}:{'y' if p in bench_cache else 'n'}/{'y' if p in bridge_cache else 'n'}"
+                    for p in policies))
+  return save_pgf(fig, out_dir, name)
+
+
+# =============================================================== f_seedband ====
+
+SEED_VARIANTS = ["A0", "A1a", "A1a_DR", "A1a_DR_cotcap"]      # x order of the hardware panels
+# sim arm (both seeds) per variant, for the payload panel; `hadapt` never flew on hardware
+SEED_SIM = [("A1a", "nodr", "nodr_bench.json"), ("A1a_DR", "hmem", "all_bench.json"),
+            ("A1a_DR_cotcap", "cotcap", "cotcap_bench.json"), ("A0_DR", "fmem", "all_bench.json"),
+            ("H-adapt", "hadapt", "all_bench.json")]
+
+
+def _variant_seed(tag: str):
+  head, _, seed = tag.rpartition("_s")
+  return (head, seed) if seed.isdigit() else (tag, "42")
+
+
+def fig_seedband(bundles, cad_rows, out_dir, name="f_seedband", root=REPO):
+  """Does payload domain randomisation hurt the policy on the robot? One point per unloaded
+  _Run_, coloured by variant, triangle = seed 123, hollow = the 2026-09-14 session.
+
+  Two seeds per variant is what makes this readable: an effect of DR must exceed the spread
+  between seeds of the SAME variant, and a difference whose sign flips with the seed is not
+  an effect of DR. Standing panels first (the regime the hardware hierarchy is judged in);
+  the walking panel plots cot against ACHIEVED speed because the operators did not drive the
+  policies at the same speed, so cot alone is not command-matched. The last panel is sim,
+  the only place a hierarchical DR arm was ever loaded to 10-15 kg (none flew loaded).
+  """
+  by_bundle = {r["bundle"]: r for r in cad_rows}
+  runs = []
+  for b in bundles:
+    tag, kg = b.run["policy_tag"], float(b.run.get("payload_kg") or 0.0)
+    if kg > 0 or "broom" in (b.run.get("note") or "") or tag.startswith("A0_DR"):
+      continue
+    variant, seed = _variant_seed(tag)
+    if variant not in SEED_VARIANTS:
+      continue
+    runs.append((variant, seed, b))
+  fig, axes = plt.subplots(2, 3, figsize=(FIG_W, 4.6))
+  ax_of = dict(zip(("cad", "arm", "vel", "armv", "cot", "sim"), axes.flat))
+  panels = {k: [] for k in ax_of}
+  cols = ["policy", "variant", "seed", "session", "run", "x", "value", "source"]
+
+  def put(key, variant, seed, b, x, y, src):
+    st = chain_style(f"{variant}_s{seed}")
+    hollow = b.dir.name.startswith("2026_09_14")
+    ax_of[key].plot(x, y, marker=st["marker"], markersize=3.4, linestyle="", color=st["color"],
+                    markerfacecolor="none" if hollow else st["color"], alpha=0.9, zorder=3)
+    panels[key].append({"policy": b.policy, "variant": variant, "seed": seed,
+                        "session": b.dir.name[:10], "run": b.dir.name,
+                        "x": round(float(x), 6), "value": round(float(y), 6), "source": src})
+
+  seen = {}
+  for variant, seed, b in runs:
+    x0 = SEED_VARIANTS.index(variant) + (0.16 if seed == "123" else -0.16)
+    seen[(variant, seed)] = seen.get((variant, seed), -1) + 1
+    dx = 0.045 * ((seen[(variant, seed)] % 5) - 2)                  # deterministic jitter
+    c = by_bundle.get(b.dir.name, {})
+    cad = (c.get("cadence") or {}).get("standing") or {}
+    if (c.get("cadence") or {}).get("available") and cad:
+      put("cad", variant, seed, b, x0 + dx, cad["mean"], "cadence_settling.json cadence.standing.mean")
+    t01 = ((c.get("arm") or {}).get("t_settle_0.1") or {}).get("median")
+    if t01 is not None:
+      put("arm", variant, seed, b, x0 + dx, t01, "cadence_settling.json arm.t_settle_0.1.median")
+    S = b.regimes.get("standing", {})
+    # The MEASURED floor (late part of long standing holds, analyze_cadence_settling.py), the
+    # quantity ADR-0013 rests on. NOT the standing regime's error against truth: that one
+    # includes the transients after every stick release and is 10-20x larger.
+    floor = (c.get("base") or {}).get("floor_m_s")
+    if floor is not None and np.isfinite(floor):
+      put("vel", variant, seed, b, x0 + dx, float(floor),
+          "cadence_settling.json base.floor_m_s, mocap truth")
+    if "ub_arm_vel" in S:
+      put("armv", variant, seed, b, x0 + dx, S["ub_arm_vel"], f"{b.dir.name} standing.json ub_arm_vel")
+    W = b.regimes.get("walking", {})
+    if W.get("cot") is not None and W.get("cot_distance_m") and W.get("duration_s"):
+      put("cot", variant, seed, b, W["cot_distance_m"] / W["duration_s"], W["cot"],
+          f"{b.dir.name} walking.json cot vs cot_distance_m/duration_s")
+
+  # sim: the standing hold at 15 kg, drift against a zero command (no hardware counterpart)
+  hold = {k: v.get("bench", v) for k, v in json.loads(
+      (root / BENCH_DIR / "standhold_bench.json").read_text()).items() if isinstance(v, dict)}
+  for k, v in json.loads((root / BENCH_DIR / "nodr_bench.json").read_text()).items():
+    hold.setdefault(k, v.get("bench", v))
+  for k, v in json.loads((root / BENCH_DIR / "cotcap_bench.json").read_text()).items():
+    hold.setdefault(k, v.get("bench", v))
+  for xi, (variant, pre, _) in enumerate(SEED_SIM):
+    for seed in ("42", "123"):
+      cell = hold.get(f"{pre}_s{seed}__stand_pay15")
+      if not cell:
+        continue
+      st = chain_style(f"{variant if variant in CHAIN_COLOR else 'A0_DR'}_s{seed}")
+      y = float(np.hypot(cell["err_vx"], cell["err_vy"]))
+      ax_of["sim"].plot(xi + (0.16 if seed == "123" else -0.16), y, marker=st["marker"],
+                        markersize=3.6, linestyle="", color=CHAIN_COLOR.get(variant, "0.4"), zorder=3)
+      panels["sim"].append({"policy": f"{pre}_s{seed}", "variant": variant, "seed": seed,
+                            "session": "sim", "run": "", "x": xi, "value": round(y, 6),
+                            "source": f"standhold_bench.json:{pre}_s{seed}__stand_pay15 hypot(err_vx, err_vy)"})
+
+  titles = {"cad": "commanded period at rest (s)", "arm": "arm settling, 0.1 rad/s (s)",
+            "vel": "residual speed floor at rest (m/s)", "armv": "ub\\_arm\\_vel at rest (rad/s)",
+            "cot": "walking cot vs achieved speed", "sim": "sim: drift, 15 kg standing hold (m/s)"}
+  for key, ax in ax_of.items():
+    ax.set_title(titles[key], fontsize=7)
+    ax.tick_params(labelsize=6)
+    ax.margins(y=0.15)
+    if key == "cot":
+      ax.set_xlabel("achieved speed while walking (m/s)", fontsize=6)
+    else:
+      labels = [v for v, _, _ in SEED_SIM] if key == "sim" else SEED_VARIANTS
+      ax.set_xticks(range(len(labels)))
+      ax.set_xticklabels([tex(v) for v in labels], rotation=25, ha="right", fontsize=5.5)
+      ax.set_xlim(-0.6, len(labels) - 0.4)
+    ax.grid(alpha=0.25, linewidth=0.4)
+    write_panel_csv(out_dir, name, key, cols, panels[key])
+  ax_of["cad"].axhline(PERIOD_RANGE[1], color="0.35", linestyle="--", linewidth=0.7)
+  ax_of["cad"].axhline(PERIOD_RANGE[0], color="0.35", linestyle="--", linewidth=0.7)
+
+  from matplotlib.lines import Line2D
+  handles = [Line2D([], [], marker="o", linestyle="", color=CHAIN_COLOR[v], markersize=3.5,
+                    label=tex(v)) for v in SEED_VARIANTS[:1] + SEED_VARIANTS[1:]]
+  handles += [Line2D([], [], marker="o", linestyle="", color="0.3", markersize=3.5, label="seed 42"),
+              Line2D([], [], marker="^", linestyle="", color="0.3", markersize=3.5, label="seed 123"),
+              Line2D([], [], marker="o", linestyle="", color="0.3", markerfacecolor="none",
+                     markersize=3.5, label="2026-09-14 session")]
   notes = [
-    "$\\ast$ training metrics are computed on the SAMPLED action (exploration noise); the "
-    "sim and hardware columns are deterministic inference. Read no sim-to-real meaning into "
-    "that step on these rows.",
-    "$\\dagger$ hardware jacc\\_legs is differentiated encoder velocity at the control rate; "
-    "sim uses analytic qacc at the physics rate. TRENDS compare, levels do not.",
-    "Hardware A0\\_DR\\_s123 Runs carried a 7.5 kg mounted payload; the sim-bench column is "
-    "the 0 kg baseline condition for every policy. That column is loaded vs unloaded.",
-    "Hardware column = " + regime + " regime only (regimes are never pooled); points are "
-    "Runs, the line joins their mean. Omitted: "
-    # The omitted KEYS are metric names, so they carry underscores: the pgf backend does not
-    # escape those and the whole figure then fails to compile (it did).
-    + "; ".join(f"{tex(k)} ({tex(v)})" for k, v in list(CHAIN_OMITTED.items())[:3]) + ".",
-    "cot's hardware denominator is motion-capture distance on the three captured Runs and "
-    "the onboard estimate on the rest (it under-reads $\\approx$3\\% where both exist); the "
-    "per-point instrument is in the panel CSV's caveat column.",
-    "A missing point is absent, never zero: the flat A0\\_DR baseline trains under rsl\\_rl's "
-    "own runner, which logs no Loss/metrics/* -- so it has no training point for cot, "
-    "act\\_legs\\_rad or jacc\\_legs. mech\\_power\\_w is logged at no training stage at all.",
+    "One point per unloaded Run (hollow: 2026-09-14, filled: 2026-09-16); the broom-disturbance "
+    "Run and every 7.5 kg Run are excluded. A0 has no high level, so it has no commanded period. "
+    "The residual-speed floor exists only for Runs whose standing holds are covered by motion capture. Two seeds per variant: a difference "
+    "whose sign flips with the seed is not an effect of DR.",
+    "Walking is NOT command-matched: the operators drove the no-DR policy faster than the DR "
+    "arms, so cot is plotted against achieved speed, and walking is 30-60 s per policy. Under the "
+    "7.5 kg backpack (2026-09-14) only the no-DR A1a and the flat A0\\_DR flew: no hierarchical "
+    "DR arm was ever loaded on the robot. The last panel is the deterministic sim bench "
+    "(64 envs x 2 seeds x 600 steps), where H-adapt is the adaptive arm; it did not fly.",
   ]
-  # `wrap=True` measures against the FIGURE, not the tight bbox savefig crops to, so long
-  # caveat lines ran off the page. Wrapped explicitly at a width that fits 15 cm at 5 pt.
   import textwrap
   lines = [w for n in notes for w in textwrap.wrap(n, 118)]
+  leg_in, note_in = 0.45, 0.0975 * len(lines)
+  fig_h = 4.6 + leg_in + note_in - 0.3
+  fig.set_size_inches(FIG_W, fig_h)
+  bottom_legend(fig, handles, ncol=4, height=(leg_in + note_in + 0.2) / fig_h)
   for i, n in enumerate(lines):
-    fig.text(0.012, 0.310 - 0.019 * i, n, fontsize=5.0, color="0.3", ha="left", va="top")
-  print(f"[PLOT] f_chain: training points read for "
-        + ", ".join(f"{p}:{'yes' if train_cache.get(p) else 'no'}" for p in policies))
+    fig.text(0.012, (leg_in + note_in + 0.05) / fig_h - 0.0975 / fig_h * i, n, fontsize=5.0,
+             color="0.3", ha="left", va="top")
+  print("[PLOT] f_seedband: " + ", ".join(f"{k}={len(v)}" for k, v in panels.items()))
   return save_pgf(fig, out_dir, name)
 
 
@@ -1440,7 +1651,7 @@ def main() -> int:
   for n in names:
     if n not in FIGURES:
       raise SystemExit(f"unknown figure '{n}'; choices: {list(FIGURES)}")
-    if n in ("cadence", "settle", "stand") and not cad_rows:
+    if n in ("cadence", "settle", "stand", "seedband") and not cad_rows:
       raise SystemExit(f"f_{n} needs {cad_path} (run scripts/analyze_cadence_settling.py)")
     if n == "cadence":
       written.append(fig_cadence(bundles, cad_rows, out_dir))
@@ -1461,6 +1672,8 @@ def main() -> int:
       written.append(fig_hier(bundles, out_dir, run=args.run, downsample=ds))
     elif n == "chain":
       written.append(fig_chain(bundles, out_dir, regime=args.chain_regime, root=root))
+    elif n == "seedband":
+      written.append(fig_seedband(bundles, cad_rows, out_dir, root=root))
 
   print(f"[PLOT] {len(written)} figure(s) in {out_dir}")
   if args.verify_csv:

@@ -290,14 +290,29 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
     under-counts a denominator, averaging over a bridged one scores invented data. Measured
     effect of switching to truth: tracking error falls in 11 of 12 cases and CoT by 2-4%, i.e.
     the estimator under-reads walked distance by ~3%.
+  - `scripts/bench_flight_recorder.py` pairs the joint-telemetry log on **`t_wall`**, not the tick
+    counter `t` (2026-09-18): the counter runs 0.3% slow on the robot but **2.7% slow in a sim
+    bridge capture**, which smears the 30 s windowed knee xcorr past a stride (0.52, pair refused,
+    no `cot`/`mech_power_w`); on the wall axis it is 0.99. Logs without `t_wall` fall back to `t`.
   - `scripts/plot_thesis_figures.py --verify-csv` asserts every value drawn on `transData`
     appears in that figure's panel CSV. It is not ceremony: on its first run it caught `f_chain`
     plotting a hardware mean that was in no sidecar, so the CSVs could not re-plot the figure.
-  - `scripts/plot_thesis_figures.py --check-latex` → nine LaTeX-ready figures via matplotlib's
+  - `scripts/plot_thesis_figures.py --check-latex` → ten LaTeX-ready figures via matplotlib's
     `pgf` backend, each a `.pgf` plus a decimated per-panel CSV. `--bundles <glob>...` pools
     sessions. `f_hier`'s "LL achieved" is whichever arm `hrl.base_estimator` selects (read
     from `_meta.json`; `lo_vx` is a legacy name), plus the gyro for wz. ⚠ The pgf writer does not
     escape `_`, leaves `\mathdefault` undefined, and renders `|` as an em-dash.
+  - `f_chain` = **training bench** (`play.py` deterministic `base_p0`, from `data/*_bench.json`)
+    → **bridge sim** (a `deploy_readiness.py --stages provenance,bridge` capture, the shipped C++
+    controller over DDS on the MuJoCo plant, run with the `all_joints` logger beside it, scored
+    `bench_flight_recorder.py <capture>.csv --sim --out-dir logs/sim_logs/chain/<policy>`) →
+    hardware. A capture whose tilt trigger fired gets **no** point (later samples are a robot
+    lying down). `f_seedband` = per unloaded Run by variant and seed (standing period, arm settling,
+    residual-speed floor, arm velocity, walking cot vs achieved speed) plus the sim 15 kg standing
+    hold: the figure for the DR question. ⚠ `--policy-dir` defaults to the HRL dir whatever the task ID, and each HRL
+    capture overwrites the deployed keeper's `exported/`: re-stage it afterwards. The command
+    profile differs at each point (random bench / fixed 253 s battery / joystick), so a slope is
+    not instrument-only; the same keeper bridged twice differs 3-22% per metric (`err_yaw` most).
 - **Radar comparison chart** (2026-08-10): `scripts/plot_radar.py <baseline.log> <run2.log>
   ...` (each a `play.py` stdout capture, or bare JSON, with exactly one `[BENCH]` line) →
   one figure, every run normalized to the baseline's `[BENCH]` metrics (baseline traces the

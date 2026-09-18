@@ -25,6 +25,48 @@ python scripts/mocap_align.py --selftest      # clock, dropouts, frame, lever, g
 
 The C3D reader is the optional `c3d` package (`pip install -e '.[mocap]'`); nothing else needs it.
 
+### Full hardware-session workflow
+
+```bash
+# 1. scan the new date (dashes), then confirm labels
+python scripts/bundle_hardware_run.py --scan YYYY-MM-DD
+
+# 2. bundle; optional per-Run key "trajectory": "<all_joints stem>" when the knee
+#    correlation cannot pair the telemetry
+python scripts/bundle_hardware_run.py --labels labels.json
+
+# 3. mocap, per bundle. The bundler does NOT copy the Vicon export: copy the take
+#    (take-to-Run map in the capture session's Read_me) in as mocap.csv first
+cp <capture_session>/Tn.csv logs/robot_logs/<bundle>/mocap.csv
+python scripts/mocap_align.py logs/robot_logs/<bundle>/ logs/robot_logs/<bundle>/mocap.csv \
+    --lever 0 0 0.32 \
+    --c3d <capture_session>/Tn.c3d --marker-template doc/hrl/mocap/h1_2_torso_marker_template.json
+#    (--c3d/--marker-template optional); then read run.json -> mocap_align.flags
+
+# 4. score; picks up mocap_aligned.csv beside the flight recorder, so run AFTER step 3
+#    (re-score if mocap is added later; --no-mocap scores against the estimator)
+python scripts/bench_flight_recorder.py logs/robot_logs/<bundle>/<flight>.csv --robot \
+    --out-dir logs/robot_logs/<bundle>/ --traj-dir logs/robot_logs/<bundle>/
+
+# 5. cadence/settling over both sessions; bundle dirs use underscores (YYYY_MM_DD-*).
+#    UNQUOTED: this script takes shell-expanded paths (a quoted glob matches nothing and
+#    writes an empty json); plot_thesis_figures.py below takes quoted globs
+python scripts/analyze_cadence_settling.py \
+    --bundles logs/robot_logs/2026_09_14-*/ logs/robot_logs/<YYYY_MM_DD>-*/ \
+    --out data/<new-session>/cadence_settling.json
+
+# 6. figures over both sessions; --cadence-json is required (its default is the 09-14 file)
+python scripts/plot_thesis_figures.py \
+    --bundles "logs/robot_logs/2026_09_14-*/" "logs/robot_logs/<YYYY_MM_DD>-*/" \
+    --cadence-json data/<new-session>/cadence_settling.json
+```
+
+Quick check of a new session before mocap is ready: run steps 4 and 6 only, with the new
+date's glob alone. `f_track`, `f_hier`, `f_power` and `f_smooth` do not need the cadence json;
+`f_cadence`, `f_settle` and the residual-speed line of `f_stand` need steps 3 and 5. Raw
+flight recorder files that hold several Runs need `--entry` in step 4; bundles are already one
+Run each.
+
 ## Frames and signals
 
 | Symbol | Meaning | Source |
