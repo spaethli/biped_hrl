@@ -1562,7 +1562,7 @@ than, the DR-trained arms. Benched it + its sibling seed
 `Unitree-H1_2-Flat-A1` and `-Payload` are byte-identical in PLAY mode (`apply_payload_dr`
 only fires `if not play`), so `--eval-payload-kg` applies to the no-DR checkpoint cleanly.
 
-**Refuted — no-DR is the worst arm tested, at every payload:**
+**Refuted at 15 kg — no-DR is the worst arm tested on the 15 kg standing hold and behind on tracking at every payload; at 10 kg its standing drift is level with H-mem, and the 7.5 kg hardware backpack was held normally (2026-09-18, `docs/adr/0013` amendment):**
 - Already worst tracker at 0 kg (`err_vx` 0.126/0.127, `act_legs` 0.627/0.618 — both the
   highest of any hierarchical arm at baseline).
 - Payload sweep: starts behind, degrades at a similar relative rate, never catches up

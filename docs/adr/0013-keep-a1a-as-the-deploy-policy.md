@@ -1,8 +1,8 @@
 # Keep A1a (no payload DR) as the deploy policy, against the simulation ranking
 
 **Status:** accepted (2026-09-14, owner and supervisor). Fixes the deploy policy and the
-thesis's headline hierarchical arm. Evidence for the *reason* is still incomplete; see
-"Open" below.
+thesis's headline hierarchical arm. The evidence for the *reason* was incomplete; the
+2026-09-18 amendment at the end tests it and **narrows it to the seed-123 DR arms**.
 
 The payload-DR arms are not adopted. **A1a**
 (`2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42/model_10000.pt`, `cot5` + `rse 0.12`,
@@ -55,10 +55,11 @@ A 0.40 s clock at standstill is more than twice A1a's rate, and the low level en
 described. `act_legs_rad` averages *amplitude* and is blind to a *frequency* difference,
 which would explain why it saw nothing.
 
-This is n=2 and n=1 on the DR side, from one session, and it was found after the conclusion
-it supports. It is promoted to a reported metric so it can be tested, not cited as the
-reason. Settling time (base speed from motion capture, arm velocity from the encoders, since
-only the main body is captured) is the pre-registered adjudicator.
+This was n=2 and n=1 on the DR side, from one session, and found after the conclusion it
+supports; it was promoted to a reported metric so it could be tested. **Tested 2026-09-18: it
+holds for the seed-123 arms only (amendment below).** Settling time (base speed from motion
+capture, arm velocity from the encoders, since only the main body is captured) was the
+pre-registered adjudicator.
 
 ## Measured 2026-09-14: cadence separates categorically, settling time only suggests
 
@@ -115,10 +116,44 @@ at most 0.0004 m/s and the ordering never changes, so the result does not rest o
 marker-cluster offset precisely. The 0.03 m/s threshold is excluded as lever-limited (the
 `ω × r` term alone reaches 0.022-0.030 m/s at the 95th percentile of standing roll/pitch).
 
-⚠ n = 1 for A1a. The A1a_s123 seed session remains what would make this conclusive.
+⚠ n = 1 for A1a at the time (superseded by the amendment below).
 
-So the decision is **supported but not established**. Three DR Runs from two policies in one
-session, a post-hoc metric, and an ordering that weakens as the threshold loosens. The
-`A1a_s123` seed-band session is what would settle it. If it does not strengthen the result,
-the honest report is that cadence saturation is the measured difference and settling time was
-only directionally consistent.
+So the decision was **supported but not established**: three DR Runs from two policies in one
+session, a post-hoc metric, and an ordering that weakened as the threshold loosened. The seed
+band was named as what would settle it; it did, below.
+
+## Amendment 2026-09-18: the seed band, and what it does to the reason
+
+Run: 2026-09-16, two seeds x four variants, 21 Runs all with motion capture, plus the 09-14 Runs
+as a between-session replicate (0 kg only; the broom Run and the 7.5 kg Runs excluded).
+**Outcome: the result does not strengthen as a DR effect. It holds for seed 123 only.**
+
+| policy (Runs) | commanded period at rest, s | arm settling to 0.1 rad/s, s | residual-speed floor, m/s |
+|---|---|---|---|
+| A1a s42 (8; both sessions) | 0.996 - 1.000 | 2.1 - 6.0 | 0.0018 - 0.0085 (5 with a floor) |
+| A1a s123 (3) | 0.87 - 0.98 | 2.7 - 5.8 | 0.0011 - 0.0025 |
+| A1a_DR s42 (2) | 0.984 - 0.988 | 3.1 - 3.2 | 0.0019 - 0.0035 |
+| A1a_DR s123 (4; both sessions) | **0.39 - 0.43** | **5.4 - 15.0** | 0.0039 - 0.0089 |
+| A1a_DR_cotcap s42 (3) | 0.68 - 0.80 | 3.0 - 7.2 | 0.0020 - 0.0048 |
+| A1a_DR_cotcap s123 (2) | 0.85 | **16 - 22** | **0.0127 - 0.0504** |
+| A0, flat (5) | no HL | 0.6 - 1.1 | 0.0005 - 0.0024 |
+
+- The categorical cadence separation of 2026-09-14 (zero overlap) was a seed-123 result; the
+  seed-42 DR arm sits at A1a's ceiling. The 2.3-5x floor gap was n=1 for A1a; A1a s42 alone now
+  spans 4.7x, so only cotcap s123 separates categorically and H-mem s123 is about 1.4-2x with
+  overlapping ranges. Settling time again does not separate (H-mem s42 equals A1a).
+- The no-DR recipe is not clean at seed 123 either: its period is pinned only 9-12% of steps
+  and `A1a_s123` fell twice in the bridge, on the strafe deceleration.
+- **Consequence.** Keeping A1a is defensible for a payload of 7.5 kg or less, but the recorded
+  reason holds for the seed-123 DR arms only. The keeper is a seed-42 draw chosen from
+  single-seed hardware data. No hierarchical DR arm was loaded on the robot; in sim the DR
+  benefit is the standing hold at 10-15 kg (15 kg drift: cotcap 0.008-0.011 m/s and 7 W, no-DR
+  0.082-0.128 m/s and 52-61 W), untested on hardware. The adaptive arm never flew and shows no
+  consistent gain over plain cotcap in sim.
+- **Not established:** any DR effect on walking (not command-matched, 29-63 s per cell, and the
+  same checkpoint differs 20% in walking cot between sessions).
+- **Would settle it:** cotcap/H-mem s42 against A1a s42 under 10-15 kg standing holds, a third
+  seed per recipe, a command-matched walking protocol.
+
+Tables, method, the correction of a mis-quoted "residual speed" (regime RMS versus this floor)
+and the meeting record: journal `a1a-deploy-journal.md`, 2026-09-19.

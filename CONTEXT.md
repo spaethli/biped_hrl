@@ -272,6 +272,14 @@ _Avoid_: "the benchmark number" (the aggregate pools regimes and is not a walkin
 "stand still" (that names the `ll_stand_still_coef` reward term, not a measurement
 condition).
 
+**Seed band**:
+The same training recipe run with two or more seeds, scored side by side. A claimed effect of a
+lever (payload DR, adaptation) must exceed the between-seed spread of the SAME recipe, and a
+difference whose sign flips with the seed is not an effect of the lever. Standing behaviour
+replicates worst (4.2x at identical config and seed in training), so hardware and sim standing
+claims are made per (variant, seed), never from one pooled arm.
+_Avoid_: "the DR arm" / "the keeper" as if one checkpoint stood for a recipe.
+
 **Physical units rule**:
 Every commanded-side smoothness number is reported in radians, never raw action units,
 because the action scale `κ_j = 0.25·τ_max_j/Kp_j` spans 6.7x across the body (legs 0.25,

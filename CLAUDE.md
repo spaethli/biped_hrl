@@ -81,9 +81,13 @@ Sim bench arms in `data/2026-09-09-wp3-baseline-arms/` map as `nodr_*` = A1a,
 H-adapt arms.
 
 **Decision with the supervisor, 2026-09-14: A1a stays the deploy policy; the DR arms are not
-adopted.** On hardware the DR arms never came fully to rest at zero command (residual motion,
-mainly arm swing, no unplanned steps) and `A0_DR` under the backpack did not walk better than
-A1a. The DR arms are reported as a measured negative, not deleted.
+adopted.** On 2026-09-14 the DR arms did not come fully to rest at zero command (residual
+motion, mainly arm swing, no unplanned steps) and `A0_DR` under the backpack did not walk better
+than A1a. ⚠ **The 2026-09-16 seed band narrows that: the standing defect is seed 123 of both DR
+recipes (H-mem s123 commands a 0.40 s period at rest), while the seed-42 DR arms match A1a; no
+hierarchical DR arm was ever loaded on the robot (only 7.5 kg, on A1a and the flat `A0_DR`), and
+in sim DR's benefit is the 10-15 kg standing hold.** So: not adopted, with a seed-dependent
+standing defect, not "DR breaks the policy" (`docs/adr/0013` amendment). Arms are kept, not deleted.
 
 ⚠ **No sim metric separates A1a from the DR arms, and the weak ones rank them backwards.**
 Base cell, 0 kg: `ub_arm_vel` A1a 0.307/0.316 sits inside A1a_DR's 0.322/0.331 and
