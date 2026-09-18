@@ -459,6 +459,23 @@ MUTATIONS = [
    "        refit = (np.abs(r) < 0.5) & (cs > 0.7)",
    "test_alignment_on_real_session_pairs"),
 
+  # the sim bridge's tick counter runs 2.7% slow against real time (2026-09-18); the pairing is a
+  # 30 s windowed fit, so on ticks the knee xcorr fell to 0.52 and cot / mech_power_w vanished
+  ("t_clock back to the tick counter (pairing on a clock 2.7% slow against the telemetry)", BFR,
+   '    t_clock = (df["t_wall"].to_numpy(float) - df["t_wall"].iloc[0] + t[0]',
+   "    t_clock = (t",
+   "test_read_flight_exposes_the_wall_clock_on_the_tick_origin"),
+
+  ("process() fits the telemetry pairing on the tick counter", BFR,
+   '        align = fit_alignment(F["t_clock"], F',
+   '        align = fit_alignment(F["t"], F',
+   "test_a_slow_tick_counter_still_pairs_the_telemetry_end_to_end"),
+
+  ("torque mapped into the run on the tick counter while the fit is on the wall clock", BFR,
+   '    tf = F["t_clock"]',
+   '    tf = F["t"]',
+   "test_a_slow_tick_counter_still_pairs_the_telemetry_end_to_end"),
+
   ("pairing back to a forward start-time window (encodes operator timing, broke at +125 s)", BFR,
    "        overlap = (min(end_f, end_a) - max(start_f, start_a)).total_seconds()",
    "        overlap = 120.0 - (start_a - start_f).total_seconds()",

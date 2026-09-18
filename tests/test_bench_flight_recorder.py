@@ -171,6 +171,111 @@ def test_affine_alignment_recovers_an_injected_clock_skew(b_true):
     assert fit["xcorr"] > 0.7
 
 
+def _gait_knee(ta, rng):
+    """Walking bursts (aperiodic, so the lag is identifiable) of a 1.67 Hz stride."""
+    burst = np.zeros_like(ta)
+    for start, length in [(12.0, 22.0), (70.0, 9.0), (140.0, 35.0), (230.0, 14.0)]:
+        burst[(ta >= start) & (ta < start + length)] = 1.0
+    return np.sin(2 * np.pi * 1.67 * ta) * burst + 0.02 * rng.standard_normal(len(ta))
+
+
+def test_pairing_on_the_tick_counter_fails_where_the_wall_clock_holds(tmp_path):
+    """The sim bridge's tick counter runs 2.7% slow against real time (250 s of ticks in
+    256.7 s). The fit correlates 30 s windows, and 2.7% of 30 s is 0.8 s of stretch INSIDE a
+    window -- more than the 0.58 s stride -- so the knee xcorr fell to 0.52 and the torque
+    pair was refused. Same signal on the wall axis pairs at ~1. Hardware drifts by -0.3% and
+    never showed it. Both axes are asserted so the test cannot pass by the fit being lax."""
+    rng = np.random.default_rng(0)
+    wall = np.arange(0.0, 300.0, 0.002)
+    knee = _gait_knee(wall, rng)
+    tick = wall / 1.027                                   # the counter, slow against the wall
+    ta = wall[::10] - 10.9                                # telemetry logs on wall time, 50 Hz
+    knee_a = knee[::10]
+    on_ticks = bfr.fit_alignment(tick, knee, ta, knee_a)
+    on_wall = bfr.fit_alignment(wall, knee, ta, knee_a)
+    # the true map on the tick axis is b = 10.9/1.027, m = 1/1.027 - 1; the fit either
+    # refuses (xcorr < floor) or locks onto a wrong lag/rate (b = 67 s, m = -40% was seen)
+    recovered = (on_ticks is not None and on_ticks["xcorr"] > 0.7
+                 and abs(on_ticks["b"] - 10.9 / 1.027) < 0.3
+                 and abs(on_ticks["m"] - (1 / 1.027 - 1)) < 0.003)
+    assert not recovered
+    assert on_wall is not None and on_wall["xcorr"] > 0.9
+    assert on_wall["b"] == pytest.approx(10.9, abs=0.15)
+
+
+def test_a_slow_tick_counter_still_pairs_the_telemetry_end_to_end(tmp_path, monkeypatch):
+    """Through main(): flight recorder on a tick counter running 2.7% slow (the sim bridge),
+    telemetry on the wall clock. `process()` has to fit the pairing on the wall axis; fitting
+    on ticks refuses the pair and the run silently loses mech_power_w and cot. The unit test
+    above proves the FIT is axis-sensitive; only this one sees which axis the tool feeds it."""
+    import os
+    rng = np.random.default_rng(0)
+    hz, dur, skew = 100.0, 100.0, 1.027
+    tick = np.arange(0.0, dur, 1 / hz)
+    wall = tick * skew
+    knee = _gait_knee(wall, rng)
+    walking = (np.abs(knee) > 0.5).astype(float)     # walk during the gait bursts only
+    n = len(tick)
+    flight = {"t": tick, "t_wall": 1.789e9 + wall, "alpha": np.ones(n), "entry": np.zeros(n, int),
+              "cmd_vx": 0.5 * walking, "cmd_vy": np.zeros(n), "cmd_wz": np.zeros(n),
+              "quat_w": np.ones(n), "quat_x": np.zeros(n), "quat_y": np.zeros(n),
+              "quat_z": np.zeros(n), "phase_sin": np.zeros(n), "phase_cos": np.ones(n),
+              "ach_vx": 0.5 * walking + 1e-3, "ach_vy": np.zeros(n),
+              "est_gyro_x": np.zeros(n), "est_gyro_y": np.zeros(n), "est_gyro_z": np.zeros(n)}
+    for p_ in ("raw_q", "meas_q", "meas_dq"):
+        for j in range(27):
+            flight[f"{p_}{j}"] = (np.arange(n) // 2 % 2) * 0.01     # raw_q changes every 20 ms
+    flight[f"meas_q{bfr.KNEE_SLOT}"] = knee
+    stem = "2026-09-17_15-47-02"
+    csv = tmp_path / f"{stem}_x_candidate.csv"
+    pd.DataFrame(flight).to_csv(csv, index=False)
+    (tmp_path / f"{stem}_x_candidate_meta.json").write_text(json.dumps(
+        {"hold_joint_ids": list(range(12, 27)),
+         "joints": [{"slot": j, "name": n_, "min": -3.0, "max": 3.0} for j, n_ in enumerate(
+             [f"{s_}_{k}" for s_ in ("left", "right") for k in
+              ("hip_yaw", "hip_pitch", "hip_roll", "knee", "ankle_pitch", "ankle_roll")]
+             + ["waist_yaw"] + [f"{s_}_{k}" for s_ in ("left", "right") for k in
+                                ("shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
+                                 "wrist_roll", "wrist_pitch", "wrist_yaw")])]}))
+    ta = wall[::2] - 10.9                                            # logger: wall time, 50 Hz
+    tele = {"time": ta, f"q{bfr.KNEE_SLOT}": knee[::2]}
+    for j in range(27):
+        # 5 Nm while the gait burst runs, 500 Nm outside it: a torque sample gated on the wrong
+        # axis (up to 2.7 s off by the end) lands in the wrong regime and inflates the mean
+        tele[f"tau_est{j}"] = np.where(walking[::2] > 0, 5.0, 500.0)
+        tele[f"dq{j}"] = np.full(len(ta), 0.4)
+        tele.setdefault(f"q{j}", np.zeros(len(ta)))
+    tele_csv = tmp_path / "all_joints_2026-09-17_15-47-07.csv"
+    pd.DataFrame(tele).to_csv(tele_csv, index=False)
+    import datetime as _dt
+    end = _dt.datetime.strptime("2026-09-17 15-49-00", "%Y-%m-%d %H-%M-%S").timestamp()
+    for f in (csv, tele_csv):
+        os.utime(f, (end, end))
+    monkeypatch.setattr(sys, "argv", ["bench_flight_recorder", str(csv), "--sim",
+                                      "--out-dir", str(tmp_path), "--traj-dir", str(tmp_path)])
+    bfr.main()
+    got = json.loads(next(tmp_path.glob("*.walking.json")).read_text())
+    assert got["all_joints"] == tele_csv.name, "the torque pair was refused on the tick axis"
+    assert got["pair_xcorr"] > 0.9
+    assert got["mech_power_w"] == pytest.approx(5.0 * 0.4 * 27, rel=1e-6)
+
+
+def test_read_flight_exposes_the_wall_clock_on_the_tick_origin(tmp_path):
+    p = _flight_csv(tmp_path, entries=[0])
+    df = pd.read_csv(p)
+    df["t_wall"] = 1.789e9 + df["t"] * 1.027            # the recorder's real clock, slow ticks
+    df.to_csv(p, index=False)
+    F = bfr.read_flight(p, assume_hold=[], entry=None)
+    assert F["t_clock"][0] == pytest.approx(F["t"][0])
+    assert (F["t_clock"][-1] - F["t_clock"][0]) == pytest.approx(
+        1.027 * (F["t"][-1] - F["t"][0]), rel=1e-6)
+
+
+def test_read_flight_falls_back_to_ticks_for_a_log_without_t_wall(tmp_path):
+    F = bfr.read_flight(_flight_csv(tmp_path, entries=[0]), assume_hold=[], entry=None)
+    assert np.array_equal(F["t_clock"], F["t"])
+
+
 def test_regime_gate_matches_the_reward_command_threshold():
     """`||cmd_xy|| + |cmd_wz| > 0.1`, exactly mdp/rewards.py:157-159.
 
@@ -448,6 +553,7 @@ def _energy_inputs(run_s, telem_s, speed=0.5, power_w=100.0, lag_s=0.0):
     n = len(tf)
     F = {
         "t": tf,
+        "t_clock": tf,
         "cmd": np.column_stack([np.full(n, speed), np.zeros(n), np.zeros(n)]),
         "df": pd.DataFrame({"est_v_compl_x": np.full(n, speed),
                             "est_v_compl_y": np.zeros(n)}),

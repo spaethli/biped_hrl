@@ -535,11 +535,19 @@ def read_flight(csv_path, assume_hold, pose_yaml=None, entry=None):
     raw = df[[f"raw_q{j}" for j in range(27)]].to_numpy(float)
     steps, sidx = policy_steps(raw)
     t = df["t"].to_numpy(float)
+    # `t` is a tick counter (one control_dt per run() iteration), so it runs slow against real
+    # time by the loop's overruns: -0.3% on the robot, +2.7% on the sim bridge (250 s of ticks
+    # in 256.7 s). Pairing with the telemetry log is a wall-clock fit in 30 s windows, and a
+    # 2.7% stretch is 0.8 s inside one window -- more than a 0.58 s stride, so the knee
+    # correlation collapsed to 0.52 and the torque pair was refused. On the wall axis it is
+    # 0.993. Same origin as `t`; logs that predate `t_wall` fall back to the tick counter.
+    t_clock = (df["t_wall"].to_numpy(float) - df["t_wall"].iloc[0] + t[0]
+               if "t_wall" in df.columns else t)
     cmd = df[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float)
     walk_rows = walking_mask(cmd)
     return {
         "df": df, "meta": meta, "joints": joints, "hold": hold, "hold_src": hold_src,
-        "raw": raw, "steps": steps, "sidx": sidx, "t": t, "cmd": cmd,
+        "raw": raw, "steps": steps, "sidx": sidx, "t": t, "t_clock": t_clock, "cmd": cmd,
         "walk_rows": walk_rows, "default_pose": default_joint_pos(pose_yaml),
         "step_hz": float(len(steps) / (t[-1] - t[0])) if t[-1] > t[0] else 0.0,
     }
@@ -690,7 +698,7 @@ def _energy(F, T, align, vel_ref):
     """
     ta = T["t"]
     t_in_flight = ta + (align["b"] + align["m"] * ta)
-    tf = F["t"]
+    tf = F["t_clock"]
     lin = np.linalg.norm(F["cmd"][:, :2], axis=1)
     # np.interp CLAMPS outside its range, so telemetry samples mapping past either end of the
     # Run inherit its first/last gate and speed held constant. A Run that ENDS while walking
@@ -786,7 +794,7 @@ def process(csv_path, args):
     else:
         p, dt, overlap = pair
         T = read_telemetry(p)
-        align = fit_alignment(F["t"], F["df"][f"meas_q{KNEE_SLOT}"].to_numpy(float),
+        align = fit_alignment(F["t_clock"], F["df"][f"meas_q{KNEE_SLOT}"].to_numpy(float),
                               T["t"], T["knee"])
         if align is None or align["xcorr"] < args.xcorr_floor:
             got = "unfittable" if align is None else f"{align['xcorr']:.2f}"
