@@ -903,3 +903,58 @@ fires on the committed non-zero value. That is the guard working as designed, bu
 offset, and never confused with a policy-space constant — is still right; only its "must be all
 zeros" form conflicts with a deliberately-set operational value. See the test-suite journal for the
 replacement assertions when they land.
+
+## Amendment (2026-09-21): the lean is a SEED effect in A0, not an architecture effect
+
+First cross-policy lean measurement that satisfies this ADR's own comparability rule (report
+stillness alongside). Source: the **2026-09-16 hardware session**, 21 runs, one robot state,
+`alpha==0` on every run. Method, exactly the statistic the 2026-08-03 table used: zero-command
+rows (`|cmd_vx|,|cmd_vy|,|cmd_wz| < 0.05`, `alpha==0`), `still` = fraction with
+`max|dq|` over the 12 leg slots `< 0.1`, pitch = `asin(2(wy - zx))` from the recorder's
+`quat_*` (the policy's own IMU observation), dq-filtered to the still rows.
+
+**Config asymmetry, confirmed per-run from each `_meta.json`, not from the yaml:** every A0 run
+carried `joint_offset` = 0.012 on hip_pitch/knee/ankle_pitch per leg (0.036 rad chain); every
+hierarchical run carried the all-zero no-op.
+
+| arm | runs | still | mean `max|dq|` | stand pitch |
+|---|---|---|---|---|
+| **A0_s123** | 2 | 88.8% | 0.154 | **-3.21°** |
+| A0_s42 | 3 | 81.1% | 0.193 | +0.66° |
+| A1a_DR_s42 | 2 | 83.1% | 0.162 | +0.48° |
+| A1a_DR_cotcap_s42 | 2 | 81.6% | 0.176 | +0.22° |
+| A1a_s42 | 5 | 75.2% | 0.375 | +0.46° |
+| A1a_s123 | 3 | 65.4% | 0.309 | -0.28° |
+| A1a_DR_s123 | 2 | 54.0% | 0.208 | +0.55° |
+| A1a_DR_cotcap_s123 | 2 | 49.6% | 0.222 | +0.59° |
+
+**What is NOT supported: "the hierarchy cures the lean."** At matched stillness (81-83%) A0_s42
+(+0.66°) and the two s42 hierarchical arms (+0.35° mean) differ by 0.32°, inside the 1.0°
+between-session spread this ADR already measured on nominally identical baselines. A flat policy
+stands upright on this robot.
+
+**What IS supported, and it is a variance claim.** The flat baseline spans **3.87° across two
+seeds** (+0.66° / -3.21°) *with* the correction enabled, while the hierarchical family spans
+**0.87° across 6 recipe/seed combinations** (-0.28° .. +0.59°) *without* it.
+
+**The seed spread is not the stillness confound.** A0_s123 is the *most still* arm in the session,
+so the 2026-08-03 confound (more still -> more lean, slope -0.0739°/point, r=-0.958) points the
+right way but is far too small: against the most-still hierarchical arm it predicts -0.43° of the
+observed -3.68° gap, leaving **88% unexplained**. Within A0 the spread runs at -0.500°/point,
+**6.8x the confound slope**. Session-wide the correlation is only r=-0.457, against -0.958 in the
+2026-08-03 triple.
+
+**New observation worth a mechanism pass:** hierarchical stand attitude is *decoupled from
+fidget*. The family covers a 33.5-point stillness span (49.6-83.1%) and produces 0.87° of pitch
+spread, where the confound slope predicts 2.5°. Flat does not behave this way.
+
+**Open confound, not closable from disk.** A0's 0.036 rad chain was calibrated 2026-08-03, before
+the 2026-08-13 leg re-zero, and this ADR warns a stale value can add to the lean. So part of
+A0_s123's -3.21° may be the crutch pushing the wrong way rather than a policy property.
+**Closing test (~5 min, next session): one A0_s123 run with `joint_offset` all-zero, same session
+as an A1a run.** Until then "flat needs the correction, the hierarchy does not" is unproven; only
+the seed-spread asymmetry above is.
+
+⚠ Supersedes the 2026-09-21 session's own first pass, which gated on `|cmd|<0.1` without
+dq-filtering and without stillness, and read this as an architecture effect. The ADR-0006
+comparability rule is what caught it.
