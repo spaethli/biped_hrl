@@ -301,7 +301,15 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
     `pgf` backend, each a `.pgf` plus a decimated per-panel CSV. `--bundles <glob>...` pools
     sessions. `f_hier`'s "LL achieved" is whichever arm `hrl.base_estimator` selects (read
     from `_meta.json`; `lo_vx` is a legacy name), plus the gyro for wz. ⚠ The pgf writer does not
-    escape `_`, leaves `\mathdefault` undefined, and renders `|` as an em-dash.
+    escape `_`, leaves `\mathdefault` undefined, and renders `|` as an em-dash. The cadence rows
+    come from every `data/*/cadence_settling.json`, merged by bundle name (newest wins); a Run
+    with no row or a variant with no palette colour is named on stdout. Colour is per variant,
+    the seed rides on the marker. `--figures trackruns,hierruns --out figures` (opt-in, not in the
+    default ten) writes one PDF per Run with ground truth into `figures/tracking_runs/` and (HL
+    Runs only) `figures/hier_runs/`, each with a `*_runs_summary.csv`; it reads every session.
+    Line styles: command solid, estimate dashed, truth dotted, HL target dash-dot (`TRACK_STYLE`,
+    shared with `f_track`/`f_hier`). The capture has dropouts (up to 95% of one Run's samples on
+    2026-09-16), so RMS and drift use the captured samples and the figure states the % missing.
   - `f_chain` = **training bench** (`play.py` deterministic `base_p0`, from `data/*_bench.json`)
     → **bridge sim** (a `deploy_readiness.py --stages provenance,bridge` capture, the shipped C++
     controller over DDS on the MuJoCo plant, run with the `all_joints` logger beside it, scored

@@ -51,12 +51,13 @@ Sources (nothing here is recomputed that already exists):
                                    `--bundles` sets the glob(s); default is the
                                    2026-09-14 session alone, so a later session (e.g. the
                                    seed-band runs) must be named explicitly or merged in.
-  data/2026-09-14-hardware-session/cadence_settling.json
-                                   scripts/analyze_cadence_settling.py's output; f_cadence,
-                                   f_settle and f_stand's residual speed READ it, they do
-                                   not re-derive it.
+  data/*/cadence_settling.json     scripts/analyze_cadence_settling.py's output, merged across
+                                   sessions by bundle name (newest file wins; `--cadence-json`
+                                   names one); f_cadence, f_settle, f_seedband and f_stand's
+                                   residual speed READ it, they do not re-derive it.
   <bundle>/mocap_aligned.csv       mocap_align.py's pelvis ground truth, already on the
-                                   flight recorder's `t` grid. Present on 3 of 11 Runs; the
+                                   flight recorder's `t` grid (NaN where the capture dropped
+                                   out). Present on 3 of 11 Runs of 09-14, all of 09-16; the
                                    figures that need it SAY which Runs lack it.
   data/2026-09-09-wp3-baseline-arms/*_bench.json, data/2026-09-18-a0-baseline-bench/
                                    the training-bench point of f_chain (play.py's deterministic
@@ -81,6 +82,9 @@ Usage:
   python scripts/plot_thesis_figures.py                      # all ten into figures/
   python scripts/plot_thesis_figures.py --figures track --run "run 4"
   python scripts/plot_thesis_figures.py --figures cadence,settle
+  python scripts/plot_thesis_figures.py --figures trackruns,hierruns --out figures
+                                       # one PDF per Run with ground truth, into figures/tracking_runs/
+                                       # and figures/hier_runs/ (HL Runs only)
   python scripts/plot_thesis_figures.py --out figures --check-latex
   python scripts/plot_thesis_figures.py --bundles "logs/robot_logs/2026_09_14-*/" \\
       "logs/robot_logs/2026_09_2?-*/"                         # pool multiple sessions
@@ -115,22 +119,27 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 BUNDLE_GLOB = "logs/robot_logs/2026_09_14-*/"
-CADENCE_JSON = "data/2026-09-14-hardware-session/cadence_settling.json"
+CADENCE_GLOB = "data/*/cadence_settling.json"   # merged by bundle name, the newest file wins
 MOCAP_CSV = "mocap_aligned.csv"   # mocap_align.py output, on the flight recorder's `t` grid
 PERIOD_RANGE = (0.35, 1.0)      # analyze_cadence_settling.PERIOD_RANGE (deploy yaml)
 ARM_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)  # rad/s, analyze_cadence_settling.ARM_THRESHOLDS
 FIG_W = 5.9                     # in; ~15 cm thesis column
 FIGURES = ("cadence", "settle", "upper", "smooth", "power",
            "track", "stand", "hier", "chain", "seedband")
+# Opt-in only, never in the default set: one PDF per Run with ground truth, for showing people
+# rather than for the thesis. Reads every session's bundles unless --bundles says otherwise.
+EXTRA_FIGURES = ("trackruns", "hierruns")
+EXTRA_DIR = {"trackruns": "tracking_runs", "hierruns": "hier_runs"}   # under --out
+TRACKRUNS_GLOB = "logs/robot_logs/*/"
+TRACKRUNS_SIZE = (11.0, 6.6)     # in; wider than a thesis column, a 160 s Run is dense
+HIERRUNS_SIZE = (11.0, 8.2)      # four panels
 
-# Okabe-Ito, colour-blind safe. One colour per policy, shared by every figure.
-POLICY_COLOR = {
-  "A0_DR_s123": "#000000",
-  "A1a": "#0072B2",
-  "A1a_DR_s123": "#D55E00",
-  "A1a_DR_cotcap_s42": "#009E73",
-}
-POLICY_ORDER = ["A0_DR_s123", "A1a", "A1a_DR_s123", "A1a_DR_cotcap_s42"]
+# Okabe-Ito, colour-blind safe. One colour per policy VARIANT, shared by every figure; the
+# seed rides on the marker (`chain_style`). Keyed on the variant, a `_s<seed>` tag nobody has
+# listed yet is still coloured -- keyed on the full tag it silently fell back to grey.
+CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": "#000000", "A1a": "#0072B2", "A1a_DR": "#D55E00",
+               "A1a_DR_cotcap": "#009E73"}
+POLICY_ORDER = list(CHAIN_COLOR)
 REGIME_HATCH = {"standing": "", "walking": "////"}
 REGIME_ALPHA = {"standing": 1.0, "walking": 0.45}
 
@@ -202,30 +211,45 @@ class Bundle:
     return float(self.regimes.get("walking", {}).get("duration_s", 0.0))
 
 
+def _variant_seed(tag: str):
+  """`A1a_DR_s123` -> (`A1a_DR`, `123`); a tag without a seed (the 2026-09-14 `A1a`) is 42."""
+  head, _, seed = tag.rpartition("_s")
+  return (head, seed) if seed.isdigit() else (tag, "42")
+
+
+def chain_style(label: str) -> dict:
+  """Colour by variant (A0, A0_DR, A1a, A1a_DR, A1a_DR_cotcap), marker by seed (o = 42,
+  triangle = 123), dashed when the hardware Run was loaded. Ten policies do not fit a
+  one-colour-per-tag scheme, and colour alone cannot carry two seeds."""
+  variant, seed = _variant_seed(label.split(" +")[0])
+  return {"color": CHAIN_COLOR.get(variant, "0.4"), "linestyle": "--" if " +" in label else "-",
+          "marker": "^" if seed == "123" else "o"}
+
+
 def policy_color(label: str) -> str:
   """Colour by BASE policy tag, so a loaded Run stays recognisably the same policy.
 
-  `policy_label` folds the _Mounted payload_ into the name, which means `A1a +7.5kg` is not
-  a key of POLICY_COLOR: keyed naively, every loaded Run falls back to the SAME default
-  grey and two different policies become one colour.
+  `policy_label` folds the _Mounted payload_ into the name (`A1a +7.5kg`), which no palette
+  keys on: the payload is stripped first, then the seed, so every loaded Run and every seed
+  of a variant keeps its variant's colour instead of one shared default grey.
   """
-  return POLICY_COLOR.get(label.split(" +")[0], "0.4")
+  return chain_style(label)["color"]
 
 
 def policy_style(label: str) -> dict:
-  """Colour by policy, dash + square marker when the Run is loaded. Colour alone cannot
-  separate `A1a` from `A1a +7.5kg` in a line legend."""
-  loaded = " +" in label
-  return {"color": policy_color(label), "linestyle": "--" if loaded else "-",
-          "marker": "s" if loaded else "o"}
+  """Colour by variant, dash + square marker when the Run is loaded, triangle for seed 123.
+  Colour alone cannot separate `A1a` from `A1a +7.5kg` in a line legend."""
+  st = chain_style(label)
+  return {**st, "marker": "s"} if " +" in label else st
 
 
 def policy_sort_key(label: str):
-  """POLICY_ORDER for the base tag, then payload -- an unloaded Run before its loaded one."""
+  """POLICY_ORDER by variant, then seed, then payload -- an unloaded Run before its loaded one."""
   base = label.split(" +")[0]
   kg = float(label.split(" +")[1].rstrip("kg")) if " +" in label else 0.0
-  idx = POLICY_ORDER.index(base) if base in POLICY_ORDER else len(POLICY_ORDER)
-  return (idx, base, kg)
+  variant, seed = _variant_seed(base)
+  idx = POLICY_ORDER.index(variant) if variant in POLICY_ORDER else len(POLICY_ORDER)
+  return (idx, variant, int(seed), kg)
 
 
 def policy_label(run: dict) -> str:
@@ -277,6 +301,16 @@ def load_bundles(root: Path, globs: list[str] = (BUNDLE_GLOB,)) -> list[Bundle]:
         b.regimes[regime] = json.loads(p.read_text())
     out.append(b)
   return out
+
+
+def load_cadence(root: Path, override: str | None = None) -> list[dict]:
+  """analyze_cadence_settling.py rows merged across every session's file, keyed by bundle
+  name (the newest file wins): the 2026-09-16 file also re-scores the 09-14 Runs, and a
+  single hardcoded session left every Run of another one without a cadence / settling /
+  floor row, i.e. blank panels."""
+  paths = [Path(override)] if override else sorted(root.glob(CADENCE_GLOB))
+  return list({r["bundle"]: r for p in paths if p.exists()
+               for r in json.loads(p.read_text())}.values())
 
 
 def policies_present(bundles: list[Bundle]) -> list[str]:
@@ -818,9 +852,9 @@ def _mocap_note(bundles) -> str:
   have = [b.tag for b in bundles if b.mocap]
   miss = [b.tag for b in bundles if not b.mocap]
   return (f"motion-capture ground truth exists for {len(have)} of {len(bundles)} Runs: "
-          + ", ".join(have) + ".\n"
-          + f"The other {len(miss)} cannot appear here (run 6's capture was rejected as "
-            "corrupt; the rest were not captured).")
+          + ", ".join(have) + "."
+          + (f"\nThe other {len(miss)} cannot appear here ({', '.join(miss)}: no aligned "
+             "capture, not captured or rejected as corrupt)." if miss else ""))
 
 
 def read_mocap(b: Bundle, t: np.ndarray) -> dict:
@@ -854,7 +888,94 @@ def pick_mocap_run(bundles, need_hrl=False, run=None):
 
 
 def _rms(a, b, m):
+  """RMS of a - b over the mask, on the samples where BOTH are finite. The capture drops out
+  (20% of a Run's samples on the 2026-09-16 session), and a single NaN in the sum otherwise
+  turns the whole regime into nan."""
+  m = m & np.isfinite(a) & np.isfinite(b)
   return float(np.sqrt(np.mean((a[m] - b[m]) ** 2))) if m.sum() > 10 else float("nan")
+
+
+def _gap_pct(g) -> float:
+  """Percent of samples with no ground truth, so a dropout is a stated number on the figure."""
+  return 100.0 * float(np.mean(~np.isfinite(g)))
+
+
+# The wz panel is a different test from the other two and the labels say so: est_v_compl is
+# a fused ESTIMATE under scrutiny, while the gyro is a direct rate measurement, so its
+# agreement with capture checks the FRAME alignment, not estimator drift. One shared
+# legend entry would claim three estimator tests where there are two.
+TRACK_PANELS = [
+  ("vx", "cmd_vx", "est_v_compl_x", "gt_vx", "m/s", "$v_x$",
+   "onboard estimate (fused leg odometry + IMU)"),
+  ("vy", "cmd_vy", "est_v_compl_y", "gt_vy", "m/s", "$v_y$",
+   "onboard estimate (fused leg odometry + IMU)"),
+  ("wz", "cmd_wz", "est_gyro_z", "gt_wz", "rad/s", "$\\omega_z$",
+   "gyro $z$ (a direct measurement, not an estimate)"),
+]
+# Line STYLES, not just colours: the command is a solid line, the estimate dashed and the
+# truth dotted (and, in f_hier, the HL target dash-dot), so every series stays readable where
+# they overlap (a thin dashed grey command was the one line nobody could find under the
+# estimate). (colour, linestyle, width, zorder): the command is drawn first and thickest so it
+# shows wherever the others leave it.
+TRACK_STYLE = {"command": ("0.1", "-", 1.3, 2),
+               "target": ("#009E73", (0, (6, 1.5, 1.5, 1.5)), 1.0, 2.5),
+               "estimate": ("#D55E00", (0, (5, 2)), 1.0, 3),
+               "truth": ("#0072B2", (0, (1, 1.6)), 1.4, 4)}
+
+
+def _style_handle(kind: str, label: str):
+  """Legend proxy carrying the exact colour / dash pattern / width the series is drawn with."""
+  c, ls, lw, _z = TRACK_STYLE[kind]
+  return plt.Line2D([], [], color=c, linestyle=ls, linewidth=lw, dash_capstyle="round", label=label)
+
+
+def _track_fig(b, note, downsample=True, figsize=(FIG_W, 4.4)):
+  """Command vs onboard estimate vs motion-capture truth for one Run, three panels.
+  -> (figure, per-panel plotted rows for the CSV sidecar, per-panel RMS report)."""
+  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz",
+                                      "est_v_compl_x", "est_v_compl_y", "est_gyro_z"])
+  t = df["t"].to_numpy(float)
+  G = read_mocap(b, t)
+  walk = walking_mask(df[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
+  regimes = {"walking": walk, "standing": ~walk}
+  fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
+  rows = {}
+  rms_report = {}
+  for ax, (axis, cmd_c, est_c, gt_c, unit, sym, est_name) in zip(axes, TRACK_PANELS):
+    est, gt = df[est_c].to_numpy(float), G[gt_c]
+    series = (("operator command", df[cmd_c].to_numpy(float), "command"),
+              (est_name, est, "estimate"),
+              ("motion-capture ground truth", gt, "truth"))
+    rows[axis] = []
+    for label, y, kind in series:
+      colr, ls, lw, z = TRACK_STYLE[kind]
+      tt, yy = envelope_downsample(t - t[0], y, downsample)
+      ax.plot(tt, yy, color=colr, linestyle=ls, linewidth=lw, zorder=z, alpha=0.9,
+              dash_capstyle="round")
+      rows[axis] += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
+                      "series": label.replace("\\", ""), "t_s": round(float(x), 4),
+                      "value": round(float(v), 6), "unit": unit}
+                     for x, v in zip(tt, yy)]
+    r = {k: _rms(est, gt, m) for k, m in regimes.items()}
+    r["gap"] = _gap_pct(gt)
+    rms_report[axis] = r
+    ax.text(0.005, 0.97, f"estimator RMS vs truth:  standing {r['standing']:.4f}, "
+            f"walking {r['walking']:.4f} {unit}  (truth missing {r['gap']:.0f}% of samples)",
+            transform=ax.transAxes, va="top",
+            ha="left", fontsize=6, color=TRACK_STYLE["estimate"][0])
+    ax.set_ylabel(f"{sym} ({unit})")
+    ax.margins(y=0.22)
+  axes[-1].set_xlabel("time since Run start (s)")
+  fig.suptitle(f"velocity tracking vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
+               fontsize=8)
+  bottom_legend(fig, [_style_handle("command", "operator command"),
+                      _style_handle("estimate", "onboard estimate / gyro"),
+                      _style_handle("truth", "motion-capture ground truth")],
+                ncol=3, height=0.85 / figsize[1])       # a 0.85 in band under the axes at any figure height
+  fig.text(0.5, 0.78 / figsize[1], note, ha="center", va="top", fontsize=5.6,
+           color="0.35", linespacing=1.6)
+  fig.subplots_adjust(top=0.93)
+  return fig, rows, rms_report
 
 
 def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
@@ -867,66 +988,14 @@ def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
   the deliverable; it is split by _Regime_, never pooled.
   """
   b = pick_mocap_run(bundles, run=run)
-  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz",
-                                      "est_v_compl_x", "est_v_compl_y", "est_gyro_z"])
-  t = df["t"].to_numpy(float)
-  G = read_mocap(b, t)
-  walk = walking_mask(df[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
-  regimes = {"walking": walk, "standing": ~walk}
-
-  # The wz panel is a different test from the other two and the labels say so: est_v_compl is
-  # a fused ESTIMATE under scrutiny, while the gyro is a direct rate measurement, so its
-  # agreement with capture checks the FRAME alignment, not estimator drift. One shared
-  # legend entry would claim three estimator tests where there are two.
-  panels = [
-    ("vx", "cmd_vx", "est_v_compl_x", "gt_vx", "m/s", "$v_x$",
-     "onboard estimate (fused leg odometry + IMU)"),
-    ("vy", "cmd_vy", "est_v_compl_y", "gt_vy", "m/s", "$v_y$",
-     "onboard estimate (fused leg odometry + IMU)"),
-    ("wz", "cmd_wz", "est_gyro_z", "gt_wz", "rad/s", "$\\omega_z$",
-     "gyro $z$ (a direct measurement, not an estimate)"),
-  ]
-  fig, axes = plt.subplots(3, 1, figsize=(FIG_W, 4.4), sharex=True)
-  rows = {}
-  rms_report = {}
-  for ax, (axis, cmd_c, est_c, gt_c, unit, sym, est_name) in zip(axes, panels):
-    est, gt = df[est_c].to_numpy(float), G[gt_c]
-    series = (("operator command", df[cmd_c].to_numpy(float), "0.25", "--", 0.8),
-              (est_name, est, "#D55E00", "-", 0.7),
-              ("motion-capture ground truth", gt, "#0072B2", "-", 0.7))
-    rows[axis] = []
-    for label, y, colr, ls, lw in series:
-      tt, yy = envelope_downsample(t - t[0], y, downsample)
-      ax.plot(tt, yy, color=colr, linestyle=ls, linewidth=lw, alpha=0.9,
-              label=label if ax is axes[0] else None)
-      rows[axis] += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                      "series": label.replace("\\", ""), "t_s": round(float(x), 4),
-                      "value": round(float(v), 6), "unit": unit}
-                     for x, v in zip(tt, yy)]
-    r = {k: _rms(est, gt, m) for k, m in regimes.items()}
-    rms_report[axis] = r
-    ax.text(0.005, 0.97, f"estimator RMS vs truth:  standing {r['standing']:.4f}, "
-            f"walking {r['walking']:.4f} {unit}", transform=ax.transAxes, va="top",
-            ha="left", fontsize=6, color="#D55E00")
-    ax.set_ylabel(f"{sym} ({unit})")
-    ax.margins(y=0.22)
-  axes[-1].set_xlabel("time since Run start (s)")
-  fig.suptitle(f"velocity tracking vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
-               fontsize=8)
-  bottom_legend(fig, [
-    plt.Line2D([], [], color="0.25", linestyle="--", label="operator command"),
-    plt.Line2D([], [], color="#D55E00", label="onboard estimate / gyro"),
-    plt.Line2D([], [], color="#0072B2", label="motion-capture ground truth")],
-    ncol=3, height=0.20)
-  fig.text(0.5, 0.185, _mocap_note(bundles), ha="center", va="top", fontsize=5.6,
-           color="0.35", linespacing=1.6)
-  fig.subplots_adjust(top=0.93)
+  fig, rows, rms_report = _track_fig(b, _mocap_note(bundles), downsample)
   for axis in rows:
     write_panel_csv(out_dir, name, axis,
                     ["policy", "run", "bundle", "series", "t_s", "value", "unit"], rows[axis])
   print(f"[PLOT] f_track: {b.policy} = {b.tag} ({b.dir.name}); estimator RMS vs truth "
         + "; ".join(f"{a} stand {v['standing']:.4f} walk {v['walking']:.4f}"
-                    for a, v in rms_report.items()))
+                    for a, v in rms_report.items())
+        + f"; truth missing {rms_report['vx']['gap']:.0f}%")
   # The RMS is the deliverable, and it is a property of each Run, not of the one drawn --
   # printed for every Run that has ground truth so a single figure does not become the
   # only place the number exists.
@@ -939,12 +1008,42 @@ def fig_track(bundles, out_dir, name="f_track", run=None, downsample=True):
     OG = read_mocap(o, ot)
     ow = walking_mask(od[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
     txt = []
-    for axis, _c, est_c, gt_c, _u, _s, _n in panels:
+    for axis, _c, est_c, gt_c, _u, _s, _n in TRACK_PANELS:
       e, g = od[est_c].to_numpy(float), OG[gt_c]
       txt.append(f"{axis} stand {_rms(e, g, ~ow):.4f} walk {_rms(e, g, ow):.4f}")
     print(f"[PLOT] f_track: (not drawn) {o.policy} = {o.tag} ({o.dir.name}); "
-          "estimator RMS vs truth " + "; ".join(txt))
+          "estimator RMS vs truth " + "; ".join(txt)
+          + f"; truth missing {_gap_pct(OG['gt_vx']):.0f}%")
   return save_pgf(fig, out_dir, name)
+
+
+def fig_track_runs(bundles, out_dir, downsample=True):
+  """One tracking figure per Run that has ground truth, each its own PDF, all in `out_dir`
+  (nothing overlaid), plus `track_runs_summary.csv` with the RMS and the capture gap per Run.
+  For showing a supervisor: the same three-panel figure as f_track, minus the thesis sidecars."""
+  out_dir.mkdir(parents=True, exist_ok=True)
+  summary = []
+  for b in bundles:
+    if b.mocap is None:
+      continue
+    fig, _rows, rms = _track_fig(b, f"Run bundle {tex(b.dir.name)}", downsample,
+                                 figsize=TRACKRUNS_SIZE)
+    path = out_dir / f"{b.dir.name}.pdf"
+    fig.savefig(path)
+    plt.close(fig)
+    summary.append({"bundle": b.dir.name, "policy": b.policy, "run": b.tag,
+                    "truth_missing_pct": round(rms["vx"]["gap"], 1),
+                    **{f"rms_{a}_{k}": round(v[k], 5) for a, v in rms.items()
+                       for k in ("standing", "walking")}})
+    print(f"[PLOT] wrote {path}")
+  if not summary:
+    raise SystemExit("no Run has mocap_aligned.csv")
+  with open(out_dir / "track_runs_summary.csv", "w", newline="") as fh:
+    w = csv.DictWriter(fh, fieldnames=list(summary[0]))
+    w.writeheader()
+    w.writerows(summary)
+  print(f"[PLOT] {len(summary)} tracking PDF(s) + track_runs_summary.csv in {out_dir}")
+  return out_dir
 
 
 # ================================================================= f_stand ====
@@ -994,6 +1093,13 @@ def fig_stand(bundles, cad_rows, out_dir, name="f_stand", min_seg_s=STAND_MIN_SE
     col = policy_color(b.policy)
     disp = []
     for si, blk in enumerate(segs):
+      hold_s = float(t[blk[-1]] - t[blk[0]])
+      # A capture dropout leaves NaN in the position stream, and the displacement is taken
+      # from the first sample, so one NaN there voided the whole Run. Keep the captured
+      # samples only: net displacement between the first and last of them.
+      blk = blk[np.isfinite(G["gt_px"][blk]) & np.isfinite(G["gt_py"][blk])]
+      if len(blk) < 2:
+        continue
       x = G["gt_px"][blk] - G["gt_px"][blk[0]]
       y = G["gt_py"][blk] - G["gt_py"][blk[0]]
       # A path is decimated by INDEX, not by the envelope: min/max on x and y separately
@@ -1004,7 +1110,7 @@ def fig_stand(bundles, cad_rows, out_dir, name="f_stand", min_seg_s=STAND_MIN_SE
       d = float(np.hypot(x[-1], y[-1]))
       disp.append(d)
       path_rows += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name, "segment": si,
-                     "hold_s": round(float(t[blk[-1]] - t[blk[0]]), 2),
+                     "hold_s": round(hold_s, 2),
                      "x_m": round(float(xv), 5), "y_m": round(float(yv), 5)}
                     for xv, yv in zip(x[k], y[k])]
     floor = ((by_bundle.get(b.dir.name, {}).get("base") or {}).get("floor_m_s"))
@@ -1012,16 +1118,21 @@ def fig_stand(bundles, cad_rows, out_dir, name="f_stand", min_seg_s=STAND_MIN_SE
     sib = [o for o in have if o.policy == b.policy]
     dx = (sib.index(b) - 0.5 * (len(sib) - 1)) * (0.30 / max(len(sib) - 1, 1))
     total = float(np.sum(disp)) if disp else float("nan")
-    axd.plot(xpos + dx, total, marker="o", markersize=4.0, color=col, zorder=3)
-    if floor is not None:
+    axd.plot(xpos + dx, total, marker=chain_style(b.policy)["marker"], markersize=4.0,
+             color=col, zorder=3)
+    # a label per Run is legible for a few Runs per policy and a smear for five; a Run whose
+    # floor could not be measured (too little standing at rest) is unlabelled, never "nan"
+    if floor is not None and np.isfinite(floor) and len(sib) <= 3:
       axd.annotate(f"{floor:.4f} m/s", (xpos + dx, total), textcoords="offset points",
                    xytext=(0, 6), ha="center", fontsize=5.6, color=col)
     disp_rows.append({"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                      "n_segments": len(segs), "min_segment_s": min_seg_s,
+                      "n_segments": len(disp), "n_segments_no_truth": len(segs) - len(disp),
+                      "min_segment_s": min_seg_s, "truth_missing_pct": round(_gap_pct(G["gt_px"]), 1),
                       "total_displacement_m": round(total, 5),
                       "max_segment_displacement_m": round(float(max(disp)), 5) if disp else "",
                       "residual_speed_m_s": floor if floor is not None else ""})
-    print(f"[PLOT] f_stand: {b.policy} {b.tag}: {len(segs)} hold(s) >= {min_seg_s:g} s, "
+    print(f"[PLOT] f_stand: {b.policy} {b.tag}: {len(disp)}/{len(segs)} hold(s) >= {min_seg_s:g} s "
+          f"with truth ({_gap_pct(G['gt_px']):.0f}% of samples missing), "
           f"total drift {total:.3f} m, residual speed {floor}")
 
   axp.axhline(0, color="0.8", linewidth=0.5)
@@ -1038,18 +1149,106 @@ def fig_stand(bundles, cad_rows, out_dir, name="f_stand", min_seg_s=STAND_MIN_SE
   axd.margins(y=0.3)
   bottom_legend(fig, policy_handles(policies), ncol=len(policies), height=0.30)
   fig.text(0.5, 0.275, _mocap_note(bundles) + "\nresidual speed is the MEASURED floor from "
-           "analyze\\_cadence\\_settling.py (base.floor\\_m\\_s), not re-derived here",
+           "analyze\\_cadence\\_settling.py (base.floor\\_m\\_s), not re-derived here; labelled for "
+           "policies with at most 3 Runs, every value is in the panel CSV and in f\\_seedband",
            ha="center", va="top", fontsize=5.6, color="0.35", linespacing=1.6)
   write_panel_csv(out_dir, name, "path",
                   ["policy", "run", "bundle", "segment", "hold_s", "x_m", "y_m"], path_rows)
   write_panel_csv(out_dir, name, "displacement",
-                  ["policy", "run", "bundle", "n_segments", "min_segment_s",
-                   "total_displacement_m", "max_segment_displacement_m",
+                  ["policy", "run", "bundle", "n_segments", "n_segments_no_truth",
+                   "min_segment_s", "truth_missing_pct", "total_displacement_m", "max_segment_displacement_m",
                    "residual_speed_m_s"], disp_rows)
   return save_pgf(fig, out_dir, name)
 
 
 # ================================================================== f_hier ====
+
+def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
+  """HL target vs LL achieved vs ground truth for one Run: four panels (vx, vy, wz, and the
+  |V*| saturation). -> (figure, per-panel rows, saturation rows, info for the summary)."""
+  hdf = pd.read_csv(b.hrl)
+  th = hdf["t"].to_numpy(float)
+  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz", "est_gyro_z"])
+  t = df["t"].to_numpy(float)
+  G = read_mocap(b, t)
+  fire = _window_starts(hdf)
+  ll_label = f"LL achieved ({tex(b.base_estimator)}, window-latched)"
+  gyro_label = "LL achieved (gyro, direct measurement)"
+
+  fig, axes = plt.subplots(4, 1, figsize=figsize, sharex=True)
+  rows = {}
+  # wz has no counterpart in the base-estimator bank (vx/vy only, safety_logger.h) --
+  # est_gyro_z is a direct torso-IMU rate measurement, not a filtered "arm", and is read
+  # straight off `df` at the flight recorder's own rate rather than window-latched off
+  # `hdf`/`fire` like lo_vx/lo_vy: there is no HL window to latch it to.
+  panels = [("vx", "cmd_vx", "tgt0", "lo_vx", "gt_vx", "m/s"),
+            ("vy", "cmd_vy", "tgt1", "lo_vy", "gt_vy", "m/s"),
+            ("wz", "cmd_wz", "tgt2", "est_gyro_z", "gt_wz", "rad/s")]
+  for ax, (axis, cmd_c, tgt_c, lo_c, gt_c, unit) in zip(axes, panels):
+    rows[axis] = []
+    drawn = [("operator command", t - t[0], df[cmd_c].to_numpy(float), "command", {}),
+             ("HL target V*", th - t[0], hdf[tgt_c].to_numpy(float), "target", {})]
+    if axis == "wz":
+      if lo_c in df:
+        drawn.append((gyro_label, t - t[0], df[lo_c].to_numpy(float), "estimate", {}))
+      else:
+        ax.text(0.005, 0.03, "no gyro column in this flight recorder (with_estimator off)",
+                transform=ax.transAxes, fontsize=5.6, color="#D55E00", va="bottom")
+    elif lo_c and lo_c in hdf:
+      drawn.append((ll_label, th[fire] - t[0],
+                    hdf[lo_c].to_numpy(float)[fire], "estimate",
+                    dict(drawstyle="steps-post")))
+    drawn.append(("motion-capture ground truth", t - t[0], G[gt_c], "truth", {}))
+    for label, tx, y, kind, kw in drawn:
+      tt, yy = envelope_downsample(tx, y, downsample)
+      # The z-order in TRACK_STYLE puts the ground truth on top and the command underneath:
+      # the HL target swings wider than anything the robot did, and under equal weights it
+      # simply paints over the reference.
+      colr, ls, lw, z = TRACK_STYLE[kind]
+      ax.plot(tt, yy, color=colr, linestyle=ls, linewidth=lw, zorder=z, alpha=0.9,
+              dash_capstyle="round", **kw)
+      rows[axis] += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
+                      "series": label, "t_s": round(float(x), 4),
+                      "value": round(float(v), 6), "unit": unit}
+                     for x, v in zip(tt, yy)]
+    ax.set_ylabel(f"{axis} ({unit})")
+    ax.margins(y=0.2)
+
+  # Saturation: |V*| against the bound the session actually used. The baked `goal_scale`
+  # is a checkpoint property and is not in the log, so the observed bound is used, exactly
+  # as plot_deploy_logs.view_goaltrack does -- and it is labelled as observed.
+  sat_rows, sat_pct = [], {}
+  walk_h = walking_mask(hdf[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
+  for tgt_c, axis, colr in (("tgt0", "vx", "#0072B2"), ("tgt1", "vy", "#D55E00")):
+    a = np.abs(hdf[tgt_c].to_numpy(float))
+    scale = float(np.round(a.max(), 2)) or 1.0
+    sat = float((a[walk_h] > 0.98 * scale).mean()) if walk_h.any() else float("nan")
+    sat_pct[axis] = 100 * sat
+    tt, yy = envelope_downsample(th - t[0], a / scale, downsample)
+    axes[3].plot(tt, yy, color=colr, linewidth=0.7, alpha=0.9,
+                 label=f"$|V^*|$ {axis} / {scale:g} (walk saturated {100 * sat:.0f}%)")
+    sat_rows += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
+                  "series": f"|tgt_{axis}|/observed_bound", "t_s": round(float(x), 4),
+                  "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
+                 for x, v in zip(tt, yy)]
+  axes[3].axhline(1.0, color="red", linestyle=":", linewidth=0.7)
+  axes[3].set_ylabel("fraction of bound")
+  axes[3].legend(fontsize=5.6, loc="upper right", framealpha=0.9)
+  axes[3].set_xlabel("time since Run start (s)")
+  fig.suptitle(f"HL goal vs LL delivery vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
+               fontsize=8)
+  bottom_legend(fig, [
+    _style_handle("command", "operator command"),
+    _style_handle("target", "HL target V*"),
+    _style_handle("estimate", f"LL achieved ({tex(b.base_estimator)} vx/vy / gyro wz)"),
+    _style_handle("truth", "motion-capture ground truth")],
+    ncol=2, height=1.0 / figsize[1])          # a 1.0 in band under the axes at any figure height
+  fig.text(0.5, 0.925 / figsize[1], note, ha="center", va="top", fontsize=5.6,
+           color="0.35", linespacing=1.6)
+  fig.subplots_adjust(top=0.94)
+  info = {"fires": len(fire), "sat_pct": sat_pct, "gap": _gap_pct(G["gt_vx"])}
+  return fig, rows, sat_rows, info
+
 
 def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
   """HL intent vs LL delivery vs ground truth -- the hierarchy's error decomposition.
@@ -1066,92 +1265,44 @@ def fig_hier(bundles, out_dir, name="f_hier", run=None, downsample=True):
   label below reads `b.base_estimator` (from the Run's own meta.json) rather than assuming.
   """
   b = pick_mocap_run(bundles, need_hrl=True, run=run)
-  hdf = pd.read_csv(b.hrl)
-  th = hdf["t"].to_numpy(float)
-  df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz", "est_gyro_z"])
-  t = df["t"].to_numpy(float)
-  G = read_mocap(b, t)
-  fire = _window_starts(hdf)
-  ll_label = f"LL achieved ({tex(b.base_estimator)}, window-latched)"
-  gyro_label = "LL achieved (gyro, direct measurement)"
-
-  fig, axes = plt.subplots(4, 1, figsize=(FIG_W, 5.0), sharex=True)
-  rows = {}
-  # wz has no counterpart in the base-estimator bank (vx/vy only, safety_logger.h) --
-  # est_gyro_z is a direct torso-IMU rate measurement, not a filtered "arm", and is read
-  # straight off `df` at the flight recorder's own rate rather than window-latched off
-  # `hdf`/`fire` like lo_vx/lo_vy: there is no HL window to latch it to.
-  panels = [("vx", "cmd_vx", "tgt0", "lo_vx", "gt_vx", "m/s"),
-            ("vy", "cmd_vy", "tgt1", "lo_vy", "gt_vy", "m/s"),
-            ("wz", "cmd_wz", "tgt2", "est_gyro_z", "gt_wz", "rad/s")]
-  for ax, (axis, cmd_c, tgt_c, lo_c, gt_c, unit) in zip(axes, panels):
-    rows[axis] = []
-    drawn = [("operator command", t - t[0], df[cmd_c].to_numpy(float), "0.25", "--", {}),
-             ("HL target V*", th - t[0], hdf[tgt_c].to_numpy(float), "#009E73", "-", {})]
-    if axis == "wz":
-      if lo_c in df:
-        drawn.append((gyro_label, t - t[0], df[lo_c].to_numpy(float), "#D55E00", "-", {}))
-      else:
-        ax.text(0.005, 0.03, "no gyro column in this flight recorder (with_estimator off)",
-                transform=ax.transAxes, fontsize=5.6, color="#D55E00", va="bottom")
-    elif lo_c and lo_c in hdf:
-      drawn.append((ll_label, th[fire] - t[0],
-                    hdf[lo_c].to_numpy(float)[fire], "#D55E00", "-",
-                    dict(drawstyle="steps-post")))
-    drawn.append(("motion-capture ground truth", t - t[0], G[gt_c], "#0072B2", "-", {}))
-    for k, (label, tx, y, colr, ls, kw) in enumerate(drawn):
-      tt, yy = envelope_downsample(tx, y, downsample)
-      # Ground truth is drawn last and heaviest: the HL target swings wider than anything
-      # the robot did, and under equal weights it simply paints over the reference.
-      truth = label.startswith("motion-capture")
-      ax.plot(tt, yy, color=colr, linestyle=ls, alpha=1.0 if truth else 0.75,
-              linewidth=0.85 if truth else 0.6, zorder=4 if truth else 2 + k, **kw)
-      rows[axis] += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                      "series": label, "t_s": round(float(x), 4),
-                      "value": round(float(v), 6), "unit": unit}
-                     for x, v in zip(tt, yy)]
-    ax.set_ylabel(f"{axis} ({unit})")
-    ax.margins(y=0.2)
-
-  # Saturation: |V*| against the bound the session actually used. The baked `goal_scale`
-  # is a checkpoint property and is not in the log, so the observed bound is used, exactly
-  # as plot_deploy_logs.view_goaltrack does -- and it is labelled as observed.
-  sat_rows = []
-  walk_h = walking_mask(hdf[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
-  for tgt_c, axis, colr in (("tgt0", "vx", "#0072B2"), ("tgt1", "vy", "#D55E00")):
-    a = np.abs(hdf[tgt_c].to_numpy(float))
-    scale = float(np.round(a.max(), 2)) or 1.0
-    sat = float((a[walk_h] > 0.98 * scale).mean()) if walk_h.any() else float("nan")
-    tt, yy = envelope_downsample(th - t[0], a / scale, downsample)
-    axes[3].plot(tt, yy, color=colr, linewidth=0.7, alpha=0.9,
-                 label=f"$|V^*|$ {axis} / {scale:g} (walk saturated {100 * sat:.0f}%)")
-    sat_rows += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                  "series": f"|tgt_{axis}|/observed_bound", "t_s": round(float(x), 4),
-                  "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
-                 for x, v in zip(tt, yy)]
-  axes[3].axhline(1.0, color="red", linestyle=":", linewidth=0.7)
-  axes[3].set_ylabel("fraction of bound")
-  axes[3].legend(fontsize=5.6, loc="upper right", framealpha=0.9)
-  axes[3].set_xlabel("time since Run start (s)")
-  fig.suptitle(f"HL goal vs LL delivery vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
-               fontsize=8)
-  bottom_legend(fig, [
-    plt.Line2D([], [], color="0.25", linestyle="--", label="operator command"),
-    plt.Line2D([], [], color="#009E73", label="HL target V*"),
-    plt.Line2D([], [], color="#D55E00",
-               label=f"LL achieved ({tex(b.base_estimator)} vx/vy / gyro wz)"),
-    plt.Line2D([], [], color="#0072B2", label="motion-capture ground truth")],
-    ncol=2, height=0.20)
-  fig.text(0.5, 0.185, _mocap_note(bundles), ha="center", va="top", fontsize=5.6,
-           color="0.35", linespacing=1.6)
-  fig.subplots_adjust(top=0.94)
+  fig, rows, sat_rows, info = _hier_fig(b, _mocap_note(bundles), downsample)
   for axis in rows:
     write_panel_csv(out_dir, name, axis,
                     ["policy", "run", "bundle", "series", "t_s", "value", "unit"], rows[axis])
   write_panel_csv(out_dir, name, "saturation",
                   ["policy", "run", "bundle", "series", "t_s", "value", "unit"], sat_rows)
-  print(f"[PLOT] f_hier: {b.policy} = {b.tag} ({b.dir.name}), {len(fire)} HL fires")
+  print(f"[PLOT] f_hier: {b.policy} = {b.tag} ({b.dir.name}), {info['fires']} HL fires")
   return save_pgf(fig, out_dir, name)
+
+
+def fig_hier_runs(bundles, out_dir, downsample=True):
+  """One HL-goal / LL-delivery / ground-truth figure per Run that has BOTH ground truth and
+  HRL telemetry (a flat A0 has no high level), each its own PDF in `out_dir`, plus
+  `hier_runs_summary.csv` (HL fires, walking saturation of |V*|, capture gap)."""
+  out_dir.mkdir(parents=True, exist_ok=True)
+  summary = []
+  for b in bundles:
+    if b.mocap is None or b.hrl is None:
+      continue
+    fig, _rows, _sat, info = _hier_fig(b, f"Run bundle {tex(b.dir.name)}", downsample,
+                                       figsize=HIERRUNS_SIZE)
+    path = out_dir / f"{b.dir.name}.pdf"
+    fig.savefig(path)
+    plt.close(fig)
+    summary.append({"bundle": b.dir.name, "policy": b.policy, "run": b.tag,
+                    "base_estimator": b.base_estimator, "hl_fires": info["fires"],
+                    "walk_saturated_vx_pct": round(info["sat_pct"]["vx"], 1),
+                    "walk_saturated_vy_pct": round(info["sat_pct"]["vy"], 1),
+                    "truth_missing_pct": round(info["gap"], 1)})
+    print(f"[PLOT] wrote {path}")
+  if not summary:
+    raise SystemExit("no Run has both mocap_aligned.csv and HRL telemetry")
+  with open(out_dir / "hier_runs_summary.csv", "w", newline="") as fh:
+    w = csv.DictWriter(fh, fieldnames=list(summary[0]))
+    w.writeheader()
+    w.writerows(summary)
+  print(f"[PLOT] {len(summary)} hierarchy PDF(s) + hier_runs_summary.csv in {out_dir}")
+  return out_dir
 
 
 # ================================================================= f_chain ====
@@ -1186,9 +1337,6 @@ CHAIN_ARMS = {                # hardware policy tag -> (deterministic bench json
 SIM_CONDITION = "base_p0"     # the unloaded baseline condition of each arm
 BRIDGE_DIR = "logs/sim_logs/chain"   # <tag>/<ts>.{walking,standing}.json, from --sim scoring
 BRIDGE_TAG = {"A1a": "A1a_s42"}      # the 09-14 tag names the same checkpoint
-CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": POLICY_COLOR["A0_DR_s123"], "A1a": POLICY_COLOR["A1a"],
-               "A1a_DR": POLICY_COLOR["A1a_DR_s123"],
-               "A1a_DR_cotcap": POLICY_COLOR["A1a_DR_cotcap_s42"]}
 STAGES = ["training bench", "bridge sim", "hardware"]
 
 # (key, axis label). Every panel has a training-bench point; cot and mech_power_w need
@@ -1213,17 +1361,6 @@ CHAIN_OMITTED = {
   "angular_momentum": "training-only Episode_Reward term; no sim-bench or hardware counterpart",
   "foot_slip / foot_clearance": "world-frame foot terms; no hardware observable",
 }
-
-
-def chain_style(label: str) -> dict:
-  """Colour by variant (A0, A0_DR, A1a, A1a_DR, A1a_DR_cotcap), marker by seed (o = 42,
-  triangle = 123), dashed when the hardware Run was loaded. Ten policies do not fit the
-  four-colour scheme the other figures use, and colour alone cannot carry two seeds."""
-  base = label.split(" +")[0]
-  head, _, seed = base.rpartition("_s")
-  variant, seed = (head, seed) if seed.isdigit() else (base, "42")
-  return {"color": CHAIN_COLOR.get(variant, "0.4"), "linestyle": "--" if " +" in label else "-",
-          "marker": "^" if seed == "123" else "o"}
 
 
 def _hw_jacc_legs(b: Bundle, regime: str) -> float:
@@ -1428,11 +1565,6 @@ SEED_SIM = [("A1a", "nodr", "nodr_bench.json"), ("A1a_DR", "hmem", "all_bench.js
             ("H-adapt", "hadapt", "all_bench.json")]
 
 
-def _variant_seed(tag: str):
-  head, _, seed = tag.rpartition("_s")
-  return (head, seed) if seed.isdigit() else (tag, "42")
-
-
 def fig_seedband(bundles, cad_rows, out_dir, name="f_seedband", root=REPO):
   """Does payload domain randomisation hurt the policy on the robot? One point per unloaded
   _Run_, coloured by variant, triangle = seed 123, hollow = the 2026-09-14 session.
@@ -1608,11 +1740,15 @@ def main() -> int:
                        f"(default: {BUNDLE_GLOB!r}, the 2026-09-14 session alone); pass "
                        "several to pool bundles from more than one hardware session, e.g. "
                        "the B0 seed-band runs")
-  ap.add_argument("--out", default=None, help="output directory (default: <root>/figures)")
+  ap.add_argument("--out", default=None, help="output directory (default: <root>/figures/default_figures)")
   ap.add_argument("--figures", default=None,
-                  help="comma-separated subset of: " + ",".join(FIGURES))
+                  help="comma-separated subset of: " + ",".join(FIGURES)
+                       + "; opt-in extras: " + ",".join(EXTRA_FIGURES) + " (one PDF per Run with "
+                       "ground truth, into --out/tracking_runs and --out/hier_runs, reading "
+                       "every session)")
   ap.add_argument("--cadence-json", default=None,
-                  help=f"analyze_cadence_settling.py output (default: {CADENCE_JSON})")
+                  help="analyze_cadence_settling.py output; one file only (default: every "
+                       f"{CADENCE_GLOB}, merged by bundle name, newest wins)")
   ap.add_argument("--run", default=None,
                   help="f_track / f_hier: draw this Run (matches the run tag or the bundle "
                        "directory name) instead of the mocap Run with the most walking time")
@@ -1621,8 +1757,8 @@ def main() -> int:
                        f"(default {STAND_MIN_SEG_S:g} s)")
   ap.add_argument("--chain-regime", default="walking", choices=["walking", "standing"],
                   help="f_chain: which hardware regime forms the third point (never pooled)")
-  ap.add_argument("--max-points-per-line", type=int, default=4000,
-                  help="envelope-decimate any time series longer than this (default 4000; "
+  ap.add_argument("--max-points-per-line", type=int, default=None,
+                  help="envelope-decimate any time series longer than this (default 4000, 20000 for trackruns; "
                        "keeps the .pgf small enough to recompile with the thesis)")
   ap.add_argument("--no-downsample", action="store_true",
                   help="disable the min/max-envelope decimation on the time-series figures")
@@ -1634,25 +1770,35 @@ def main() -> int:
 
   root = Path(args.root)
   out_dir = Path(args.out) if args.out else root / "figures"
-  globs = args.bundles if args.bundles else [BUNDLE_GLOB]
+  names = args.figures.split(",") if args.figures else list(FIGURES)
+  globs = args.bundles or ([TRACKRUNS_GLOB] if set(names) <= set(EXTRA_FIGURES) else [BUNDLE_GLOB])
   bundles = load_bundles(root, globs)
   if not bundles:
     raise SystemExit("no run bundles under " + ", ".join(str(root / g) for g in globs))
   print(f"[PLOT] {len(bundles)} Run bundle(s): " + ", ".join(
     f"{b.tag}={b.policy}" for b in bundles))
 
-  cad_path = Path(args.cadence_json) if args.cadence_json else root / CADENCE_JSON
-  cad_rows = json.loads(cad_path.read_text()) if cad_path.exists() else []
-  names = args.figures.split(",") if args.figures else list(FIGURES)
+  cad_rows = load_cadence(root, args.cadence_json)
+  no_cad = [b.dir.name for b in bundles if b.dir.name not in {r["bundle"] for r in cad_rows}]
+  if cad_rows and no_cad:
+    print(f"[PLOT] NOTE: {len(no_cad)} Run(s) have no row in the cadence file(s) and are blank "
+          "in f_cadence/f_settle/f_seedband/f_stand (run scripts/analyze_cadence_settling.py "
+          "on them): " + ", ".join(no_cad))
+  grey = sorted({b.policy for b in bundles if policy_color(b.policy) == "0.4"})
+  if grey:
+    print(f"[PLOT] NOTE: no palette colour for {', '.join(grey)}; drawn grey "
+          "(add the variant to CHAIN_COLOR)")
   ds = not args.no_downsample
-  set_decimation(args.max_points_per_line)
+  # a PDF for people is zoomed into, so trackruns keeps five times the thesis figures' points
+  set_decimation(args.max_points_per_line or (20000 if set(names) <= set(EXTRA_FIGURES) else 4000))
 
   written = []
   for n in names:
-    if n not in FIGURES:
-      raise SystemExit(f"unknown figure '{n}'; choices: {list(FIGURES)}")
+    if n not in FIGURES + EXTRA_FIGURES:
+      raise SystemExit(f"unknown figure '{n}'; choices: {list(FIGURES + EXTRA_FIGURES)}")
     if n in ("cadence", "settle", "stand", "seedband") and not cad_rows:
-      raise SystemExit(f"f_{n} needs {cad_path} (run scripts/analyze_cadence_settling.py)")
+      raise SystemExit(f"f_{n} needs a cadence file ({CADENCE_GLOB}; run "
+                       "scripts/analyze_cadence_settling.py)")
     if n == "cadence":
       written.append(fig_cadence(bundles, cad_rows, out_dir))
     elif n == "settle":
@@ -1674,6 +1820,10 @@ def main() -> int:
       written.append(fig_chain(bundles, out_dir, regime=args.chain_regime, root=root))
     elif n == "seedband":
       written.append(fig_seedband(bundles, cad_rows, out_dir, root=root))
+    elif n == "trackruns":
+      fig_track_runs(bundles, out_dir / EXTRA_DIR[n], downsample=ds)
+    elif n == "hierruns":
+      fig_hier_runs(bundles, out_dir / EXTRA_DIR[n], downsample=ds)
 
   print(f"[PLOT] {len(written)} figure(s) in {out_dir}")
   if args.verify_csv:

@@ -7,7 +7,7 @@ that recreates a real past defect; the suite MUST go red, and the named test mus
 among the failures.
 
 Run after adding tests or changing the code they guard:
-    python scripts/check_test_sensitivity.py [substring-of-test-name]
+    python scripts/check_test_sensitivity.py [substring of test name, label or source file]
 
 It edits source files in place and restores them. It REFUSES to restore if a file
 changed underneath it (concurrent session), leaving the mutation in place and saying
@@ -38,6 +38,7 @@ BSN = REPO / "scripts/bridge_session.py"
 PPS = REPO / "scripts/period_payload_stats.py"
 PI = REPO / "src/tasks/velocity/mdp/payload_inertia.py"
 BFR = REPO / "scripts/bench_flight_recorder.py"
+PTF = REPO / "scripts/plot_thesis_figures.py"
 SA = REPO / "scripts/safety_analyzer.py"
 RLC = REPO / "src/tasks/velocity/config/h1_2_a1/rl_cfg.py"
 SJH = REPO / "scripts/score_joint_hold.py"
@@ -46,6 +47,7 @@ ENCH = REPO / "deploy/robots/h1_2/include/hrl/adapt_encoder.h"
 A0CPP = REPO / "deploy/robots/h1_2/src/State_RLBase.cpp"
 IOCH = REPO / "deploy/robots/h1_2/include/obs_contract.h"
 ACS = REPO / "scripts/analyze_cadence_settling.py"
+SSA = REPO / "scripts/score_stand_attitude.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -476,6 +478,58 @@ MUTATIONS = [
    '    tf = F["t"]',
    "test_a_slow_tick_counter_still_pairs_the_telemetry_end_to_end"),
 
+  # the 2026-09-16 session first drew grey, empty figures with no error: a cadence file pinned to
+  # another session, a colour table keyed on full tags, one NaN in the truth voiding a whole RMS
+  ("cadence file pinned to one session (every Run of another one blank in 4 figures)", PTF,
+   'CADENCE_GLOB = "data/*/cadence_settling.json"',
+   'CADENCE_GLOB = "data/2026-09-14-hardware-session/cadence_settling.json"',
+   "test_cadence_rows_merge_across_sessions_newest_wins"),
+
+  ("cadence files merged oldest-last (the older session re-scores the newer one)", PTF,
+   "sorted(root.glob(CADENCE_GLOB))",
+   "sorted(root.glob(CADENCE_GLOB), reverse=True)",
+   "test_cadence_rows_merge_across_sessions_newest_wins"),
+
+  ("palette keyed on the full tag again (every seed nobody listed falls back to grey)", PTF,
+   "  return (head, seed) if seed.isdigit() else (tag, \"42\")",
+   "  return (tag, \"42\")",
+   "test_every_session_tag_has_a_palette_colour"),
+
+  ("policies sorted with the seed ignored", PTF,
+   "return (idx, variant, int(seed), kg)",
+   "return (idx, variant, 0, kg)",
+   "test_sort_key_orders_variant_then_seed_then_load"),
+
+  ("RMS against truth no longer skips the dropout samples (one NaN voids the regime)", PTF,
+   "  m = m & np.isfinite(a) & np.isfinite(b)\n",
+   "  m = m\n",
+   "test_rms_ignores_samples_without_truth"),
+
+  ("f_stand differences the hold from its first sample, captured or not", PTF,
+   '      blk = blk[np.isfinite(G["gt_px"][blk]) & np.isfinite(G["gt_py"][blk])]',
+   "      blk = blk",
+   "test_stand_drift_survives_a_dropout_at_the_start_of_the_hold"),
+
+  ("mocap footnote names an excuse even when every Run has a capture", PTF,
+   'not captured or rejected as corrupt)." if miss else "")',
+   'not captured or rejected as corrupt)." if True else "")',
+   "test_mocap_note_does_not_carry_another_sessions_excuse"),
+
+  ("per-run tracking export includes Runs that have no ground truth", PTF,
+   "    if b.mocap is None:\n      continue\n    fig, _rows, rms",
+   "    if False:\n      continue\n    fig, _rows, rms",
+   "test_track_runs_writes_one_pdf_per_run_with_truth_and_skips_the_rest"),
+
+  ("per-run hierarchy export includes Runs with no HRL telemetry (a flat policy has no HL)", PTF,
+   "    if b.mocap is None or b.hrl is None:",
+   "    if b.mocap is None:",
+   "test_hier_runs_need_both_ground_truth_and_hrl_telemetry"),
+
+  ("operator command drawn dashed again (invisible under the estimate)", PTF,
+   'TRACK_STYLE = {"command": ("0.1", "-", 1.3, 2),',
+   'TRACK_STYLE = {"command": ("0.1", "--", 1.3, 2),',
+   "test_track_line_styles_keep_all_three_series_distinguishable"),
+
   ("pairing back to a forward start-time window (encodes operator timing, broke at +125 s)", BFR,
    "        overlap = (min(end_f, end_a) - max(start_f, start_a)).total_seconds()",
    "        overlap = 120.0 - (start_a - start_f).total_seconds()",
@@ -764,6 +818,43 @@ MUTATIONS = [
    "if self.num_steps_per_env % self.c != 0:",
    "if False and self.num_steps_per_env % self.c != 0:",
    "test_invalid_combination_raises_at_construction"),
+
+  # docs/adr/0006 (2026-08-03): a held run reports the SAFETY FILTER's posture, not the
+  # policy's. The original -0.0913 rad stand mean was retracted to -0.0717 for exactly this.
+  ("stand attitude scored over safety-held rows", SSA,
+   "z = (cmd < CMD_STILL) & (d.alpha.values == 0)", "z = (cmd < CMD_STILL)",
+   "test_held_rows_are_excluded"),
+
+  # The ADR-0006 confound itself: motion moves the reading, so an unfiltered mean ranks
+  # policies by how much they fidget. Reintroducing it recreates the 2026-09-21 over-claim.
+  ("stand pitch not dq-filtered (the ADR-0006 confound, reintroduced)", SSA,
+   "float(p[still].mean())", "float(p.mean())",
+   "test_pitch_is_dq_filtered"),
+
+  # `hold_joint_ids` freezes waist+arms on hardware, so upper-body motion is not the
+  # policy's (`leg_only_action_rate`).
+  ("stillness computed over all 27 slots instead of the legs", SSA,
+   'dq = np.abs(d[[f"meas_dq{i}" for i in LEG_SLOTS]].values).max(axis=1)',
+   'dq = np.abs(d[[f"meas_dq{i}" for i in range(27)]].values).max(axis=1)',
+   "test_stillness_ignores_the_upper_body"),
+
+  # The sim bench splits regime at 0.1; ADR-0006's stand statistic is 0.05. Swapping them
+  # mixes walking rows into a stand mean.
+  ("zero-command gate widened to the bench regime threshold", SSA,
+   "CMD_STILL = 0.05", "CMD_STILL = 0.1",
+   "test_command_gate_is_the_adr_value_not_the_bench_regime_value"),
+
+  ("pitch sign convention inverted (backward lean reads positive)", SSA,
+   "2 * (w * y - z * x)", "2 * (z * x - w * y)",
+   "test_backward_lean_reads_negative"),
+
+  ("ADR-0006 confound table corrupted, so the slope understates the confound", SSA,
+   "[62.8, -3.97]", "[62.8, -5.97]",
+   "test_confound_slope_matches_the_adr_table"),
+
+  ("thin run scores a mean instead of failing closed", SSA,
+   "if z.sum() < MIN_ROWS:", "if z.sum() < 0:",
+   "test_a_thin_run_scores_nothing_rather_than_a_mean"),
 ]
 
 
@@ -787,7 +878,8 @@ def main() -> int:
 
   rows, bad = [], 0
   for label, path, old, new, expect in MUTATIONS:
-    if only and only not in expect:
+    # test name, label or source file -- so a whole tool's mutations can be run as a set
+    if only and not any(only in s for s in (expect, label, path.name)):
       continue
     src = path.read_text()
     if old not in src:

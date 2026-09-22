@@ -55,10 +55,10 @@ python scripts/analyze_cadence_settling.py \
     --bundles logs/robot_logs/2026_09_14-*/ logs/robot_logs/<YYYY_MM_DD>-*/ \
     --out data/<new-session>/cadence_settling.json
 
-# 6. figures over both sessions; --cadence-json is required (its default is the 09-14 file)
+# 6. figures over both sessions; every data/*/cadence_settling.json is merged by bundle name
+#    (newest wins), so no --cadence-json is needed. A Run with no row is named and left blank
 python scripts/plot_thesis_figures.py \
-    --bundles "logs/robot_logs/2026_09_14-*/" "logs/robot_logs/<YYYY_MM_DD>-*/" \
-    --cadence-json data/<new-session>/cadence_settling.json
+    --bundles "logs/robot_logs/2026_09_14-*/" "logs/robot_logs/<YYYY_MM_DD>-*/"
 ```
 
 Quick check of a new session before mocap is ready: run steps 4 and 6 only, with the new
