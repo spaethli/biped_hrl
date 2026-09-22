@@ -184,7 +184,14 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       # commands at eval. Play mode pins the OLD (3.0, 8.0) (h1_2 env_cfgs play block)
       # so historical aggregate benches stay comparable.
       resampling_time_range=(3.0, 20.0),
-      rel_standing_envs=0.05,
+      # 0.12 since 2026-09-22 (was 0.05): the A1a keeper's value, promoted to the SHARED
+      # base so A0 and A1 train on the same command distribution. Held at 0.05 the two
+      # architectures stood a different fraction of the time, which confounded every
+      # A1-vs-A0 standing ratio (see the standing-gap worklines). A0 anchors already exist
+      # at 0.12 (h1_2_velocity_v2/2026-09-14_a0_standing12_s42 + _s123), so nothing needs
+      # re-baselining. Play mode pins the OLD 0.05 (h1_2 env_cfgs play block) so historical
+      # aggregate benches stay comparable -- same rule as resampling_time_range above.
+      rel_standing_envs=0.12,
       heading_command=True,
       heading_control_stiffness=0.5,
       debug_vis=True,

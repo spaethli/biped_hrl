@@ -347,13 +347,15 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   ``0.99**8`` silently mismatched any c != 8). Set explicitly to override."""
   ll_task_reward_coef: float = 0.0
   """Blend of task reward into the LL intrinsic reward. 0 = pure HIRO."""
-  ll_action_rate_coef: float = 0.02
+  ll_action_rate_coef: float = 0.05
   """Weight on the whole-body action-rate penalty added to the LL intrinsic (ADR-0002); the
-  env ``action_rate_l2`` never reaches the goal-only LL otherwise. **0.02, NOT A0's 0.05**:
-  matching A0's 0.05 over-penalized A1's goal-only LL and spiked ``fell_over`` (~165); 0.02
-  gives ``fell_over``≈0 (the keeper) — see ``doc/hrl/A1_findings.md`` (posture/ar row). The
-  small divergence from A0's 0.05 is a deliberate A0-vs-A1 reward difference (note it in RQ2).
-  0 disables (clean A1-baseline ablation)."""
+  env ``action_rate_l2`` never reaches the goal-only LL otherwise. **0.05 = A0's weight, and
+  the A1a keeper's, since 2026-09-22.** Superseded history: at ADR-0002 time (bare LL, no
+  reward mirror) 0.05 over-penalized the goal-only LL and spiked ``fell_over`` (~165), so
+  0.02 was the default for a year. That no longer holds on the full-mirror A1a base - the
+  deployed keeper trains 0.05 at ``fell_over`` ~ 0 - so both the old value and the A0
+  divergence it used to create are gone. Matching A0 here REMOVES an RQ2 confound rather
+  than adding one. 0 disables (clean A1-baseline ablation)."""
   ll_posture_coef: float = 0.5
   """Weight on the deviation-from-default penalty added to the LL intrinsic: arms+waist
   (ADR-0002, deploy hygiene) **+ hip yaw/roll (2026-07-07)** — the goal space is heading-
@@ -391,7 +393,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   from ``ll_posture_weights``'s ``ankle_roll`` entry (4.0 default — the joint's range is
   only +-15 deg, far narrower than the shoulders, so it needs much less pull). Off by
   default (byte-identical to pre-arm-5 behavior)."""
-  ll_posture_all_joints: bool = False
+  ll_posture_all_joints: bool = True
   """WL-D: extends the LL posture anchor from the arms+waist+hip-yaw/roll subset (plus
   ankle_roll if ``ll_posture_anchor_ankle_roll``) to EVERY joint - the closest available
   analog to A0's ``pose``/``variable_posture`` term (A0's single largest reward, +0.835,
@@ -400,57 +402,57 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   action rate is arms-heavy (arms share 0.304 vs A0's 0.115). When True this SUPERSEDES
   both the subset list and ``ll_posture_anchor_ankle_roll`` (all joints already includes
   ankle roll). ``ll_posture_weights`` still applies on top of whichever set is anchored;
-  unmatched joints stay at 1.0. False by default (byte-identical to pre-existing
-  behavior)."""
-  ll_stand_still_coef: float = 0.0
+  unmatched joints stay at 1.0. **True by default since 2026-09-22 (the A1a keeper);**
+  set False to restore the pre-2026-09-22 subset-anchor behavior."""
+  ll_stand_still_coef: float = 1.0
   """WL-D arm 3 (2026-07-17): mirrors A0's ``stand_still`` term (joint deviation from
   default, gated ``|cmd| < command_threshold``) into the LL intrinsic - targets the
   "unsettled stepping" defect (the goal-only LL has no reason to fully stop stepping at
   a held near-zero command; the posture anchor above already pulls arms/waist/hips but
-  is always-on, not stand-gated). Reuses ``mdp.stand_still`` unmodified. 0 disables."""
-  ll_angmom_coef: float = 0.0
+  is always-on, not stand-gated). Reuses ``mdp.stand_still`` unmodified. 0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_angmom_coef: float = 0.025
   """WL-D arm 4a (2026-07-17): mirrors A0's ``angular_momentum_penalty`` (whole-body
   angular momentum, encourages natural counter-swing arm motion) into the LL intrinsic.
   Targets the arm_vel energy gap (0.37-0.58 vs A0's 0.14) directly - the LL never sees
-  this env term otherwise (``ll_task_reward_coef=0``). 0 disables."""
-  ll_footslip_coef: float = 0.0
+  this env term otherwise (``ll_task_reward_coef=0``). 0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_footslip_coef: float = 0.25
   """WL-D arm 4b (2026-07-17): mirrors A0's ``feet_slip`` (contact-time foot xy velocity
   penalty) into the LL intrinsic. Targets foot-quality/energy loss during stance.
-  0 disables."""
-  ll_footclear_coef: float = 0.0
+  0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_footclear_coef: float = 1.0
   """WL-D arm 4c (2026-07-17): mirrors A0's ``feet_clearance`` (deviation from the 0.10m
   swing-height target, velocity-weighted) into the LL intrinsic. Targets the WL-E
-  swing-clearance defect (A0-optB apex ~35% under target) at the LL level. 0 disables."""
-  ll_energy_coef: float = 0.0
+  swing-clearance defect (A0-optB apex ~35% under target) at the LL level. 0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_energy_coef: float = 0.05
   """WL-D arm 4d (2026-07-17): mirrors the new ``cost_of_transport_penalty`` (see
   ``mdp/rewards.py``, same term the A0+energy S4' control uses) into the LL intrinsic -
   the most direct mirror candidate, since it targets the CoT gap itself rather than a
-  proxy for it. 0 disables."""
-  ll_joint_acc_coef: float = 0.0
+  proxy for it. 0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_joint_acc_coef: float = 2.5e-7
   """WL-D (2026-07-24): mirror A0's ``joint_acc_l2`` (whole-body joint-acceleration L2, A0
   weight 2.5e-7) into the LL intrinsic - the one A0 smoothness term A1 never had (A0's
   2nd-largest penalty after ``action_rate_l2``). Targets the action-rate deploy gap
   (action-rate decomposition 2026-07-24: A1's twitch is a uniform arms-heavy floor +38% over
   A0, not just goal-stepping). The LL never sees this env term otherwise
   (``ll_task_reward_coef=0``). Start at A0's 2.5e-7; the LL intrinsic runs hotter than A0's
-  task reward so it may read weak. 0 disables (byte-identical baseline)."""
-  ll_joint_limits_coef: float = 0.0
+  task reward so it may read weak. 0 disables (byte-identical baseline). **A1a keeper default since 2026-09-22.**"""
+  ll_joint_limits_coef: float = 10.0
   """WL-D: mirrors A0's ``joint_pos_limits`` (mjlab's soft-limit crossing penalty, A0
   weight -10.0) into the LL intrinsic - the largest measured A1-vs-A0 episode-reward gap
   in the whole reward set (A0 -0.00025 vs A1 -0.128, ~515x), consistent with the
   documented deploy failure where A1a rides its joint stops far more of a bridge session
   than A0. Uses the default asset_cfg (all joints), mirroring ``joint_acc_l2``'s call
-  style. 0 disables (byte-identical baseline)."""
-  ll_soft_landing_coef: float = 0.0
+  style. 0 disables (byte-identical baseline). **A1a keeper default since 2026-09-22.**"""
+  ll_soft_landing_coef: float = 1e-3
   """WL-D: mirrors A0's ``soft_landing`` (first-contact impact-force penalty, A0 weight
   -1e-3) into the LL intrinsic - targets the measured gap (A0 -0.024 vs A1 -0.085). Same
   params A0 uses: sensor_name="feet_ground_contact", command_name="twist",
-  command_threshold=0.1. 0 disables."""
-  ll_body_ang_vel_coef: float = 0.0
+  command_threshold=0.1. 0 disables. **A1a keeper default since 2026-09-22.**"""
+  ll_body_ang_vel_coef: float = 0.05
   """WL-D: mirrors A0's ``body_angular_velocity_penalty`` (torso xy angular velocity, A0
   weight -0.05) into the LL intrinsic - targets the measured gap (A0 -0.0085 vs A1
   -0.016). Resolved once against a torso_link asset_cfg (mirrors ``_foot_asset_cfg``'s
-  idiom). 0 disables."""
+  idiom). 0 disables. **A1a keeper default since 2026-09-22.**"""
   ll_pitchref_coef: float = 0.0
   """WL-D arm 6, formulation A (2026-07-17, approved): heel-to-toe ankle roll-over
   phase-locking - matches ``ankle_pitch`` to a raised-cosine reference interpolated
@@ -630,12 +632,18 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   (phase integrates incrementally, so a period change never jumps the clock). Requires
   ``hl_cadence=True`` and ``hl_algorithm='td3'`` (loud error otherwise). Old checkpoints
   restore as ``random`` and keep their goal_dim-sized HL nets."""
-  hl_cot_coef: float = 7.0
+  hl_cot_coef: float = 5.0
   """A1a (ADR-0004): weight on the (negative) dimensionless cost-of-transport penalty added
   to the HL *window* reward (window energy / (m g window walked-distance), each step gated by
   commanded linear speed > 0.1; a distance floor keeps stuck-under-command windows expensive
   but finite, and an all-gated-off window is exactly 0). HL-only; the LL stays a pure tracker
-  (the decoupling claim). 0 disables (byte-identical HL reward). Set >0 in S3+."""
+  (the decoupling claim). 0 disables (byte-identical HL reward).
+  **5.0 = the A1a keeper's value, the default since 2026-09-22.** The coefficient is
+  calibrated against the 2026-07-10 SIGNED-projection denominator, not the task (ADR-0004
+  Amendment), and the response is threshold-like: 0.2->2 is inert, 2->5 flips the sign of
+  the stride-length effect, and 7 never reaches the zero-command touchdown floor at any
+  ``rel_standing_envs``. Useful range 5-10; pair any increase with a TRACKING floor, since
+  ``fall_rate`` stays 0 well past the point where ``err_vx`` blows up."""
   hl_cot_cap_commanded: bool = False
   """Cap the CoT denominator at the COMMANDED window distance (2026-09-05). Off = the
   historical reward, byte-identical. On: ``d = min(d_walked, d_commanded)`` before the

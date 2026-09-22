@@ -245,6 +245,12 @@ def unitree_h1_2_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # every historical aggregate bench. Sustained-command behavior is scored by the
     # --eval-cmd-vx holds, which pin the command and never resample.
     twist_cmd.resampling_time_range = (3.0, 8.0)
+    # Same rule for the standing fraction: training moved to 0.12 on 2026-09-22, but the
+    # random-command aggregate bench INHERITS this term (play.py only zeroes it under
+    # --eval-cmd-vx), so letting it follow training would shift the eval command
+    # distribution and break comparability of every historical [BENCH] number. Standing
+    # behavior is scored by the cmd-0 holds, which pin the command directly.
+    twist_cmd.rel_standing_envs = 0.05
 
   return cfg
 

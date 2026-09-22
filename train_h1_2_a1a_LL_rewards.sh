@@ -19,37 +19,40 @@
 # Knobs via env vars:
 #   SEED             (default 42)                -> always _sSEED
 #   LL_CADENCE_COEF   float (default 0.5)          -> arm 1; != 0.5 tags _cadXpX
-#   HL_COT            float (default 0.2)          -> arm 2; tags _cotXpXX (ignored
-#                     under FIX0P8)
+#   HL_COT            float (default 5)            -> arm 2; != 5 tags _cotXpXX (ignored
+#                     under FIX0P8). 5 is the A1a keeper's value; see rl_cfg.py
+#                     hl_cot_coef for the 0.2->2->5->7 response curve.
 #   FIX0P8            True|False (default False)   -> the fixed-clock control (arm 1/2's
 #                     comparator): pins cadence_period_range=(0.8,0.8) via
 #                     hl-cadence-source=random (NOT hl) and hl-cot-coef=0; tags _fix0p8
 #                     in place of the cot tag
-#   LL_STAND_STILL    float (default 0.0)          -> arm 3; >0 tags _standstillXpXX
-#   STANDING_FRAC     float (default 0.05)         -> WL-S 2026-08-26 standing-gap lever:
+#   LL_STAND_STILL    float (default 1.0)          -> arm 3; != 1.0 tags _standstillXpXX
+#   STANDING_FRAC     float (default 0.12)         -> WL-S 2026-08-26 standing-gap lever:
 #                     rel_standing_envs, the FRACTION of envs commanded to stand. An
-#                     --env knob, not --agent (the twist command term); != 0.05 tags
-#                     _standingNN as a PERCENT (_standing15), matching the 08-26 run.
-#   LL_ANGMOM         float (default 0.0)          -> arm 4a; >0 tags _angmomXpXXX
-#   LL_FOOTSLIP       float (default 0.0)          -> arm 4b; >0 tags _footslipXpXX
-#   LL_FOOTCLEAR      float (default 0.0)          -> arm 4c; >0 tags _footclearXpX
-#   LL_ENERGY         float (default 0.0)          -> arm 4d; >0 tags _energyXpXX
-#   LL_JOINT_ACC      float (default 0.0)          -> WL-D 2026-07-24 joint-accel mirror;
-#                     >0 tags _jacc<val>
-#   LL_JOINT_LIMITS   float (default 0.0)          -> WL-D joint_pos_limits (soft-limit
+#                     --env knob, not --agent (the twist command term); != 0.12 tags
+#                     _standingNN as a PERCENT (_standing05). 0.12 is the A1a keeper's
+#                     value and, since 2026-09-22, the shared rl_cfg default for A0 too.
+#   LL_ANGMOM         float (default 0.025)        -> arm 4a; != 0.025 tags _angmomXpXXX
+#   LL_FOOTSLIP       float (default 0.25)         -> arm 4b; != 0.25 tags _footslipXpXX
+#   LL_FOOTCLEAR      float (default 1.0)          -> arm 4c; != 1.0 tags _footclearXpX
+#   LL_ENERGY         float (default 0.05)         -> arm 4d; != 0.05 tags _energyXpXX
+#   LL_JOINT_ACC      float (default 2.5e-7)       -> WL-D 2026-07-24 joint-accel mirror;
+#                     != 2.5e-7 tags _jacc<val>
+#   LL_JOINT_LIMITS   float (default 10.0)         -> WL-D joint_pos_limits (soft-limit
 #                     crossing) mirror, the largest measured A1-vs-A0 reward-gap term
-#                     (~515x); >0 tags _jlimXpX
-#   LL_SOFT_LANDING   float (default 0.0)          -> WL-D soft_landing (first-contact
-#                     impact-force) mirror; >0 tags _softlandXpXXX
-#   LL_BODY_ANG_VEL   float (default 0.0)          -> WL-D body_angular_velocity_penalty
-#                     (torso xy ang-vel) mirror; >0 tags _bodyangvelXpXX
-#   POSTURE_ALL_JOINTS True|False (default False)  -> extends the LL posture anchor to
+#                     (~515x); != 10.0 tags _jlimXpX. NOTE ADR-0009: this term is INERT
+#                     on a trained policy (<5e-7/step) -- kept for keeper fidelity.
+#   LL_SOFT_LANDING   float (default 1e-3)         -> WL-D soft_landing (first-contact
+#                     impact-force) mirror; != 1e-3 tags _softlandXpXXX
+#   LL_BODY_ANG_VEL   float (default 0.05)         -> WL-D body_angular_velocity_penalty
+#                     (torso xy ang-vel) mirror; != 0.05 tags _bodyangvelXpXX
+#   POSTURE_ALL_JOINTS True|False (default True)   -> extends the LL posture anchor to
 #                     every joint instead of the arms+waist+hip-yaw/roll subset (closest
-#                     analog to A0's variable_posture); True tags _postureall
-#   LL_ACTION_RATE    float (default 0.02)          -> WL-D combo batch (2026-07-23)
-#                     "smoothness" lever / A0-mirror action-rate weight; != 0.02 tags
-#                     _arXpXX (A0's own action_rate_l2 weight is 0.05, vs A1's tuned 0.02
-#                     default - see rl_cfg.py ll_action_rate_coef docstring)
+#                     analog to A0's variable_posture); False tags _posturesubset
+#   LL_ACTION_RATE    float (default 0.05)         -> WL-D combo batch (2026-07-23)
+#                     "smoothness" lever / A0-mirror action-rate weight; != 0.05 tags
+#                     _arXpXX. 0.05 MATCHES A0 (the old 0.02 divergence is gone as of
+#                     2026-09-22 - see rl_cfg.py ll_action_rate_coef docstring)
 #   ANKLE_ANCHOR      True|False (default False)   -> arm 5 (weight fixed at 4.0 via the
 #                     rl_cfg default); True tags _ankle
 #   LL_PITCHREF       float (default 0.0)          -> arm 6 formulation A (heel-to-toe
@@ -65,49 +68,55 @@
 #                     push-off (caught via the user's visual replay); fixed with a qd>0 gate
 #                     + P_scale recalibrated 40->3.0W for the corrected (much sparser)
 #                     power distribution.
-#   LL_SYMMETRY       float (default 0.0)          -> arm 10 formulation B (step-time
-#                     left/right symmetry index, the primary training arm - see
-#                     A1a_plan.md "Arm 10"); >0 tags _symXpXX. sigma_si stays at the
-#                     rl_cfg probe-derived default (not swept here).
-#   LL_MIRROR         float (default 0.0)          -> arm 10 formulation A (half-period
-#                     phase-shifted joint mirror); >0 tags _mirrorXpXX. Implemented but
-#                     left UNTRAINED pending formulation B's read (the arm 6 pattern) -
-#                     no launch example below on purpose.
+
 #   NUM_ENVS, MAX_ITER, RESAMPL_EXT
 #
 # ============================================================================
-# BASELINE (2026-08-25): full_jacc, folded in from scripts/launch_a1_reward_arms.sh
+# BASELINE (2026-09-22): A1a, the deploy keeper
 # ============================================================================
-# The defaults below ARE `full_jacc`'s config -- the 2026-08-05 reward-mirror battery arm
-# that leads on leg smoothness (act_legs 0.7014 vs A0's 0.5933) and the only one of three
-# that cleared the 2026-08-24 bridge battery (GO/GO, alpha_max 0.0). So a bare `sbatch`
-# reproduces it (fresh timestamp dir), the same way train_h1_2_a1_hl_vel_source.sh's bare
-# call reproduces the deployed hardware baseline. Every knob below moves you off it, and
-# the run name tags only the DEVIATION.
+# The defaults below ARE the A1a keeper's config -- `cot5` + `rse 0.12`, stock jacc, no
+# payload DR, i.e. the policy on the robot (CLAUDE.md "Policy names"). A bare `sbatch`
+# reproduces it in a fresh timestamp dir. Every knob below moves you off it, and the run
+# name tags only the DEVIATION, so an untagged `a1a_fullmirror_s42` IS the keeper recipe.
 #
-# ⚠ This CHANGED the script's baseline. Pre-2026-08-25 examples in git history assumed
-# a bare base where every lever defaulted to 0.0; they do not mean the same thing now.
+# Since 2026-09-22 the rl_cfg/env_cfg defaults equal this baseline too, so a bare
+# `python scripts/train.py Unitree-H1_2-Flat-A1` and a bare `sbatch` now agree. The flags
+# below are kept explicit ANYWAY: they pin the baseline against future default drift, so
+# an sbatch line launched today keeps its meaning if a default later moves.
+#
+# ⚠ BASELINE HISTORY -- a bare run means something different in each era, so a run
+# directory's name only resolves against the script version that minted it:
+#   pre-2026-08-25  every lever 0.0 (bare rl_cfg defaults)
+#   2026-08-25      `full_jacc` (the 2026-08-05 reward-mirror arm), HL_COT 0.2, rse 0.05
+#   2026-09-22      the A1a keeper: HL_COT 5, STANDING_FRAC 0.12
+# Consequence: the keeper's historical dir is named `a1a_fullmirror_cot5_standing12_s42`,
+# but re-running it today yields the untagged `a1a_fullmirror_s42` -- same config, and the
+# dumped params/agent.yaml is what settles any doubt.
 #
 # --- the 7-arm batch (the point of the fold-in) -----------------------------
 # Each arm is its own sbatch, so the cluster runs the batch in parallel. Paste all seven:
 #
-#   # repro: the control. 13 commits landed since the battery ran at 4739b1c (+1317 lines
-#   # in the training path, all inert at hl_vel_source=state), so this re-establishes the
-#   # 0.7014 reference the other six are scored against.
+#   # repro: the control -- a bare call is the A1a keeper recipe. Re-establish it in the
+#   # SAME batch as the arms it scores: error-type metrics (err_vx, ss_err) do not travel
+#   # across sessions even at identical config, and standing metrics span up to 4.2x
+#   # between replicates. Magnitudes (CoT, act_legs) do travel.
 #   sbatch --job-name=a1a_repro    train_h1_2_a1a_LL_rewards.sh
 #   # arm 1 -- joint-acc dose response, bracketing the 2.5e-7 baseline. Watch zero-command
 #   # touchdowns: 5e-7 historically marched continuously (5325 vs a 128 floor).
 #   sbatch --job-name=a1a_jacc1e-7 --export=ALL,LL_JOINT_ACC=1e-7 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --job-name=a1a_jacc5e-7 --export=ALL,LL_JOINT_ACC=5e-7 train_h1_2_a1a_LL_rewards.sh
-#   # arm 2 -- action-rate dose. PRE-REGISTERED TO FAIL: the one dose step we have
-#   # (0.02 -> 0.05) bought action_rate -8.7% but cost jacc_legs_p95 +31.1%. Stop rule: if
-#   # jacc_legs_p95 > 70.55 (A0's), the lever is exhausted -- do NOT run 0.10, report closed.
+#   # arm 2 -- action-rate dose ABOVE the 0.05 baseline. PRE-REGISTERED TO FAIL: the one
+#   # dose step we have (0.02 -> 0.05) bought action_rate -8.7% but cost jacc_legs_p95
+#   # +31.1%. Stop rule: if jacc_legs_p95 > 70.55 (A0's), the lever is exhausted -- do NOT
+#   # run 0.10, report closed.
 #   sbatch --job-name=a1a_ar0p07   --export=ALL,LL_ACTION_RATE=0.07 train_h1_2_a1a_LL_rewards.sh
 #   # WL-S 2026-08-26 -- the standing sweep. The gap A1-vs-A0 is 31-44x STANDING and only
 #   # 1.3-1.6x walking, and 0.05 -> 0.15 took standing ajit to 0.75x A0 at the touchdown
-#   # floor WITHOUT costing tracking (ss_err_vx 0.0528, best in batch). n=1 seed, and it
-#   # diverges A1's command distribution from A0's 0.05 -- an RQ2 call before it is a
-#   # default. Baseline arm is a plain sbatch (0.05); 15 is a re-run of the 08-26 dir.
+#   # floor WITHOUT costing tracking (ss_err_vx 0.0528, best in batch). The RQ2 objection
+#   # (it diverged A1's command distribution from A0's) was SETTLED on 2026-09-22: 0.12 is
+#   # now the shared default, so A0 and A1 stand the same fraction of the time. Baseline
+#   # arm is a plain sbatch (0.12); score a standing arm against a replicate BAND, never a
+#   # single control -- standing metrics span 4.2x at identical config+seed.
 #   sbatch --job-name=a1a_stand10 --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.10 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --job-name=a1a_stand25 --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.25 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --job-name=a1a_stand15b --export=ALL,LL_JOINT_ACC=1e-7,STANDING_FRAC=0.15,SEED=123 train_h1_2_a1a_LL_rewards.sh
@@ -140,7 +149,6 @@
 #   sbatch --export=ALL,ANKLE_ANCHOR=True train_h1_2_a1a_LL_rewards.sh
 #   sbatch --export=ALL,LL_PITCHREF=0.5 train_h1_2_a1a_LL_rewards.sh
 #   sbatch --export=ALL,LL_PUSHOFF=0.5 train_h1_2_a1a_LL_rewards.sh
-#   sbatch --export=ALL,LL_SYMMETRY=0.25 train_h1_2_a1a_LL_rewards.sh
 #   # print the command without launching (works off-cluster):
 #   DRY_RUN=1 LL_JOINT_ACC=1e-7 ./train_h1_2_a1a_LL_rewards.sh
 
@@ -163,23 +171,17 @@ if [[ "${DRY_RUN:-0}" == "0" ]]; then
   cd $WORK/ramlab_ws/code/unitree_rl_mjlab
 fi
 
-# ⚠ BASELINE CHANGED AGAIN 2026-08-26 -- Model v3 (ADR-0008) landed, and it is not a
-# lever in this script: the commanded-target clip rides the ENV cfg
-# (config/h1_2/env_cfgs.py:99, which the A1 task inherits verbatim), the +3.5 LL mirror is
-# an rl_cfg default (ll_action_clip_coef), and the x1.20787 leg mass is in the XML. So a
-# bare `sbatch` now trains v3 and logs to h1_2_velocity_a1_v3 -- it no longer reproduces
-# `full_jacc`, and NO v2 run below is a valid comparator for anything launched now.
-# Any new sweep must carry its own v3 baseline arm.
+# Model v3's TRAINING side was REVERTED on 2026-08-28 (ADR-0009): the action clip, the L1
+# excess penalty and the leg-mass bump are all out, the `*_v3` namespaces are retired, and
+# v2 is the current model -- so this script trains v2 and logs to h1_2_velocity_a1_v2
+# again. (The DEPLOY yaml clip is kept; it is a backstop, not a parity device.)
 #
-# ⚠ BASELINE CHANGED 2026-08-25. Everything below defaults to `full_jacc`'s config, not
-# to the bare rl_cfg defaults, so a plain `sbatch` reproduces that run (the `repro` arm).
-# Consequence for provenance: a WL-D-era example like `--export=ALL,LL_ENERGY=0.05` no
-# longer means "arm 4d alone off a bare base" -- it now sets energy to a value it already
-# has, on the full-mirror base. To re-run a pre-2026-08-25 arm, zero the other levers
-# explicitly or use git to recover this file's older defaults.
+# To re-run a pre-2026-09-22 arm, set its levers explicitly rather than trusting a bare
+# call -- or use git to recover this file's defaults from that era. The dumped
+# params/agent.yaml in the run dir is always the authority on what actually trained.
 SEED=${SEED:-42}
 LL_CADENCE_COEF=${LL_CADENCE_COEF:-0.5}
-HL_COT=${HL_COT:-0.2}
+HL_COT=${HL_COT:-5}
 FIX0P8=${FIX0P8:-False}
 LL_STAND_STILL=${LL_STAND_STILL:-1.0}
 LL_ANGMOM=${LL_ANGMOM:-0.025}
@@ -195,9 +197,7 @@ LL_ACTION_RATE=${LL_ACTION_RATE:-0.05}
 ANKLE_ANCHOR=${ANKLE_ANCHOR:-False}
 LL_PITCHREF=${LL_PITCHREF:-0.0}
 LL_PUSHOFF=${LL_PUSHOFF:-0.0}
-LL_SYMMETRY=${LL_SYMMETRY:-0.0}
-LL_MIRROR=${LL_MIRROR:-0.0}
-STANDING_FRAC=${STANDING_FRAC:-0.05}
+STANDING_FRAC=${STANDING_FRAC:-0.12}
 RESAMPL_EXT=${RESAMPL_EXT:-True}
 # Cadence family (new 2026-08-25): the three cadence arms need more than a scalar.
 # CADENCE_RANGE empty = leave at the rl_cfg default (0.35,1.0), which is what full_jacc
@@ -239,14 +239,13 @@ lever --agent.ll-cadence-coef      "$LL_CADENCE_COEF" 0.5     cad
 # Arms 5/6/10: off in the baseline, so these stay tagless unless swept. See A1a_plan.md.
 lever --agent.ll-pitchref-coef     "$LL_PITCHREF"     0.0     pitchref
 lever --agent.ll-pushoff-coef      "$LL_PUSHOFF"      0.0     pushoff
-lever --agent.ll-symmetry-coef     "$LL_SYMMETRY"     0.0     sym
-lever --agent.ll-mirror-coef       "$LL_MIRROR"       0.0     mirror
+
 
 # rel_standing_envs lives on the env (twist command term), not the agent, and its tag is
 # a percent -- so it gets its own two lines instead of a `lever` call. Last, so a sweep
 # reproduces the 2026-08-26 `_jacc1e-7_standing15` name rather than reordering the tags.
 LEVER_FLAGS+=(--env.commands.twist.rel-standing-envs "$STANDING_FRAC")
-awk "BEGIN{exit !($STANDING_FRAC == 0.05)}" \
+awk "BEGIN{exit !($STANDING_FRAC == 0.12)}" \
   || LEVER_TAGS+="_standing$(awk "BEGIN{printf \"%g\", $STANDING_FRAC*100}")"
 
 # Command resampling interval. Default (RESAMPL_EXT=True) leaves the rl_cfg long window
@@ -306,12 +305,12 @@ else
     fi
   fi
   # Numeric compare, matching `lever`: a string test would tag 0.20 as a deviation.
-  awk "BEGIN{exit !($HL_COT == 0.2)}" || CAD_TAG+="_cot$(echo "$HL_COT" | tr '.' 'p')"
+  awk "BEGIN{exit !($HL_COT == 5)}" || CAD_TAG+="_cot$(echo "$HL_COT" | tr '.' 'p')"
 fi
 
 RUN_NAME="a1a_fullmirror${CAD_TAG}${LEVER_TAGS}_s${SEED}"
 
-echo "[a1a-ll] RUN=$RUN_NAME  hl_cadence=${HL_CADENCE}  cadence_source=${CADENCE_SOURCE}  cadence_range=${CADENCE_RANGE:-<rl_cfg default>}  hl_cot=${HL_COT}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  joint_limits=${LL_JOINT_LIMITS}  soft_landing=${LL_SOFT_LANDING}  body_ang_vel=${LL_BODY_ANG_VEL}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  posture_all_joints=${POSTURE_ALL_JOINTS}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF}  symmetry=${LL_SYMMETRY}  mirror=${LL_MIRROR}  rel_standing_envs=${STANDING_FRAC}  seed=${SEED}"
+echo "[a1a-ll] RUN=$RUN_NAME  hl_cadence=${HL_CADENCE}  cadence_source=${CADENCE_SOURCE}  cadence_range=${CADENCE_RANGE:-<rl_cfg default>}  hl_cot=${HL_COT}  ll_cadence_coef=${LL_CADENCE_COEF}  stand_still=${LL_STAND_STILL}  angmom=${LL_ANGMOM}  footslip=${LL_FOOTSLIP}  footclear=${LL_FOOTCLEAR}  energy=${LL_ENERGY}  joint_acc=${LL_JOINT_ACC}  joint_limits=${LL_JOINT_LIMITS}  soft_landing=${LL_SOFT_LANDING}  body_ang_vel=${LL_BODY_ANG_VEL}  action_rate=${LL_ACTION_RATE}  ankle_anchor=${ANKLE_ANCHOR}  posture_all_joints=${POSTURE_ALL_JOINTS}  pitchref=${LL_PITCHREF}  pushoff=${LL_PUSHOFF} rel_standing_envs=${STANDING_FRAC}  seed=${SEED}"
 
 # DRY_RUN=1 prints the command instead of running it -- check what a job will launch
 # before it burns a slot. Works off-cluster too (nothing above needs $SLURM_JOB_ID).
