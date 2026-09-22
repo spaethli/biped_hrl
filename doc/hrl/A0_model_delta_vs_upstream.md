@@ -8,6 +8,21 @@ actual file contents rather than reconstructed from narrative. Merge-base: `1425
 (upstream tip); this fork's `main` is strictly ahead, so the diff is exactly
 "everything changed since forking," no upstream-only commits to account for.
 
+> **Re-verified 2026-09-22.** Merge-base is still `1425b15` and upstream has no commits
+> since it, so the premise above holds unchanged. That pass added §4b (the disabled second
+> velocity-curriculum stage, which the original missed and which bounds every velocity
+> claim at 1.0 m/s) and three entries to the ruled-out list (`rel_standing_envs`,
+> `env_latent_e`, `cost_of_transport`).
+>
+> **Re-verified in that pass:** §1 (gains: hip yaw/pitch/roll 98.7/6.3 → 200/2.5, torso
+> 300/3.0, 157.7/10.1 → 300/4.0), §3 (`viscous_damping=0.001`), `frictionloss=0.0` and
+> armature 0.025, all live in `h1_2_constants.py` against `upstream/main`; §4 via the
+> `velocity_env_cfg.py` diff. §2 follows mechanically from §1. **NOT re-verified in that
+> pass:** §5-§8, the deploy-config factors — they are unchanged since the original audit as
+> far as this pass could tell, but were not re-diffed line by line. The Model v3
+> training-side changes never landed here (reverted, `docs/adr/0009`), so nothing in this
+> document is affected by them.
+
 > The investigative version of this document — the causal-weight reasoning behind
 > the ranking, and the corrections it made to its own earlier claims — is kept in
 > the author's research knowledge base, outside this repo. What follows is the
@@ -64,6 +79,22 @@ code is wholesale replaced, not incrementally patched).
 - **No control-latency/actuation-delay modeling in either.** `BuiltinPositionActuatorCfg`
   has `delay_min_lag`/`delay_max_lag`/`delay_hold_prob` fields (mjlab supports this);
   neither upstream nor this fork sets them away from 0. Shared gap, not a difference.
+- **Standing-command fraction `rel_standing_envs`** (added to this list 2026-09-22):
+  `velocity_env_cfg.py:187` reads **0.05**, and upstream's own `velocity_env_cfg.py:169`
+  reads **0.05** as well. Identical, for **both** architectures. ⚠ Do not confuse the
+  repo default with what a given run trained on: the A1a arms set it **per run on the
+  launch command line** (the deployed keeper's `params/env.yaml:1757` records `0.12`),
+  which is precisely why the A0 anchor never followed and three months of
+  "A1a stands quieter than A0" ratios were confounded. A parameter that lives in a
+  launch flag rather than a config file is invisible to a config diff. See
+  `doc/hrl/benchmark_blindness_evidence.md` §6.5.
+- **Critic-only privileged latent `env_latent_e`** and the **`cost_of_transport` reward
+  term**: both are fork additions to `velocity_env_cfg.py`, but neither changes the
+  plant or the deployable actor. `env_latent_e` is an observation on the critic group
+  only (same asymmetric actor-critic pattern as Rough's `height_scan`), and
+  `cost_of_transport` ships at **weight 0.0**, i.e. byte-identical to upstream's reward
+  until deliberately enabled. Listed so a reader diffing the file does not mistake them
+  for model changes.
 
 ## Actual modelling differences, ranked by plausible causal weight
 
@@ -135,6 +166,40 @@ scenario, not an edge case the resampler always interrupted before the policy ha
 cope with it. Not a plant/actuator change, but plausibly relevant to why sustained
 commanded walking held up in real deployment rather than drifting into an
 undertrained regime.
+
+### 4b. Velocity curriculum: upstream's second stage is DISABLED (added 2026-09-22)
+
+Missed by the original pass, and it bounds every velocity claim in the thesis.
+
+Upstream runs a **two-stage** velocity curriculum: stage 0 at `lin_vel_x (-0.5, 1.0)`,
+`lin_vel_y (-0.5, 0.5)`, then a second stage at `step = 5000 * 24` widening to
+`lin_vel_x (-1.0, 2.0)`, `lin_vel_y (-1.0, 1.0)`. **This fork comments the second stage
+out**, leaving a single stage at step 0 (`velocity_env_cfg.py`, `velocity_stages`).
+
+So the trained command distribution is **`lin_vel_x ∈ [-0.5, 1.0]`,
+`lin_vel_y ∈ [-0.5, 0.5]`, `ang_vel_z ∈ [-1.0, 1.0]` for the entire run**, and the policy
+never sees a forward command above **1.0 m/s**, where upstream's would end at 2.0.
+
+⚠ **The declared range in the config is misleading.** `commands.twist.ranges` still reads
+`lin_vel_x (-1.0, 2.0)` / `lin_vel_y (-1.0, 1.0)`; the curriculum overwrites it at step 0
+and never advances. Reading the `ranges` block alone gives the wrong answer. Confirmed on
+the deployed keeper's own `params/env.yaml` (ranges block vs `curriculum.command_vel`).
+
+**Independent cross-check:** the baked HIRO goal scale is `[0.75, 0.5, 1.0]`, and the scale
+is a half-range (`half = (hi-lo)/2`). 0.75 → a 1.5-wide vx range, 0.5 → 1.0-wide vy,
+1.0 → 2.0-wide yaw. Exactly the curriculum's stage-0 values, derived from a completely
+different file.
+
+**Consistent with deploy, which is the reassuring part:**
+`velocity_hrl/v0/params/deploy_real.yaml:91-92` sets `lin_vel_x [-0.5, 1.0]` and
+`lin_vel_y [-0.5, 0.5]`, i.e. the **effective trained** range rather than the declared one,
+so the operator cannot command the robot outside its training distribution in x or y.
+`ang_vel_z` is ±1.0 in both (see `docs/adr/0009`: the older ±0.5 "tame joystick" setting was
+abandoned 2026-08-27).
+
+**Why it matters for the thesis:** every tracking number, every hold evaluation and every
+sim-to-real velocity claim is bounded at 1.0 m/s forward. State the bound once in the setup
+chapter rather than letting a reader infer 2.0 m/s from the `ranges` block.
 
 ## Deploy-config factors (`config.yaml` + `deploy_real.yaml`, both diffed vs upstream)
 
@@ -227,6 +292,11 @@ post-mortem.
    transient at the exact moment control hands from FixStand to the walking policy.
 6. Command resampling range (3,20) vs (3,8) — secondary, affects whether sustained
    commands are in-distribution.
+7. **Velocity curriculum truncated to stage 0** (added 2026-09-22, §4b) — not a candidate
+   for "mine works, stock doesn't" in the *stability* sense, but it BOUNDS every velocity
+   claim: trained `lin_vel_x` tops out at 1.0 m/s where upstream reaches 2.0. Listed here
+   because the `ranges` block reads (-1.0, 2.0) and is overwritten at step 0, so the diff
+   is easy to miss.
 
 Ruled out (verified identical, not candidates): joint friction (0 in both), **armature
 (0 diffs — identical per-motor values 0.025/0.04/0.005/0.002, inherited unchanged from
