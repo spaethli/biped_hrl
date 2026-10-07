@@ -195,9 +195,15 @@ def make_velocity_env_cfg() -> ManagerBasedRlEnvCfg:
       heading_command=True,
       heading_control_stiffness=0.5,
       debug_vis=True,
+      # lin_vel_x/lin_vel_y realigned 2026-09-22 (were the upstream-inherited
+      # (-1.0, 2.0)/(-1.0, 1.0)): this declared default was never what training actually
+      # sampled after step 0 -- the "command_vel" curriculum stage below rewrites
+      # cfg.ranges to exactly these values almost immediately, and every per-robot play
+      # block already pins eval to them too. Only the declaration was stale; no training
+      # distribution changes. See doc/hrl/A0_model_delta_vs_upstream.md §4b.
       ranges=UniformVelocityCommandCfg.Ranges(
-        lin_vel_x=(-1.0, 2.0),
-        lin_vel_y=(-1.0, 1.0),
+        lin_vel_x=(-0.5, 1.0),
+        lin_vel_y=(-0.5, 0.5),
         ang_vel_z=(-1.0, 1.0),
         heading=(-math.pi, math.pi),
       ),

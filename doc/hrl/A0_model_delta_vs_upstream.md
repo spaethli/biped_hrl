@@ -22,6 +22,11 @@ actual file contents rather than reconstructed from narrative. Merge-base: `1425
 > far as this pass could tell, but were not re-diffed line by line. The Model v3
 > training-side changes never landed here (reverted, `docs/adr/0009`), so nothing in this
 > document is affected by them.
+>
+> **Same-day follow-up:** §4b's "declared range is misleading" warning is fixed as of
+> 2026-09-22 — `velocity_env_cfg.py`'s `ranges=` default now reads `(-0.5, 1.0)`/`(-0.5,
+> 0.5)` directly instead of the stale `(-1.0, 2.0)`/`(-1.0, 1.0)` the curriculum silently
+> overwrote. No training distribution changed, only the declaration.
 
 > The investigative version of this document — the causal-weight reasoning behind
 > the ranking, and the corrections it made to its own earlier claims — is kept in
@@ -79,15 +84,11 @@ code is wholesale replaced, not incrementally patched).
 - **No control-latency/actuation-delay modeling in either.** `BuiltinPositionActuatorCfg`
   has `delay_min_lag`/`delay_max_lag`/`delay_hold_prob` fields (mjlab supports this);
   neither upstream nor this fork sets them away from 0. Shared gap, not a difference.
-- **Standing-command fraction `rel_standing_envs`** (added to this list 2026-09-22):
-  `velocity_env_cfg.py:187` reads **0.05**, and upstream's own `velocity_env_cfg.py:169`
-  reads **0.05** as well. Identical, for **both** architectures. ⚠ Do not confuse the
-  repo default with what a given run trained on: the A1a arms set it **per run on the
-  launch command line** (the deployed keeper's `params/env.yaml:1757` records `0.12`),
-  which is precisely why the A0 anchor never followed and three months of
-  "A1a stands quieter than A0" ratios were confounded. A parameter that lives in a
-  launch flag rather than a config file is invisible to a config diff. See
-  `doc/hrl/benchmark_blindness_evidence.md` §6.5.
+- ~~**Standing-command fraction `rel_standing_envs`**: identical to upstream (both
+  0.05).~~ **No longer true — moved to §4c below.** True when added to this list
+  2026-09-22, but the *same day*'s commit (`446823e`, "make the A1a keeper recipe the
+  default config") promoted the repo default to `0.12`, so this is now a genuine
+  fork-vs-upstream delta, not a ruled-out one.
 - **Critic-only privileged latent `env_latent_e`** and the **`cost_of_transport` reward
   term**: both are fork additions to `velocity_env_cfg.py`, but neither changes the
   plant or the deployable actor. `env_latent_e` is an observation on the critic group
@@ -148,13 +149,31 @@ larger raw excursions to begin with.
 
 ### 3. Passive joint damping: none upstream, `0.001` here
 
-Same pattern as `frictionloss` above: upstream leaves `viscous_damping` unset (→ 0);
-the fork sets `0.001` on every joint explicitly — but unlike `frictionloss` (both 0)
-and armature (both identical, see "Ruled out"), this one is a genuine nonzero
-addition. Small in magnitude, but it is the exact value the vendor
-deploy-bridge plant also uses (`damping 0.001`), so it's one more point of parity
-between what this fork trained against and what it was deployed onto — upstream's
-policy trained against a perfectly undamped joint has no equivalent parity point.
+Upstream leaves `viscous_damping` unset; the fork sets `0.001` N·m·s/rad on every joint.
+"Unset" is not literally zero in mjlab: `None` means *preserve the XML value*
+(`mjlab/utils/spec.py`, "None = preserve XML value"), and the training XML `h1_2.xml` has
+no joint `damping` attribute in either repo, so upstream's effective value is MuJoCo's
+default **0**. (`scene_h1_2.xml` is not loaded by training, `h1_2_constants.py:28`.) A
+genuine difference, unlike `frictionloss` (both 0) and armature (identical, see
+"Ruled out").
+
+**Provenance.** Introduced with model v2 (ADR-0005, commit `c21ee2d`, 2026-07-07) together
+with `frictionloss=0.1`, "for XML parity" with the H1-2 reference models, which all carry
+`<joint damping="0.001" armature="0.01" frictionloss="0.1"/>`: Unitree's own
+`unitree_rl_gym` (`resources/robots/h1_2/h1_2_12dof.xml:5`), LAAS `h1v2-Isaac` and the
+Correll H1-2 models. Unitree's `unitree_mujoco` model disagrees (`damping 1 / armature 0.1
+/ frictionloss 0.2`). ADR-0005 Amendment 2 then found "reference parity" was the wrong
+frame and reverted `frictionloss` to 0 (2026-07-17); `viscous_damping` was not revisited
+and stayed as a leftover of that parity step.
+
+**Magnitude: negligible.** 0.001 is under 0.04 % of the smallest PD damping gain (2.5) and
+has no measured effect. ⛔ **Corrected 2026-10-02:** this section previously credited it
+as "the exact value the vendor deploy-bridge plant also uses" — a parity point. That no
+longer holds: the bridge has run Unitree's `scene_stress.xml` (joint damping **1**) since
+2026-08-04, and the plant that carried 0.001 was a hand-made training-proximate variant,
+not the vendor's (`.claude/docs/deployment.md` "Bridge plant"). Keeping 0.001 is a
+no-retrain choice, not a fidelity argument: changing it would invalidate every v2
+checkpoint for no measurable gain.
 
 ### 4. Command resampling range (RL/curriculum, not physical, flagged as secondary)
 
@@ -180,10 +199,15 @@ So the trained command distribution is **`lin_vel_x ∈ [-0.5, 1.0]`,
 `lin_vel_y ∈ [-0.5, 0.5]`, `ang_vel_z ∈ [-1.0, 1.0]` for the entire run**, and the policy
 never sees a forward command above **1.0 m/s**, where upstream's would end at 2.0.
 
-⚠ **The declared range in the config is misleading.** `commands.twist.ranges` still reads
-`lin_vel_x (-1.0, 2.0)` / `lin_vel_y (-1.0, 1.0)`; the curriculum overwrites it at step 0
-and never advances. Reading the `ranges` block alone gives the wrong answer. Confirmed on
-the deployed keeper's own `params/env.yaml` (ranges block vs `curriculum.command_vel`).
+✅ **Fixed 2026-09-22 — the declared range no longer lies.** `commands.twist.ranges` used to
+read `lin_vel_x (-1.0, 2.0)` / `lin_vel_y (-1.0, 1.0)` while the curriculum overwrote it to
+`(-0.5, 1.0)` / `(-0.5, 0.5)` at step 0 and never advanced, so reading the `ranges` block
+alone gave the wrong answer (confirmed on the deployed keeper's own `params/env.yaml`:
+ranges block vs `curriculum.command_vel`). `velocity_env_cfg.py`'s `ranges=` default now
+reads `(-0.5, 1.0)` / `(-0.5, 0.5)` directly, matching what the curriculum stage and every
+per-robot play block already forced. No training distribution changed — this only corrects
+what was declared. Checkpoints trained before this date still restore their own baked
+config; only the shared source file's *declaration* moved.
 
 **Independent cross-check:** the baked HIRO goal scale is `[0.75, 0.5, 1.0]`, and the scale
 is a half-range (`half = (hi-lo)/2`). 0.75 → a 1.5-wide vx range, 0.5 → 1.0-wide vy,
@@ -200,6 +224,19 @@ abandoned 2026-08-27).
 **Why it matters for the thesis:** every tracking number, every hold evaluation and every
 sim-to-real velocity claim is bounded at 1.0 m/s forward. State the bound once in the setup
 chapter rather than letting a reader infer 2.0 m/s from the `ranges` block.
+
+### 4c. Standing-command fraction `rel_standing_envs`: 0.05 upstream, 0.12 here (moved from "ruled out", 2026-09-22)
+
+Upstream's own `velocity_env_cfg.py:169` reads `0.05`; this fork's repo default was
+also `0.05` until the same-day commit that made the A1a keeper recipe the default
+config (`446823e`) promoted it to `0.12` — the A1a keeper's own trained value,
+promoted to the shared base so A0 and A1 train on the same standing/walking split
+going forward (previously held at 0.05 while A1a's own runs set `0.12` **per launch
+flag**, which stood the two architectures a different fraction of the time and
+confounded every A1-vs-A0 standing ratio — see `doc/hrl/benchmark_blindness_evidence.md`
+§6.5). Not a physical-model difference, and not new behavior for either architecture's
+*existing* checkpoints (a launch flag already got A1a there); it just makes the
+config file itself tell the truth about what the next A0 run trains on too.
 
 ## Deploy-config factors (`config.yaml` + `deploy_real.yaml`, both diffed vs upstream)
 
@@ -267,8 +304,11 @@ recorder".
 ### 8. Bridge plant choice — outside this repo's diff surface entirely
 
 Lives in the separate `/opt/unitree_mujoco` clone (its own git, not part of
-`unitree_rl_mjlab`): vendor reference plant (`armature 0.01 / frictionloss 0.1 /
-damping 0.001`) vs an old harsher default. Pointer only:
+`unitree_rl_mjlab`). Since 2026-08-04 the gating plant is Unitree's shipped joint values
+(`scene_stress.xml`: `damping 1 / armature 0.1 / frictionloss 0.2`, free base zeroed);
+the `armature 0.01 / frictionloss 0.1 / damping 0.001` plant previously called the
+"vendor reference" was a hand-made training-proximate variant, kept for A/B work only.
+Pointer only:
 `.claude/docs/deployment.md` "Bridge plant" section, `doc/hrl/A1a_deploy_plan.md`
 post-mortem.
 
@@ -286,17 +326,24 @@ post-mortem.
 3. **Runtime safety filter** (`h1_2_limits.h`/`safety_logger.h`) — entirely absent
    upstream; without it a stock deploy has no tilt/fall ramp-down and no joint-limit
    response at all.
-4. Nonzero passive joint damping (0.001) — small, but a direct parity point with the
-   deploy-bridge plant.
-5. FixStand handover posture alignment (2026-07-23) — reduces a first-tick correction
+4. FixStand handover posture alignment (2026-07-23) — reduces a first-tick correction
    transient at the exact moment control hands from FixStand to the walking policy.
-6. Command resampling range (3,20) vs (3,8) — secondary, affects whether sustained
+5. Command resampling range (3,20) vs (3,8) — secondary, affects whether sustained
    commands are in-distribution.
-7. **Velocity curriculum truncated to stage 0** (added 2026-09-22, §4b) — not a candidate
+6. **Velocity curriculum truncated to stage 0** (added 2026-09-22, §4b) — not a candidate
    for "mine works, stock doesn't" in the *stability* sense, but it BOUNDS every velocity
-   claim: trained `lin_vel_x` tops out at 1.0 m/s where upstream reaches 2.0. Listed here
-   because the `ranges` block reads (-1.0, 2.0) and is overwritten at step 0, so the diff
-   is easy to miss.
+   claim: trained `lin_vel_x` tops out at 1.0 m/s where upstream reaches 2.0. Previously
+   easy to miss because the `ranges` block declared (-1.0, 2.0) while the curriculum
+   silently overwrote it at step 0; the declaration itself was corrected the same day
+   (§4b) so the config now reads what it trains.
+7. `rel_standing_envs` 0.12 vs upstream's 0.05 (§4c, moved from ruled-out 2026-09-22) —
+   not a stability candidate either, but shifts the standing/walking split both
+   architectures train on going forward; not new behavior for the A1a keeper itself
+   (it already trained at 0.12 via a launch flag).
+8. Nonzero passive joint damping (0.001, §3) — a real difference but negligible (<0.04 %
+   of the smallest PD damping gain); listed for completeness, not a plausible cause.
+   ⛔ Demoted 2026-10-02 from #4, where it was credited as a bridge parity point that
+   ended 2026-08-04.
 
 Ruled out (verified identical, not candidates): joint friction (0 in both), **armature
 (0 diffs — identical per-motor values 0.025/0.04/0.005/0.002, inherited unchanged from
