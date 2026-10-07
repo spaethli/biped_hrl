@@ -13,6 +13,9 @@ What it automates (previously a human at the keyboard):
   3. releases the sim elastic band (bridge GUI key `9`) via XTEST, since the band is a
      GLFW keypress on the mujoco window and nothing else can toggle it
   4. holds each velocity command for a fixed duration, then runs `deploy_gate_analyzer.py`
+  5. records the _Joint telemetry log_ beside the flight recorder (2026-10-02): `read_all_joints`
+     is the only source of `tau_est`, and a Run without it loses `cot` / `mech_power_w` to a
+     scorer WARN. Started here, gated BEFORE the command sequence, `--no-joint-telemetry` skips.
 
 KEYBOARD LATCH (deploy plan "Defect 1") — the reason `--seq` holds rather than presses:
 `Keyboard::_read()` (deploy/include/isaaclab/devices/keyboard/keyboard.h) clears `_key` to
@@ -33,6 +36,7 @@ Examples:
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -44,6 +48,7 @@ RESTAND_FALL_HEIGHT = 0.9  # matches deploy_gate_analyzer.FALL_HEIGHT
 BRIDGE = '/opt/unitree_mujoco/simulate/build/unitree_mujoco'
 SETUP = Path.home() / 'ramlab_ws' / 'setup_all_mujoco.sh'
 CTRL_DIR = REPO / 'deploy' / 'robots' / 'h1_2' / 'build'
+TRAJ_DIR = Path.home() / 'ramlab_ws' / 'trajectories'   # where read_all_joints writes
 # Full G2.2 + G2.3 battery (2026-08-04). ~253 s. Every command change is a scored
 # TRANSITION window in deploy_gate_analyzer -- steady holds alone miss decel failures, and
 # the 2026-08-03 fall happened on the 0.5 -> 0 deceleration, not inside any hold.
@@ -60,6 +65,54 @@ DEFAULT_SEQ = ('0:8,3:30,0:6,5:30,0:6,w:30,0:8,'
                's:15,0:6,a:15,0:6,d:15,0:6,'
                'q:15,0:6,e:15,0:6,'
                '5:12,q:8,0:10')
+
+
+OBS_H = REPO / 'deploy' / 'robots' / 'h1_2' / 'include' / 'h1_2_observations.h'
+
+
+def deploy_limit_rows():
+  """`(lo, hi, name)` per DEPLOY slot, in slot order, from the audited limit header."""
+  hdr = (REPO / 'deploy' / 'robots' / 'h1_2' / 'include' / 'h1_2_limits.h').read_text()
+  blk = hdr.split('h1_2_joint_limits = {{', 1)[1].split('}};', 1)[0]
+  rows = re.findall(r'\{\s*(-?[\d.]+)f?,\s*(-?[\d.]+)f?\s*\}\s*,?\s*//\s*(\d+)\s+(\w+)', blk)
+  assert [int(i) for _, _, i, _ in rows] == list(range(len(rows))), 'limit header slots out of order'
+  return [(float(a), float(b), n.lower()) for a, b, _, n in rows]
+
+
+def key_commands():
+  """The controller's keyboard presets, `key -> (vx, vy, wz)`, read from the header the binary
+  is compiled from so a schedule replayed elsewhere cannot drift from what the bridge runs."""
+  rows = re.findall(r'\{"(\w)",\s*\{\s*(-?[\d.]+)f,\s*(-?[\d.]+)f,\s*(-?[\d.]+)f\s*\}\}',
+                    OBS_H.read_text())
+  return {k: (float(x), float(y), float(z)) for k, x, y, z in rows}
+
+
+def seq_commands(spec, step_dt=0.02):
+  """A `--seq` spec -> one `(vx, vy, wz)` per control step: the command schedule a bridge Run
+  holds, for `play.py --eval-cmd-seq` to replay at the training bench."""
+  keys = key_commands()
+  out = []
+  for item in spec.split(','):
+    k, secs = item.split(':')
+    out += [keys[k]] * round(float(secs) / step_dt)
+  return out
+
+
+def joints_logging(proc, before, wait_s=2.0):
+  """The csv `read_all_joints` is writing, or None when it is not alive and growing.
+
+  The node takes no path argument and its INFO stream is unusable as a source (it prints all
+  27 joints of every message: 207 MB of log for a 70 s session), so it runs at WARN and its
+  file is the ONE `all_joints_*.csv` that did not exist in `before`. That is only sound
+  because stray nodes are cleared at session start: an orphan from an aborted session kept
+  logging on 2026-10-02 and bench_flight_recorder paired the next Run with ITS file.
+  """
+  new = sorted(set(TRAJ_DIR.glob('all_joints_*.csv')) - before)
+  if len(new) != 1:
+    return None
+  n0 = new[0].stat().st_size
+  time.sleep(wait_s)
+  return new[0] if proc.poll() is None and new[0].stat().st_size > n0 else None
 
 
 def setup_env():
@@ -247,6 +300,9 @@ def main():
                        'exports, deploy.yaml). Filename must exist under the policy_dir\'s '
                        'params/ directory. For testing a params variant against the sim '
                        'bridge without touching the shipped deploy.yaml/deploy_real.yaml.')
+  ap.add_argument('--no-joint-telemetry', action='store_true',
+                  help='do not launch `read_all_joints` beside the session. The Run then has '
+                       'no tau_est, so bench_flight_recorder omits cot and mech_power_w.')
   args = ap.parse_args()
 
   # A stale controller holds the DDS lowcmd channel and the new one refuses to start
@@ -254,6 +310,8 @@ def main():
   # whole session and writes no CSV. Clear both before every run.
   subprocess.run(['pkill', '-f', 'h1_2_ctrl'])
   subprocess.run(['pkill', '-f', 'unitree_mujoco'])
+  if not args.no_joint_telemetry:
+    subprocess.run(['pkill', '-INT', '-f', 'read_all_joints'])   # see joints_logging()
   time.sleep(2)
 
   env = setup_env()
@@ -278,6 +336,20 @@ def main():
 
   bridge = subprocess.Popen([BRIDGE], env=env, stdout=logs['bridge'], stderr=subprocess.STDOUT)
   time.sleep(6)
+  joints = None
+  if not args.no_joint_telemetry:
+    # Own process group: `ros2 run` does not forward a SIGINT sent to it alone (it relies on
+    # the terminal signalling the whole group), so the node would outlive the session.
+    logs['joints'] = open(f'{base}_joints.log', 'w')
+    joints_before = set(TRAJ_DIR.glob('all_joints_*.csv'))
+    try:
+      joints = subprocess.Popen(['ros2', 'run', 'h1_2_low_level_controller', 'read_all_joints',
+                                 '--ros-args', '--log-level', 'warn'],
+                                env=env, stdout=logs['joints'], stderr=subprocess.STDOUT,
+                                start_new_session=True)
+    except FileNotFoundError:
+      bridge.kill()
+      raise SystemExit('[joints] ABORTING: `ros2` is not on PATH after setup_all_mujoco.sh')
   fin = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
   ctrl = subprocess.Popen(['./h1_2_ctrl'], cwd=CTRL_DIR, env=env, stdin=fin,
                           stdout=logs['ctrl'], stderr=subprocess.STDOUT)
@@ -321,7 +393,22 @@ def main():
     watcher.fallen.clear()
 
   watcher = None
+  joints_csv = None
   try:
+    if joints is not None:
+      # FAIL-CLOSED before the sequence, same reasoning as the band below: a dead node is
+      # otherwise discovered by the scorer, after the Run was spent.
+      joints_csv = joints_logging(joints, joints_before)
+      if joints_csv is None:
+        print(f'[joints] ABORTING before the command sequence: read_all_joints is not logging '
+              f'(alive={joints.poll() is None}); see {base}_joints.log')
+        raise SystemExit(1)
+    if ctrl.poll() is not None:
+      # A controller that died at start-up (e.g. a deploy config missing from one of the two
+      # policy dirs, 2026-10-03) used to leave the session holding keys into a dead FIFO for
+      # the whole schedule and exit 0 with no flight recorder.
+      raise SystemExit(f'[ctrl] ABORTING: h1_2_ctrl exited (rc={ctrl.returncode}) before the '
+                       f'schedule; see {base}_ctrl.log')
     press('i', 'FixStand')
     time.sleep(args.stand_s)
     press(policy_key, f'policy takeover ({args.policy})')
@@ -359,7 +446,11 @@ def main():
       watcher.stop()
     for p in (ctrl, bridge):
       p.send_signal(signal.SIGINT)
+    if joints is not None and joints.poll() is None:
+      os.killpg(joints.pid, signal.SIGINT)
     time.sleep(2)
+    if joints is not None and joints.poll() is None:
+      os.killpg(joints.pid, signal.SIGKILL)
     for p in (ctrl, bridge):
       if p.poll() is None:
         p.kill()
@@ -372,6 +463,12 @@ def main():
           f'still NO-GO if any phase fell (recovery buys per-phase evidence, not '
           f'forgiveness); see deploy_gate_analyzer.py output above.')
 
+  if joints_csv is not None:
+    with open(joints_csv) as f:
+      rows = sum(1 for _ in f) - 1
+    print(f'[joints] {joints_csv.name} rows={rows}')
+    if rows <= 0:
+      raise SystemExit(f'[joints] {joints_csv.name} has no rows -- the Run has no tau_est')
   print(f'[done] {base}.csv')
   if not args.no_analyze:
     # Both CSVs, not just the base one (D1, fixed 2026-08-04). An HRL session writes TWO

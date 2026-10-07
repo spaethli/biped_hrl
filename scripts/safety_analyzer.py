@@ -95,9 +95,11 @@ def main():
     # True control-tick count, NOT the logged row count: the flight recorder (2026-07-27)
     # decimates quiet ticks to ~500 Hz while always logging a tick in full when a safety
     # trigger fires, so n_rows < true tick count outside trigger bursts. tick_ increments
-    # by exactly 1 every control cycle regardless of decimation, so t[-1] = last_tick *
-    # control_dt reconstructs the true count exactly (and matches n_rows on older,
-    # pre-decimation CSVs where every tick was logged).
+    # by exactly 1 every control cycle regardless of decimation, so (t[-1]-t[0])/control_dt
+    # reconstructs the true count exactly (and matches n_rows on older, pre-decimation CSVs
+    # where every tick was logged). The `-t[0]` matters once `--entry` filters to a Run
+    # after the first: tick_ never resets on FSM re-entry (safety_logger.h:147-148), so only
+    # entry 0's t[0] is 0 -- any later entry's own t[0] is however many ticks came before it.
     n_ticks = int(round(float(t[-1] - t[0]) / control_dt)) + 1 if n_rows else 0
 
     # --- filter engagement ---

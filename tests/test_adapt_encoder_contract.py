@@ -83,10 +83,11 @@ def test_hl_obs_e_appears_exactly_once(yaml_path):
 def test_hl_obs_e_is_inside_the_hrl_block_and_defaults_off(yaml_path):
   """It has to be reachable as ``hrl.hl_obs_e`` (a key at file scope parses fine and is
   simply never read), and it must default OFF so every pre-WP5d checkpoint still deploys
-  byte-identically."""
+  byte-identically. The one exception is the bridge-only `deploy_est_hadapt.yaml`
+  (2026-10-03), which exists to switch it ON for the H-adapt arms, and must."""
   cfg = yaml.safe_load(yaml_path.read_text())
   assert "hl_obs_e" in cfg["hrl"], f"{yaml_path.name}: hl_obs_e is not under hrl:"
-  assert cfg["hrl"]["hl_obs_e"] is False
+  assert cfg["hrl"]["hl_obs_e"] is ("hadapt" in yaml_path.name)
 
 
 # --- the 92-float per-step vector --------------------------------------------

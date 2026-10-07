@@ -1,0 +1,188 @@
+# Bridge-only variant of deploy_est.yaml for the H-adapt (hl_obs_e) arms, schedule-replay chain 2026-10-03.
+# Identical except hl_obs_e. Never loaded on the robot unless selected by name.
+# SIM bridge config, ESTIMATOR MODE (2026-08-05). Identical to deploy.yaml except that the
+# goal-space state comes from the deployable IMU/FK estimator instead of the bridge's
+# privileged rt/sportmodestate.
+#
+# WHY IT EXISTS. The real robot has no rt/sportmodestate -- it publishes identical zeros
+# once our own low-level controller has command -- so deploy_real.yaml runs the estimator.
+# A bridge gate driven by deploy.yaml therefore validates a configuration the robot NEVER
+# runs, which is the same blind spot that produced the 2026-08-05 leg splay. This file is
+# what deploy_readiness.py drives the A1 candidate arm with; deploy.yaml is kept as-is so
+# every historical capture keeps its meaning and so the ground-truth arm stays available
+# for attribution (est fails + gt passes => estimator, not policy).
+#
+# It must stay a pure two-key delta from deploy.yaml -- tests/test_deploy_parity.py asserts
+# exactly that, so the two sim configs cannot drift apart.
+joint_ids_map: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26]
+step_dt: 0.02
+# Model v2 final (option B, ADR-0005): torso 300/3 hold gain (deploy fidelity),
+# arms 120/2 & 80/1. Requires training desired_kl=0.01.
+# MUST stay in lockstep with src/assets/robots/unitree_h1_2/h1_2_constants.py.
+stiffness: [200.0, 200.0, 200.0, 300.0, 40.0, 40.0, 200.0, 200.0, 200.0, 300.0, 40.0, 40.0, 300.0,
+            120.0, 120.0, 120.0, 80.0, 80.0, 80.0, 80.0, 120.0, 120.0, 120.0, 80.0, 80.0, 80.0, 80.0]
+damping:   [2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 2.5, 2.5, 2.5, 4.0, 2.0, 2.0, 3.0,
+            2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 1.0]
+default_joint_pos: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0]
+
+# HIRO hierarchy parameters (read by State_RLHRL). MUST match the trained checkpoint.
+# Values below = the A1a keeper line (velgoal + HL-owned cadence, 2026-07-14). The new
+# keys (hl_obs_vel .. pin_period) default OFF when absent, so pre-velgoal checkpoints
+# keep their old yaml unchanged.
+hrl:
+  hl_algorithm: learned                         # oracle (analytic V*=command+nominal, no high_level.onnx)
+                                                # | learned (default; needs high_level.onnx)
+  # Which base-velocity estimator feeds obs["hl_vel"]. REQUIRED, no default
+  # (docs/adr/0007); the other six arms run passively and are logged only.
+  # legodom | compl | ekf | ekf_grav | ekf_rot | jacobian | ekf_att
+  base_estimator: ekf_rot
+  c: 8                                          # HL period (control steps); HL holds V* between fires
+  hl_target_mode: delta                      # absolute (V*=center+scale*g) | delta (V*=state+scale*g)
+                                                # (ignored when hl_algorithm: oracle)
+  goal_components: [velocity, orientation, height]  # the 7-dim goal space; goal_dim derived from this
+  nominal_root_height: 1.3076                   # imu-site standing z (pelvis 1.03 + torso->imu 0.278);
+                                                # imu-vs-root offset cancels in the height delta at this value
+  hl_obs_vel: true                              # HL input = policy ++ command ++ (vx,vy estimate)
+  # WP5d (H-adapt): the HL additionally reads z_hat = phi(history) from
+  # exported/adapt_encoder.onnx, replacing the privileged env latent `e` that only exists
+  # in sim. FALSE / absent = the pre-WP5d path, byte-identical (no third ONNX session, no
+  # history buffer). Everything else about phi -- history length, per-frame layout, latent
+  # width, scales, clamp bounds, cold-start prior -- is baked into adapt_encoder.onnx and
+  # is deliberately NOT settable here: those are POLICY properties, same rule as goal_scale.
+  hl_obs_e: true      # deploy_est_hadapt.yaml (2026-10-03): the H-adapt arms; HL input 94 -> 99
+  hl_velocity_goals_only: true                  # HL emits velocity goal cols only; orient/height -> nominal
+  hl_cadence: true                              # checkpoint trained with the cadence channel
+  hl_cadence_source: hl                         # hl = HL owns the period (+1 action dim) | random (fixed clock)
+  cadence_period_range: [0.35, 1.0]             # tanh -> period affine map; MUST match agent.yaml
+  pin_period: 0.0                               # >0 freezes the LL phase clock (bring-up); 0 = HL-owned
+  # Synthetic Gaussian noise added to the goal-space state s each step (per-component std,
+  # 0 = off). Sim s is ground truth; this emulates the real-robot state-estimator noise on
+  # the LL's goal feedback, to test whether A1 would transfer. Suggested real-ish values:
+  # velocity ~0.05-0.1 m/s & rad/s, height ~0.02-0.05 m, orientation ~0.01-0.02. Orientation
+  # & ang_vel come from the IMU on hardware too; velocity & height are the estimator's job.
+  # The two keys that make this file differ from deploy.yaml. See deploy_real.yaml for the
+  # mechanism and for why they are mandatory on hardware.
+  base_vel_from_imu: true
+  base_height_from_fk: true
+  # Third key (2026-08-06): the HL's absolute velocity from leg odometry. Without it this
+  # file reproduces the 2026-08-05 blocker exactly -- the HL reads 0 at every fire and the
+  # candidate falls 3/3 -- which is why the A/B control arm is a COPY of this file with the
+  # key false, not this file itself.
+  hl_vel_from_leg_odom: true
+
+  state_noise:
+    velocity: 0.0
+    orientation: 0.0
+    height: 0.0
+
+commands:
+  # IMPORTANT: these ranges set the goal scale/center — they MUST equal the policy's
+  # training (play) ranges, or V* is reconstructed on the wrong scale.
+  base_velocity:
+    ranges:
+      lin_vel_x: [-0.5, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      # ±1.0 = the TRAINED range, deliberately NOT the older ±0.5 "tame joystick"
+      # setting (operator call, 2026-08-27): at ±0.5 the robot barely responded to
+      # small stick deflections, since the deploy range scales the command the policy
+      # sees. Matching training restored turning authority. Safe for current exports:
+      # goal_scale is baked into the HL ONNX metadata, so these ranges no longer feed
+      # the A1 scale derivation (that legacy path is pre-2026-07-16 exports only).
+      ang_vel_z: [-1.0, 1.0]
+      heading: null
+actions:
+  JointPositionAction:
+    # Commanded-target clip, hardware position limits in joint_ids_map order. MUST equal
+    # h1_2_limits.h (pinned by tests/test_deploy_yaml_clip_matches_the_limit_header, which
+    # also rejects a duplicate `clip` key -- yaml-cpp takes the FIRST occurrence, PyYAML the
+    # LAST, so an override appended below this block is a silent no-op ON THE ROBOT ONLY).
+    # Applied by joint_actions.h:54, BEFORE the State_RLBase safety clamp, which acts on
+    # (1-alpha)*action + alpha*q_meas and so coincides with this only at alpha = 0 --
+    # clipping first means a safety-hold ramp blends from an already-legal target.
+    # ADR-0009 (2026-08-28): KEPT when Model v3 was reverted. Training carries no clip, so
+    # this is a deploy-side backstop, NOT a parity device. What was cut is the training-side
+    # L1 excess penalty, which pushed the ankle command ~1.8 action-sigma off the bound and
+    # cost 2.1-2.4x of the roll range. v2 ran pinned by this clip 14-21% of steps on
+    # 2026-08-27 and was the best-performing configuration of the day.
+    clip: [
+      [-0.43, 0.43],   # left_hip_yaw_joint
+      [-3.14, 2.5],   # left_hip_pitch_joint
+      [-0.43, 3.14],   # left_hip_roll_joint
+      [-0.12, 2.19],   # left_knee_joint
+      [-0.897334, 0.523598],   # left_ankle_pitch_joint
+      [-0.261799, 0.261799],   # left_ankle_roll_joint
+      [-0.43, 0.43],   # right_hip_yaw_joint
+      [-3.14, 2.5],   # right_hip_pitch_joint
+      [-3.14, 0.43],   # right_hip_roll_joint
+      [-0.12, 2.19],   # right_knee_joint
+      [-0.897334, 0.523598],   # right_ankle_pitch_joint
+      [-0.261799, 0.261799],   # right_ankle_roll_joint
+      [-2.35, 2.35],   # torso_joint
+      [-3.14, 1.57],   # left_shoulder_pitch_joint
+      [-0.38, 3.4],   # left_shoulder_roll_joint
+      [-2.66, 3.01],   # left_shoulder_yaw_joint
+      [-0.95, 3.18],   # left_elbow_joint
+      [-3.01, 2.75],   # left_wrist_roll_joint
+      [-0.4625, 0.4625],   # left_wrist_pitch_joint
+      [-1.27, 1.27],   # left_wrist_yaw_joint
+      [-3.14, 1.57],   # right_shoulder_pitch_joint
+      [-3.4, 0.38],   # right_shoulder_roll_joint
+      [-3.01, 2.66],   # right_shoulder_yaw_joint
+      [-0.95, 3.18],   # right_elbow_joint
+      [-2.75, 3.01],   # right_wrist_roll_joint
+      [-0.4625, 0.4625],   # right_wrist_pitch_joint
+      [-1.27, 1.27],   # right_wrist_yaw_joint
+    ]
+    joint_names: [.*]
+    # v2 scale = 0.25*effort/kp: legs 0.25, torso 0.166667, shoulder p/r 0.083333,
+    # shoulder_yaw 0.0375, elbow+wrists 0.05625.
+    scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.166667,
+            0.083333, 0.083333, 0.0375, 0.05625, 0.05625, 0.05625, 0.05625, 0.083333, 0.083333, 0.0375, 0.05625, 0.05625, 0.05625, 0.05625]
+    offset: [0,-0.2,0,0.5,-0.3,0, 0,-0.2,0,0.5,-0.3,0,  0,  0.28,0,0,0.52,0,0,0, 0.28,0,0,0.52,0,0,0]
+    joint_ids: null
+
+# Grouped observations. `policy` = A0 proprio with the command removed (LL + HL shared
+# input); `command` = the twist command (HL input only). Order must match the training
+# obs groups: base_ang_vel, projected_gravity, gait_phase, joint_pos_rel, joint_vel_rel,
+# last_action. The 7-dim `goal` (V*-s delta) is synthesized by State_RLHRL, not here.
+observations:
+  policy:
+    base_ang_vel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1
+    projected_gravity:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1
+    gait_phase_cmd:
+      params: {period: 0.6}
+      clip: null
+      scale: [1.0, 1.0]
+      history_length: 1
+    joint_pos_rel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+    joint_vel_rel:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+    last_action:
+      params: {}
+      clip: null
+      scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+              1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      history_length: 1
+  command:
+    keyboard_velocity_commands:
+      params: {command_name: base_velocity}
+      clip: null
+      scale: [1.0, 1.0, 1.0]
+      history_length: 1

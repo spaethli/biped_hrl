@@ -244,3 +244,67 @@ def test_expected_dims_track_hl_obs_vel_and_goal_components(tmp_path):
   (pdir / "params" / "deploy.yaml").write_text(
     "hrl:\n  hl_obs_vel: false\n  goal_components: [velocity]\n")
   assert prov.expected_dims(pdir) == {"high_level.onnx": 92, "low_level.onnx": 92}
+  # H-adapt reads phi's 5-dim latent estimate as well: 94 -> 99, and only in the yaml that says so
+  (pdir / "params" / "deploy_est_hadapt.yaml").write_text(
+    "hrl:\n  hl_obs_vel: true\n  hl_obs_e: true\n  goal_components: [velocity, orientation, height]\n")
+  assert prov.expected_dims(pdir, "deploy_est_hadapt.yaml") == {"high_level.onnx": 99, "low_level.onnx": 96}
+
+
+# --- joint telemetry beside a bridge Run (2026-10-02) -------------------------------------
+# The node's own log line names the file; a directory glob would pick up another session's.
+
+@pytest.mark.parametrize("line,status,blocking", [
+  ("[joints] all_joints_2026-10-02_10-00-00.csv rows=12650", "INFO", False),
+  ("[joints] all_joints_2026-10-02_10-00-00.csv rows=0", "INFRA", True),
+  ("[joints] ABORTING before the command sequence: read_all_joints is not logging", "INFRA", True),
+  ("", "INFRA", True),
+])
+def test_readiness_reports_a_run_without_joint_telemetry_as_infra(monkeypatch, line, status, blocking):
+  import argparse
+  import deploy_readiness as dr
+  out = f"[log] /tmp/x.csv\n[band] released (key 9, focus verified)\n{line}\n"
+  monkeypatch.setattr(dr, "run", lambda cmd: (0, out))
+  results = []
+  dr.run_bridge_arm("hrl", "t", argparse.Namespace(seq="0:1"), None, results, "candidate")
+  r = next(r for r in results if "joint telemetry" in r.name)
+  assert (r.status, r.blocking) == (status, blocking)
+
+
+def test_readiness_passes_the_telemetry_opt_out_through(monkeypatch):
+  import argparse
+  import deploy_readiness as dr
+  seen = {}
+  monkeypatch.setattr(dr, "run", lambda cmd: (seen.setdefault("cmd", cmd), (0, "[log] /tmp/x.csv\n"))[1])
+  results = []
+  dr.run_bridge_arm("hrl", "t", argparse.Namespace(seq="0:1", no_joint_telemetry=True),
+                    None, results, "candidate")
+  assert "--no-joint-telemetry" in seen["cmd"]
+  assert not any("joint telemetry" in r.name for r in results)
+
+
+@pytest.mark.parametrize("alive,grows,n_new,expect", [
+  (True, True, 1, True), (True, False, 1, False), (False, True, 1, False),
+  (True, True, 0, False),   # the node never opened a file
+  (True, True, 2, False),   # a second node is logging: the pair would be a guess
+])
+def test_joints_gate_needs_one_new_growing_file_from_a_live_node(tmp_path, monkeypatch,
+                                                                 alive, grows, n_new, expect):
+  import bridge_session
+  monkeypatch.setattr(bridge_session, "TRAJ_DIR", tmp_path)
+  old = tmp_path / "all_joints_2026-10-01_09-00-00.csv"
+  old.write_text("time,q[0]\n0.0,1.0\n")
+  before = {old}
+  new = [tmp_path / f"all_joints_2026-10-02_10-00-0{i}.csv" for i in range(n_new)]
+  for f in new:
+    f.write_text("time,q[0]\n")
+
+  def tick(_):
+    for f in (new + [old]) if grows else []:
+      f.write_text(f.read_text() + "0.0,1.0\n")
+  monkeypatch.setattr(bridge_session.time, "sleep", tick)
+
+  class Proc:
+    def poll(self):
+      return None if alive else 1
+  got = bridge_session.joints_logging(Proc(), before)
+  assert (got == new[0] if expect else got is None)

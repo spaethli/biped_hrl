@@ -287,6 +287,8 @@ def run_bridge_arm(policy, tag, args, deploy_cfg=None, results=None, arm=None) -
     cmd += ["--deploy-cfg", deploy_cfg]
   if getattr(args, "auto_restand", False) and arm == "candidate":
     cmd += ["--auto-restand"]
+  if getattr(args, "no_joint_telemetry", False):
+    cmd += ["--no-joint-telemetry"]
   rc, out = run(cmd)
   # Surface the elastic-band release (2026-08-06). bridge_session prints exactly one
   # `[band] ...` line and this function used to keep only the `[log]` path, so the single
@@ -300,6 +302,15 @@ def run_bridge_arm(policy, tag, args, deploy_cfg=None, results=None, arm=None) -
                           "INFO" if ok else "INFRA",
                           band.group(1) if band else "no [band] line — release not attempted",
                           blocking=(arm == "candidate" and not ok)))
+    if not getattr(args, "no_joint_telemetry", False):
+      # Same shape as the band line: without the joint telemetry log the Run has no tau_est,
+      # and the scorer drops cot / mech_power_w with a WARN nobody reads in a battery.
+      jl = re.findall(r"^\[joints\] (.*)$", out, re.M)
+      jok = bool(jl) and re.search(r"rows=[1-9]", jl[-1]) is not None
+      results.append(Result("bridge", f"{arm} joint telemetry",
+                            "INFO" if jok else "INFRA",
+                            jl[-1] if jl else "no [joints] line — read_all_joints not launched",
+                            blocking=(arm == "candidate" and not jok)))
   m = re.search(r"\[log\]\s*(\S+)\.csv", out)
   return Path(m.group(1) + ".csv") if m else None
 
@@ -576,6 +587,10 @@ def main() -> int:
                        "lying down) before the next phase, so one fall does not cost "
                        "every later phase's evidence -- does not touch stage_analyze's "
                        "fall gate, which stays blocking.")
+  ap.add_argument("--no-joint-telemetry", action="store_true",
+                  help="pass through to bridge_session.py: do not record the joint telemetry "
+                       "log beside either arm. The Runs then carry no tau_est (no cot, no "
+                       "mech_power_w) and the 'joint telemetry' result is not emitted.")
   ap.add_argument("--no-stage-policy", dest="stage_policy", action="store_false",
                   help="score whatever is ALREADY in --policy-dir/exported instead of "
                        "staging --checkpoint-file into it. Use to validate an export you "

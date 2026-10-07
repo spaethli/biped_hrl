@@ -85,11 +85,13 @@ def input_dim(path: Path) -> int:
   return g.input[0].type.tensor_type.shape.dim[1].dim_value
 
 
-def expected_dims(policy_dir: Path) -> dict[str, int]:
-  """HL input = 92 proprio+command, +2 when the HL also reads the (vx,vy) estimate.
-  LL input = 89 (proprio minus the 3 command columns) + goal_dim. The C++ throws on a
-  mismatch, so catching it here turns a runtime abort into a pre-flight message."""
-  cfg_path = policy_dir / "params" / "deploy.yaml"
+def expected_dims(policy_dir: Path, deploy_cfg: str = "deploy.yaml") -> dict[str, int]:
+  """HL input = 92 proprio+command, +2 when the HL also reads the (vx,vy) estimate, +5 when
+  it reads phi's latent estimate (`hl_obs_e`, H-adapt: 94 -> 99). LL input = 89 (proprio
+  minus the 3 command columns) + goal_dim. The C++ throws on a mismatch, so catching it here
+  turns a runtime abort into a pre-flight message. `deploy_cfg` names the yaml the controller
+  will load (`H1_2_DEPLOY_CFG`), since the widths are a property of that file."""
+  cfg_path = policy_dir / "params" / deploy_cfg
   if not cfg_path.exists():
     return {}
   cfg = yaml.safe_load(cfg_path.read_text())
@@ -98,12 +100,12 @@ def expected_dims(policy_dir: Path) -> dict[str, int]:
     return {}
   goal_dim = sum({"velocity": 3, "orientation": 3, "height": 1}[c]
                  for c in hrl.get("goal_components", []))
-  return {"high_level.onnx": 92 + (2 if hrl.get("hl_obs_vel") else 0),
+  return {"high_level.onnx": 92 + (2 if hrl.get("hl_obs_vel") else 0) + (5 if hrl.get("hl_obs_e") else 0),
           "low_level.onnx": 89 + goal_dim}
 
 
 def check(policy_dir: Path, index: dict[str, list[Path]] | None = None,
-          expect_checkpoint: Path | None = None) -> dict:
+          expect_checkpoint: Path | None = None, deploy_cfg: str = "deploy.yaml") -> dict:
   """P1 identify / P1c manifest / P2 dims / P3 goal_scale / P4 structure. Returns a report;
   the caller decides the verdict. Never raises on a bad policy -- only on a missing one.
 
@@ -115,7 +117,7 @@ def check(policy_dir: Path, index: dict[str, list[Path]] | None = None,
   exported = policy_dir / "exported"
   index = build_index() if index is None else index
   names = net_names(policy_dir)
-  dims = expected_dims(policy_dir)
+  dims = expected_dims(policy_dir, deploy_cfg)
   manifest = json.loads((exported / MANIFEST).read_text()) \
       if (exported / MANIFEST).exists() else None
 
@@ -233,6 +235,9 @@ def main() -> int:
                   help="required with --stage; with --check alone it becomes the EXPECTED "
                        "policy and a mismatch is a failure")
   ap.add_argument("--policy-dir", type=Path, default=HRL_DIR)
+  ap.add_argument("--deploy-cfg", default="deploy.yaml",
+                  help="the params yaml the controller will load, which sets the input widths "
+                       "checked against (e.g. deploy_est_hadapt.yaml for an hl_obs_e policy)")
   args = ap.parse_args()
   if not (args.check or args.stage):
     ap.error("pass --check or --stage")
@@ -246,7 +251,7 @@ def main() -> int:
       print(f"[PROV]   {k:20s} {v}")
     print(f"[PROV] wrote {args.policy_dir / 'exported' / MANIFEST}")
 
-  rep = check(args.policy_dir, expect_checkpoint=args.checkpoint_file)
+  rep = check(args.policy_dir, expect_checkpoint=args.checkpoint_file, deploy_cfg=args.deploy_cfg)
   for name, e in rep["nets"].items():
     srcs = ", ".join(e["source_runs"]) or "<NO MATCH>"
     print(f"[PROV] {name:20s} md5={e['md5'][:12]} dim={e['input_dim']:<4} "
