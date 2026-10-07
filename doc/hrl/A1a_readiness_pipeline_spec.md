@@ -147,7 +147,7 @@ logged column: A0 9.6 % vs 9.6 %, keeper 57.2 % vs 57.2 %, rolloverfix 92.5 % vs
 | rolloverfix0p5 | right/left **ankle_roll** | 74.9 / 58.0 % | **[−0.26, +0.26]** | −0.70/+1.51, −0.58/+0.65 |
 
 `h1_2_limits.h`'s ankle-roll ±0.26 **is identical to the training XML's ±0.261799**
-(`h1_2.xml:82,123`) — not the knee discrepancy `deployment.md` flags. **The policies
+(`h1_2.xml:82,123`) — and the knee rows match the XML too. **The policies
 genuinely command 2.1–2.7x past the mechanical stop.**
 
 Root cause: MuJoCo silently clamps `qpos` at the joint range, so a policy commanding

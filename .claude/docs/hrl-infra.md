@@ -495,6 +495,22 @@ actor/critics/targets/normalizer/optimizers (resume-safe); replay buffer not sav
   old yaml must restore the OLD default explicitly — "absent keeps defaults" silently rebuilds
   wrong-shaped nets (2026-07-15: missing `hl_obs_vel` shim broke every pre-velobs TD3 replay,
   92 vs 94 dims).
+- **Schedule-replay chain (2026-10-02): one schedule, one scorer at bench and bridge.** `play.py
+  --eval-cmd-seq <spec|default>` steps every env through a `bridge_session.py --seq` schedule (key
+  map parsed from `h1_2_observations.h`, so it cannot drift from the controller) and `--eval-trace`
+  writes one row per policy step per env in the flight recorder's quantities, joints in DEPLOY slot
+  order: commanded target (UNCLIPPED; the bridge logs it after the yaml clip), measured q/dq,
+  actuator torque, the IMU body's attitude and gyro (torso, behind the waist yaw: `err_yaw` reads
+  ~2x the pelvis value the inline bench uses), the pelvis velocity read in the torso frame (what
+  both controllers log as `ach_v`), the observed phase, first-fall step, per-term env reward.
+  `bench_flight_recorder.py --trace` scores every env as a unit through the unchanged
+  `score_regime`. `bridge_session.py` launches `read_all_joints` itself (WARN log level: at INFO
+  it writes ~3 MB/s), clears stray nodes first and refuses to start the schedule unless exactly
+  one new telemetry file is growing. Units live in `logs/sim_logs/chain_seq/<tag>/{bench,bridge}/`;
+  `plot_thesis_figures.chain_seq_units` reads them, a fallen unit excluded AND counted.
+  Measured: 64 envs x 253 s = 3.6 min per checkpoint, 392 MB trace; two rollout seeds agree to
+  0.3%, so one is used. `driver_bridge.sh` restages each policy and restores the keeper + A0 s42
+  into `deploy/` on exit, md5-checked.
 - **A1a fixed-command / stride-period eval** (`play.py`, eval-only): `--eval-cmd-vx/vy/wz` pin the
   twist command (standing/heading off) so a stride sweep isolates the commanded period from the
   natural v→period map; `--eval-cmd-heading <rad>` holds a world heading (P-controller corrects
@@ -732,9 +748,13 @@ a bootstrap CI over repeats does NOT include this systematic and will read far t
   never underflow. A velocity-only goal space would let the per-step reward reach 0, break
   the exp ↔ true-terminal pairing rule, and could resurrect the suicide attractor. Asserted
   by `test_exp_positivity_depends_on_the_bounded_orientation_term`.
-- **Deploy command ranges are an operator safety clamp and deliberately do NOT match
-  training** (`ang_vel_z` ±0.5 vs ±1.0 trained). Never "fix" them to match; the goal scale
-  travels with the policy via ONNX metadata precisely so the clamp is free to differ.
+- **Deploy command ranges are an operator safety clamp, free to differ from training** —
+  the goal scale travels with the policy via ONNX metadata precisely so the clamp can
+  differ without corrupting the goal decode. ⚠ The old ±0.5 `ang_vel_z` "tame joystick"
+  clamp was **abandoned 2026-08-27** (it barely let small stick deflections move the
+  robot); all 8 deploy yamls now use the trained ±1.0. `lin_vel_x`/`lin_vel_y` deploy at
+  `(-0.5, 1.0)`/`(-0.5, 0.5)`, matching the actual trained range (not a narrower clamp) —
+  see `doc/hrl/A0_model_delta_vs_upstream.md` §4b.
 - A1 LL `entropy_coef=0.005` (0.01 lets action std blow up to ~2 and collapse);
   `desired_kl=0.005`; LR adaptive, sits near floor 1e-5.
 - Same-config runs diverge a lot (GPU non-determinism + RL chaos). Treat `num_envs` as a

@@ -267,7 +267,7 @@ Which of the two disjoint command conditions a smoothness number was measured un
 **walking** (‖cmd‖ > 0.1, A0's `command_threshold`) or **standing** (‖cmd‖ ≤ 0.1). Always
 reported separately, never pooled, because a lever can improve one while destroying the
 other (measured: 5325 vs 142 zero-command touchdowns) and because the aggregate bench is
-~95/5 walking/standing (`rel_standing_envs = 0.05`), too thin to surface a standing defect.
+~88/12 walking/standing (`rel_standing_envs = 0.12`), too thin to surface a standing defect.
 _Avoid_: "the benchmark number" (the aggregate pools regimes and is not a walking number);
 "stand still" (that names the `ll_stand_still_coef` reward term, not a measurement
 condition).
@@ -279,6 +279,14 @@ difference whose sign flips with the seed is not an effect of the lever. Standin
 replicates worst (4.2x at identical config and seed in training), so hardware and sim standing
 claims are made per (variant, seed), never from one pooled arm.
 _Avoid_: "the DR arm" / "the keeper" as if one checkpoint stood for a recipe.
+
+**Rollout seed**:
+The random seed of ONE benchmark rollout of ONE checkpoint: it redraws the initial states and
+the per-env startup parameters, never the policy. Distinct from the training seed a
+_Seed band_ is made of. Two rollout seeds of one checkpoint are two measurements of the same
+policy; two training seeds are two policies.
+_Avoid_: bare "seed" wherever both kinds are in play (a figure that separates training seeds
+while its bench averages rollout seeds reads as if it pooled the policies).
 
 **Physical units rule**:
 Every commanded-side smoothness number is reported in radians, never raw action units,
@@ -309,8 +317,9 @@ _Avoid_: "all_joints" bare, "the trajectory log" (nothing is a trajectory here);
 "the estimator log" (its estimator columns are the dead ones).
 
 **Run**:
-One continuous occupancy of an RL state on the robot: the operator enters the policy,
-it walks, it leaves. **This, not a file, is the unit every hardware metric is scored over.**
+One continuous occupancy of an RL state, on the robot or on the sim bridge: the policy is
+entered, it walks, it is left. **This, not a file, is the unit every hardware and bridge metric
+is scored over.** A scripted bridge session holds exactly one Run.
 It is identified by the _Flight recorder_'s `entry` column, which is process-wide and
 increments on every re-entry, so one _Flight recorder_ file holds as many Runs as the
 operator started without restarting the controller (three, in `15-00-37.csv` on 2026-09-14,
@@ -320,7 +329,8 @@ A Run's wall-clock extent comes from `t_wall` only. The `t` column is a tick cou
 advances one control step per loop iteration and does not run while the robot sits in
 Passive, so the gaps *between* Runs are invisible in it.
 _Avoid_: "session" or "recording" for a single Run (a session is a day's work and a
-recording is a file, and both hold several); "a log" (one Run is a slice of two logs).
+recording is a file, and both hold several); "a log" (one Run is a slice of two logs);
+"capture" for a bridge Run (that word is the _Motion-capture ground truth_'s).
 
 **Session pair**:
 The alignment of one _Run_ with the _Joint telemetry log_ that was recording during it, so

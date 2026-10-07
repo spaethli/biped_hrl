@@ -475,8 +475,8 @@ safety_logger.h}`; the shared `deploy/include/FSM/State_RLBase.h` guards its log
   A0 (`State_RLBase`) keeps any-joint-out → hold; A1 (`State_RLHRL`) CLAMPS the offending
   command to `h1_2_joint_limits` instead (the A1a gait rides its stops every stride; the hold
   response completed the 2026-07-16 bridge fall at tilt 0.196). `trig_joint` in the A1 flight
-  log now means "clamp active". Audit note: `h1_2_limits.h` disagrees with the sim model at
-  the knee ([-0.26, 2.05] vs XML [-0.12, 2.19]) — re-audit vs URDF before hardware.
+  log now means "clamp active". `h1_2_limits.h` knee rows are `{-0.12, 2.19}`, matching the
+  sim XML (an earlier `[-0.26, 2.05]` mismatch was fixed by the WL-B0 audit).
   Complements — fires earlier/softer than — the existing FSM `bad_orientation`→Passive check.
 - **IMU accel convention (verified in sim):** physical IMU = *specific force* → standing reads
   +9.81, so `a_world_z=(R·a_imu).z−9.81` ≈0 standing/hanging, ≈−9.81 free-fall. Sim free-fall

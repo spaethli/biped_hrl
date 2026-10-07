@@ -933,9 +933,13 @@ hierarchical run carried the all-zero no-op.
 between-session spread this ADR already measured on nominally identical baselines. A flat policy
 stands upright on this robot.
 
-**What IS supported, and it is a variance claim.** The flat baseline spans **3.87° across two
-seeds** (+0.66° / -3.21°) *with* the correction enabled, while the hierarchical family spans
-**0.87° across 6 recipe/seed combinations** (-0.28° .. +0.59°) *without* it.
+⛔ **What was recorded here as a variance claim is WITHDRAWN by the 2026-09-23 amendment
+below.** It read: the flat baseline spans **3.87° across two seeds** (+0.66° / -3.21°) *with*
+the correction enabled, while the hierarchical family spans **0.87° across 6 recipe/seed
+combinations** (-0.28° .. +0.59°) *without* it. Both numbers are still correct as measured.
+The inference is not: with the correction **off** on both A0 seeds the flat spread collapses
+to **1.28°**, so the 3.87° is a property of a shared calibration constant meeting two
+different offset-rejection gains, not of the architecture's posture variance.
 
 **The seed spread is not the stillness confound.** A0_s123 is the *most still* arm in the session,
 so the 2026-08-03 confound (more still -> more lean, slope -0.0739°/point, r=-0.958) points the
@@ -948,13 +952,165 @@ observed -3.68° gap, leaving **88% unexplained**. Within A0 the spread runs at 
 fidget*. The family covers a 33.5-point stillness span (49.6-83.1%) and produces 0.87° of pitch
 spread, where the confound slope predicts 2.5°. Flat does not behave this way.
 
-**Open confound, not closable from disk.** A0's 0.036 rad chain was calibrated 2026-08-03, before
-the 2026-08-13 leg re-zero, and this ADR warns a stale value can add to the lean. So part of
-A0_s123's -3.21° may be the crutch pushing the wrong way rather than a policy property.
-**Closing test (~5 min, next session): one A0_s123 run with `joint_offset` all-zero, same session
-as an A1a run.** Until then "flat needs the correction, the hierarchy does not" is unproven; only
-the seed-spread asymmetry above is.
+✅ **Open confound, CLOSED 2026-09-23 (amendment below).** A0's 0.036 rad chain was calibrated
+2026-08-03, before the 2026-08-13 leg re-zero, and this ADR warns a stale value can add to the
+lean. So part of A0_s123's -3.21° may be the crutch pushing the wrong way rather than a policy
+property. **Closing test as specified here (one A0 run with `joint_offset` all-zero, same
+session as an A1a run) was executed 2026-09-23 on both seeds.** Outcome: "flat needs the
+correction, the hierarchy does not" is **supported**; the seed-spread asymmetry is **withdrawn**.
 
 ⚠ Supersedes the 2026-09-21 session's own first pass, which gated on `|cmd|<0.1` without
 dq-filtering and without stillness, and read this as an architecture effect. The ADR-0006
 comparability rule is what caught it.
+
+## Amendment (2026-09-23): the closing test, run on both seeds. The correction is load-bearing for the flat policy and not for the hierarchy
+
+The test the 2026-09-21 amendment specified was executed in the **2026-09-23 session**, 18 runs,
+one robot state, `alpha==0` throughout. Same statistic as the 2026-08-03 table and the
+2026-09-21 amendment: zero-command rows (`|cmd_vx|,|cmd_vy|,|cmd_wz| < 0.05`, `alpha==0`),
+`still` = fraction with `max|dq|` over the 12 leg slots `< 0.1`, pitch = `asin(2(wy - zx))` from
+the recorder's `quat_*`, averaged over the **still rows only**. `joint_offset` read per-run from
+each `_meta.json`.
+
+**Design: `joint_offset` toggled WITHIN one policy, in one session.** This is the within-policy
+intervention this ADR has recommended since 2026-08-03, so the cross-policy stillness confound
+does not apply to the A0 rows.
+
+| arm | offset | runs | still | mean `max\|dq\|` | stand pitch |
+|---|---|---|---|---|---|
+| **A0_s42** | **0.036 chain** | 2 | 85.0% | 0.071 | **+0.63°** |
+| **A0_s42** | **all zero** | 2 | 77.5% | 0.137 | **-4.46°** |
+| **A0_s123** | **all zero** | 1 | 71.9% | 0.138 | **-5.74°** |
+| A1a_s42 | all zero | 3 | 69.1% | 0.387 | +0.60° |
+| A1a_DR_s42 | all zero | 2 | 72.7% | 0.308 | +0.50° |
+
+**Method validated against the previous session before anything was read from it.** On the
+configs both sessions share, 2026-09-16 vs 2026-09-23: A0_s42 offset-on **+0.66° vs +0.63°**,
+A1a_DR_s42 **+0.48° vs +0.50°**, A1a_s42 **+0.46° vs +0.60°**. Cross-session reproducibility is
+**better than 0.15°**, against a 1.0° between-session spread previously assumed. Every effect
+below is one to two orders of magnitude larger than that.
+
+**1. The correction is worth 5.09° to the flat policy** (A0_s42, within-policy, within-session,
+n=2 per cell): -4.46° -> +0.63°. It also costs 7.5 points of stillness and **1.9x** the mean
+`max|dq|` when removed. The channel is not marginal; without it A0 does not stand upright.
+
+**2. Both A0 seeds lean without it, and they agree.** -4.46° (s42) and -5.74° (s123), a spread of
+**1.28°**, against the hierarchical family's 0.87° over six recipe/seed combinations. The flat
+architecture is **not** high-variance in stand attitude. This withdraws the 3.87° variance claim
+made on 2026-09-21 (edited in place above).
+
+**3. What the 3.87° actually was: a policy-dependent offset-rejection gain.** The seeds do not
+differ in posture, they differ in how strongly the closed loop amplifies a static calibration
+error, so one shared constant cannot serve both:
+
+| seed | pitch @ offset 0 | pitch @ 0.036 | measured gain |
+|---|---|---|---|
+| s42 | -4.46° | +0.63° (same session) | **141°/rad = 2.46 rad/rad** |
+| s123 | -5.74° | -3.21° (2026-09-16) | **70°/rad = 1.22 rad/rad** |
+
+⚠ The s123 offset-on cell is **cross-session**, so its gain is the weaker of the two. Both sit
+inside the hardware range this ADR already measured in the 2026-08-03 Spec B sweep (2.20 in run 1,
+0.63-1.01 in run 2), and s123's 1.22 is close to probe P1's sim prediction of **1.263**. This is
+the hardware confirmation of P1's central claim that the closed loop **amplifies** a static ankle
+offset rather than attenuating it, and that the gain is a **policy property**.
+**Remaining cell: one A0_s123 run with the offset on, same session.**
+
+**4. "Flat needs the correction, the hierarchy does not" is now supported, at matched stillness.**
+A0_s123 offset-off sits at **71.9%** still and A1a_DR_s42 at **72.7%**, i.e. 0.8 points apart,
+where the 2026-08-03 confound slope (-0.0739°/point) predicts **0.06°** of difference. The
+measured difference is **6.24°**, so 99% is unexplained by the confound. The hierarchical arms
+have never carried a nonzero `joint_offset` and stand at +0.50 to +0.60°.
+
+**5. Consequence for operations: the offset is per-session AND per-policy.** This ADR already
+required a per-session quiet-stand re-check. The gain difference adds that a value nulling one
+policy can be 2x wrong for another on the same robot, so a correction must never be carried
+across a policy swap.
+
+**6. Consequence for the benchmark.** Simulated stand pitch is approximately zero for every
+policy here, at every offset, because the simulated encoders are true. A defect worth 5.09° of
+real stand attitude, and the difference between standing and not standing, is invisible to every
+pre-registered sim metric. Fourth instance of the pattern in ADR-0009 and ADR-0013.
+
+⚠ **Wording caution for any write-up.** "A0 could not stand still with the offset off" is not
+supported by the joint-level statistic: at `mean max|dq|` 0.137 it was **quieter than every
+hierarchical run in the session** (0.308-0.387). What degraded is **attitude**, not joint
+motion: 5.09° of lean, 1.9x the `max|dq|`, and roughly double the pitch standard deviation on an
+unfiltered read. State the quantity, not the impression.
+
+## Amendment (2026-09-23, part 2): probe P1 extended to A1a. The hierarchy's encoder-offset gain is 7.8x lower, and the mechanism is the goal's coordinate system
+
+The amendment above measured the correction's worth on hardware but left the mechanism open.
+Probe P1 (2026-07-31) was only ever run on A0. Running it on both architectures closes that,
+and the same session's gravity discriminator falsifies the obvious explanation.
+
+⚠ **First, a probe defect: `--probe-lean` had never worked on a hierarchical policy, and it
+failed silently in the direction of the hypothesis.** It resolved the observation group by
+**name** (`("actor", "critic")` for the `joint_pos(biased=True)` wiring, and
+`observations["actor"]` twice in the gravity branch). A1 splits that group into
+`policy`/`command`/`goal` and **deletes `actor`** (`config/h1_2_a1/env_cfgs.py:62`), so on A1
+the bias was wired onto `critic` only, which the policy never reads. Per this probe's own
+contract that flag *is* the probe: with it off the policy sees the TRUE joint angle and the
+bias is nulled by a constant action shift, so the broken probe reports a **spurious
+near-zero sensitivity**. Fixed in `scripts/play.py` to resolve groups by **term** rather than
+name, with a printed assertion naming the wired groups. **No previously published number is
+affected** (P1 and every lean figure in this ADR are A0-only). Same shape as the standing
+gotcha that a gate keyed on a name goes vacuous once the name changes.
+
+### Encoder-bias sensitivity, `d(pitch)/d(bias)` in rad/rad
+
+| arm | chain (`all`) | ankle_pitch | knee | hip_pitch | pitch range over ±0.0317 rad |
+|---|---|---|---|---|---|
+| **A0** (matched, `rse` 0.12 s42) | **+1.283** | +1.657 | +1.330 | +0.741 | **4.63°** |
+| **A1a** (keeper) | **-0.165** | +0.046 | -0.154 | -0.389 | **0.60°** |
+
+**Instrument validated before use:** A0 reproduces P1's rs20 figures (chain 1.263, ankle
+1.684, knee 1.287, hip 0.733) to a few percent **on a different A0 arm**, and repeated at
+1.306/1.283 across the fix (1.8%). A1a is **7.8x** less sensitive with a sign flip. This is
+the simulation counterpart of the hardware result above, and it predicts it.
+
+### The obvious mechanism is FALSIFIED
+
+Pre-registered prediction: if A1a rejects encoder bias by weighting the IMU more, it must be
+**more** fragile to `projected_gravity` corruption, and the two probes would point in
+opposite directions. `--probe-gravity-noise "0.05,0.1,0.2,0.4"`:
+
+| noise | A0 `leg\|dq\|` | A1a `leg\|dq\|` | A0 pitch drift | A1a pitch drift |
+|---|---|---|---|---|
+| ±0.05 (control) | 1.00x | 1.00x | 0.00° | 0.00° |
+| ±0.20 | 4.66x | 4.51x | -0.57° | +0.26° |
+| ±0.40 | 32.96x | 8.32x | **-1.35°** | **+0.64°** |
+
+A1a degrades **less** on both perturbations. There is no trade. (A0's 32.96x is inflated by a
+0.017 baseline; the absolute levels at ±0.40, 0.549 vs 0.391, and the pitch drift are the
+fairer statements and agree.)
+
+### What the data supports: a coordinate system, not a weighting
+
+The orientation goal component **is projected gravity** (`goal_space.py`, `_orient_scale`:
+"projected gravity lives in [-1, 1]"), 3 of 7 goal dims, and the A1 LL trains on the
+intrinsic goal-distance **only**, so orientation is ~43% of its entire training signal.
+A0's `body_orientation_l2` is weight -1.0 among **17** reward terms.
+
+So the LL's attitude target is written in a channel a static encoder offset cannot move,
+while A0's standing equilibrium is a trade-off among 17 terms that the offset relocates.
+Immunity by construction, requiring **no** loss of gravity robustness, which is exactly why
+the hierarchy wins on both probes. Consistent with Spec A from the other end (2026-08-03):
+biasing A0's encoder observation moved its chain gain 1.263 -> 0.772, toward A1a but not to
+it. Spec A changed the weighting and got part way; the hierarchy changes the coordinate
+system and gets all of it.
+
+⚠ **n=1 policy per architecture** on this gain, and A1a's control-noise `leg|dq|` is already
+2.8x A0's (0.047 vs 0.017): it starts noisier and degrades less steeply.
+
+### Consequence for the benchmark
+
+The benchmark cannot see any of this because it **never makes the two observation channels
+disagree**: play mode sets `enable_corruption=False`, and the observation half of the
+encoder-bias DR is off by default, so simulated encoders and IMU always agree. A probe that
+injects the unmodelled defect recovers the ranking **in simulation**. The blindness recorded
+in ADR-0009 and ADR-0013 is therefore a property of the **evaluation protocol**, not of
+simulation itself, and is fixable by adding a disagreement sweep to the benchmark.
+
+⚠ `pytest` not run with this change: `check_test_sensitivity.py` was running concurrently and
+mutates yaml in place. Deferred. The change is 21 insertions confined to the probe block of
+`scripts/play.py`; no `src/` file is touched.
