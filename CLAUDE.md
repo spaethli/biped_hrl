@@ -27,6 +27,12 @@ for sim-to-real transfer. Built on `mjlab` + `rsl_rl` + MuJoCo-Warp (NOT Isaac L
   steady-state + `t90` numbers, and check the `[HOLDDIAG]` per-env split — batch means
   hide bimodal backwards modes): the random-command aggregate hides sustained-command
   failures (2026-07-13/15, `A1a_plan.md` tables e/f).
+- Schedule-replay bench (2026-10-02, the bench point of the chain figures): `python scripts/play.py
+  <TaskID> --checkpoint-file <pt> --num-envs 64 --eval-seeds 1 --eval-cmd-seq default --eval-trace
+  <path>` replays the bridge's 253 s command schedule in every env and writes a trace;
+  `bench_flight_recorder.py --sim --trace <path>_s42.npz --out-dir <dir>` scores each env with the
+  scorer the bridge and the robot use. Its inline `[BENCH]` pools regimes; ignore it. Drivers:
+  `data/2026-10-02-chain-seq/driver_{bench,bridge}.sh` → `.claude/docs/hrl-infra.md`.
 - IMU velocity-increment bench (deploy feasibility): `python scripts/play.py <TaskID>
   --checkpoint-file <pt> --num-envs 64 --check-vel-increment 480 --eval-seeds 2` — prints
   `[VELINC] {json}`. `delta`-mode goal obs cancels absolute velocity, so deploy needs only the
@@ -123,6 +129,46 @@ robot. **Do not defend the A1a choice with sim numbers.**
 - **Don't just write more and more code: reuse or extend existing functions** before
   adding new ones. Reuse keeps the codebase understandable and modular.
 - Match the surrounding code's terseness/idiom. 2-space indent.
+
+## Figures (SCIFIG rubric)
+
+Source: `~/biped_hrl_wiki/raw/report_guides/SCIFIG_agent.md` + `FigureRubric/` (Rokhmanova & Schulz);
+summary `wiki/reference/scientific-figures-guide.md`. Check every figure against the six attributes:
+scale & resolution, units & labels, colors, emphasis, ink:content, accessibility.
+
+- **Report figures carry NO figure title (owner, 2026-10-02; supersedes the take-away titles of 09-29).** The
+  take-away, numbers, seeds, n, caveats and method all go in the CAPTION (generated into `report_figures.tex`);
+  a caption claim is computed from the plotted data, never hardcoded. Panel headings ("Walking"/"Standing")
+  stay. `add_title` remains in `plot_thesis_figures.py` for non-report figures (~60 chars max, it warns).
+  The $v_x$ axis is labelled **"sagittal"**, not "forward" (`AXIS_LABEL` in `plot_report_figures.py`).
+- Every axis carries a unit, even a unitless measure ("reward per step (-)"). Side-by-side figures share limits.
+- **Never change data values, filtering or statistics while editing a figure; ask first.** (Dropping an outlier
+  Run is a data decision: the owner made the one in `f_chain_clean`.)
+- After every figure change: render, VIEW the PNG, check the six attributes. Ask for the main point and venue if
+  unstated.
+- Venue: thesis report, one column ~15 cm (`FIG_W = 5.9` in). Report style (owner, 2026-09-29): **sans-serif**
+  (the `.pgf` is typeset in `\sffamily`; `report_figures.tex` loads Helvetica), **nothing below 8 pt**, no grid
+  lines, no top/right spines. Code: `scripts/plot_report_figures.py` (selection, style, and the
+  generated `figures/report_figures/report_figures.tex` with every caption) over `scripts/plot_thesis_figures.py`
+  (drawing, palette). Captions live in that script, never in the figure.
+- **Dumbbells carry a grey LOSS column (owner, 2026-10-05):** each row of the bench/bridge figures (`f_chain_*`,
+  `f_reward_*`) prints `(bridge - bench) / |bench|` of the stage means in %, signed so + is worse (`better=` in
+  `dumbbell`; `vs="hardware"` where the robot is plotted, i.e. `f_chain_clean` compares bench to ROBOT, all others bench to bridge). Absolute values do not compare across policies; this ratio does. A row whose bridge Runs all fell
+  prints "fell", never a blank. Where some fell, the number is over the survivors (caption says so).
+- **Deploy stages (training bench / bridge sim / robot) are categorical: dumbbells, never a line across them**
+  (different command profiles and instruments per stage; a line implies a trend). Seeds in a line plot ride on LINE STYLE (solid 42, dashed 123, dotted 7), never on markers: markers mean the deploy stage in the dumbbells (owner, 2026-10-06). Report names: A0 = **Flat**,
+  A1a = **Hierarchical**, A1a_DR = **Hierarchical + DR**; code tags stay in CSVs.
+- **Palette (owner's call 2026-09-25, over Okabe-Ito: muted, hue = family, lightness = variant):**
+  A0 `#7B4F7A`, A0_DR `#B393B1`, A1a `#1F4E79`, A1a_DR `#5B8FC0`, A1a_DR_cotcap `#8FA3B5`; seed rides on the
+  marker. **Time-series signal roles (default for new figures, 2026-09-30,
+  `TRACK_STYLE`):** command = DASHED dark grey `0.3` (piecewise constant, so dashes stay legible), HL target
+  = dark green `#2E6B45`, onboard estimate = light ochre `#DDA15E`, ground truth = thin black on top. Never a
+  policy hue; every role must stay separable in GRAYSCALE by lightness or dash (hue alone merged at 1.1-1.6:1
+  contrast when printed). Dense signals stay solid: dash patterns on a stride-rate zigzag print as blobs.
+  Colour-blind safety is secondary to the owner; grayscale legibility is not.
+- **A Run's time series is zoomed** (2026-09-30): panels show a 20 s window around the longest walking
+  segment (onset included), with a thin whole-Run strip on top, window shaded (`zoom` in
+  `plot_report_figures.py`). A full 160 s Run at 15 cm hides the stride-level behaviour these figures are about.
 
 ## Development workflow (no vibe coding)
 

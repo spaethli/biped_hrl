@@ -108,15 +108,27 @@ def test_stand_drift_survives_a_dropout_at_the_start_of_the_hold(tmp_path):
     assert row["truth_missing_pct"] == pytest.approx(100 * 500 / len(t), abs=0.1)
 
 
-def test_track_line_styles_keep_all_three_series_distinguishable():
-    """The operator command is a solid line, the estimate dashed, the truth dotted (the thin
-    dashed grey command was the one series nobody could find under the estimate)."""
+def test_track_line_styles_keep_all_four_series_distinguishable():
+    """Signal roles (command / HL target / estimate / truth) are told apart by colour AND by a
+    luminance/width ladder that survives grayscale, and never borrow a policy colour: blue /
+    vermilion / green mean A1a / A1a_DR / cotcap in every benchmark figure of the report
+    (2026-09-25 rubric review). Solid lines: dash patterns on a stride-rate zigzag print as blobs."""
+    from matplotlib.colors import to_rgb
     st = ptf.TRACK_STYLE
-    assert st["command"][1] == "-"
-    assert st["estimate"][1] != st["truth"][1] and st["estimate"][1] != "-" != st["truth"][1]
-    assert st["command"][2] > st["estimate"][2]          # thickest, so it shows under the others
-    # f_hier draws a fourth series, the HL target, and it must not reuse another's pattern
-    assert len({repr(st[k][1]) for k in ("command", "target", "estimate", "truth")}) == 4
+    roles = ("command", "target", "estimate", "truth")
+    assert len({st[k][0] for k in roles}) == 4
+    assert not {st[k][0].upper() for k in roles} & {c.upper() for c in ptf.CHAIN_COLOR.values()}
+    assert st["command"][2] > max(st[k][2] for k in roles[1:])   # widest, drawn underneath
+    assert st["command"][3] < min(st[k][3] for k in roles[1:])
+    grey = lambda c: sum(w * v for w, v in zip((0.299, 0.587, 0.114), to_rgb(c)))
+    assert grey(st["truth"][0]) < 0.1 < grey(st["command"][0])   # black truth on top, grey command under
+    # grayscale print (2026-09-30): the two dense coloured signals must differ in LIGHTNESS, not only hue,
+    # and the command is told apart by its dash pattern (it is piecewise constant, so dashes stay legible)
+    lum = lambda c: (lambda f: sum(w * f(v) for w, v in zip((0.2126, 0.7152, 0.0722), to_rgb(c))))(
+        lambda x: x / 12.92 if x <= 0.04045 else ((x + 0.055) / 1.055) ** 2.4)
+    hi, lo = sorted((lum(st["target"][0]), lum(st["estimate"][0])), reverse=True)
+    assert (hi + 0.05) / (lo + 0.05) >= 2.0
+    assert st["command"][1] != "-" and all(st[k][1] == "-" for k in ("target", "estimate", "truth"))
 
 
 @pytest.mark.skipif(shutil.which("pdflatex") is None, reason="pgf text metrics need LaTeX")
@@ -172,3 +184,45 @@ def test_hier_runs_need_both_ground_truth_and_hrl_telemetry(tmp_path):
     assert sorted(p.name for p in (tmp_path / "out").glob("*.pdf")) == ["full.pdf"]
     row = pd.read_csv(tmp_path / "out" / "hier_runs_summary.csv").iloc[0]
     assert row["hl_fires"] == n // 8
+
+
+# --- schedule-replay chain (2026-10-02) ---------------------------------------------------
+# Bench envs and bridge Runs are scored as units; a unit that fell is excluded AND counted, by
+# the same rule at both stages. fig_chain used to read only the newest bridge file per policy.
+
+def _seq_root(tmp_path, bridge_tilt=(0, 0, 1)):
+  rows = np.arange(12 * 1500, dtype=float)
+  for i, tilt in enumerate(bridge_tilt):
+    fl = tmp_path / "logs/deploy_safety" / f"2026-10-0{i + 1}_run.csv"
+    fl.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame({"t": rows / 600.0, "t_wall": rows / 600.0, "trig_tilt": 0,
+                       "cmd_vx": 0.5, "cmd_vy": 0.0, "cmd_wz": 0.0})
+    if tilt:
+      df.loc[6000:, "trig_tilt"] = 1
+    for j in range(27):
+      df[f"raw_q{j}"] = np.repeat(np.arange(1500), 12) * 0.001 * (j + 1)
+    for j in ptf.LEG_SLOTS:
+      df[f"meas_q{j}"] = 0.0
+    df.to_csv(fl, index=False)
+    d = tmp_path / ptf.SEQ_DIR / "A1a_s42" / "bridge"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"r{i}.walking.json").write_text(json.dumps({"flight_recorder": fl.name, "cot": 0.6 + 0.1 * i}))
+  d = tmp_path / ptf.SEQ_DIR / "A1a_s42" / "bench"
+  d.mkdir(parents=True)
+  for k, fell in enumerate((False, False, True, False)):
+    (d / f"s42_env{k:02d}.walking.json").write_text(
+      json.dumps({"fell": fell, "cot": 0.4 + 0.01 * k, "jacc_legs_ctrl": 100.0 + k}))
+  return tmp_path
+
+
+def test_every_bridge_run_is_read_and_a_fallen_one_is_excluded_and_counted(tmp_path):
+  kept, n, fell = ptf.chain_seq_units(_seq_root(tmp_path), "A1a_s42", "bridge", "walking")
+  assert (n, fell) == (3, 1)
+  assert [u["cot"] for u in kept] == pytest.approx([0.6, 0.7])   # not just the newest file
+
+
+def test_bench_units_drop_a_fallen_env_and_carry_the_control_rate_jacc(tmp_path):
+  kept, n, fell = ptf.chain_seq_units(_seq_root(tmp_path), "A1a_s42", "bench", "walking")
+  assert (n, fell) == (4, 1)
+  assert [u["cot"] for u in kept] == pytest.approx([0.40, 0.41, 0.43])
+  assert [u["jacc_legs"] for u in kept] == [100.0, 101.0, 103.0]

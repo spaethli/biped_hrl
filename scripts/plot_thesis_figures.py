@@ -124,6 +124,7 @@ MOCAP_CSV = "mocap_aligned.csv"   # mocap_align.py output, on the flight recorde
 PERIOD_RANGE = (0.35, 1.0)      # analyze_cadence_settling.PERIOD_RANGE (deploy yaml)
 ARM_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)  # rad/s, analyze_cadence_settling.ARM_THRESHOLDS
 FIG_W = 5.9                     # in; ~15 cm thesis column
+SAVE_PDF = False                # save_pgf also writes a .pdf beside the .pgf (plot_report_figures.py)
 FIGURES = ("cadence", "settle", "upper", "smooth", "power",
            "track", "stand", "hier", "chain", "seedband")
 # Opt-in only, never in the default set: one PDF per Run with ground truth, for showing people
@@ -134,12 +135,18 @@ TRACKRUNS_GLOB = "logs/robot_logs/*/"
 TRACKRUNS_SIZE = (11.0, 6.6)     # in; wider than a thesis column, a 160 s Run is dense
 HIERRUNS_SIZE = (11.0, 8.2)      # four panels
 
-# Okabe-Ito, colour-blind safe. One colour per policy VARIANT, shared by every figure; the
+# Muted, one colour per policy VARIANT, shared by every figure: hue = FAMILY (plum = flat A0,
+# blue = the hierarchy), lightness = the DR variant within it, so A1a and A1a_DR read as close
+# relatives and both as distinct from A0 (owner's call 2026-09-25, over Okabe-Ito). The
 # seed rides on the marker (`chain_style`). Keyed on the variant, a `_s<seed>` tag nobody has
 # listed yet is still coloured -- keyed on the full tag it silently fell back to grey.
-CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": "#000000", "A1a": "#0072B2", "A1a_DR": "#D55E00",
-               "A1a_DR_cotcap": "#009E73"}
+CHAIN_COLOR = {"A0": "#7B4F7A", "A0_DR": "#B393B1", "A1a": "#1F4E79", "A1a_DR": "#5B8FC0",
+               "A1a_DR_cotcap": "#8FA3B5"}
 POLICY_ORDER = list(CHAIN_COLOR)
+# Display-name hooks, empty/symbolic by default so the thesis figures are unchanged; the report
+# (plot_report_figures.py) sets plain names: A0 -> "Flat", vx -> "sagittal", ...
+DISPLAY_NAME: dict = {}
+AXIS_LABEL = {"vx": "$v_x$", "vy": "$v_y$", "wz": "$\\omega_z$"}
 REGIME_HATCH = {"standing": "", "walking": "////"}
 REGIME_ALPHA = {"standing": 1.0, "walking": 0.45}
 
@@ -415,6 +422,8 @@ def save_pgf(fig, out_dir: Path, name: str) -> Path:
   out_dir.mkdir(parents=True, exist_ok=True)
   path = out_dir / f"{name}.pgf"
   fig.savefig(path)
+  if SAVE_PDF:
+    fig.savefig(path.with_suffix(".pdf"))
   harvest_drawn(fig, name)
   plt.close(fig)
   # matplotlib emits `\mathdefault` for any mathtext tick label (a log axis, a scientific
@@ -439,6 +448,21 @@ def write_panel_csv(out_dir: Path, name: str, panel: str, fields: list[str],
     w.writerows(rows)
   print(f"[PLOT] wrote {path}")
   return path
+
+
+def add_title(fig, text: str, width: int = 110) -> None:
+  """A takeaway title (the figure rubric: say what the figure shows, not what its axes are),
+  wrapped, with the axes pushed down by exactly the height the title's lines need."""
+  import textwrap
+  if len(text) > 60:   # a title is the take-away in a few words; the detail belongs in the caption
+    print(f"[PLOT] WARNING: title is {len(text)} chars, reads as a caption: {text!r}")
+  lines = textwrap.wrap(text, width)
+  fig.suptitle("\n".join(lines), fontsize=8, y=1 - 0.06 / fig.get_figheight())
+  top = max(ax.get_position().y1 for ax in fig.axes if ax.get_visible())
+  titled = any(ax.get_title() for ax in fig.axes if ax.get_visible())   # panel titles sit above y1
+  need = 1 - (0.12 + 0.16 * len(lines) + (0.2 if titled else 0.0)) / fig.get_figheight()
+  if top > need:
+    fig.subplots_adjust(top=need)
 
 
 def bottom_legend(fig, handles, ncol=3, height=0.13):
@@ -635,7 +659,7 @@ def fig_settle(bundles, cad_rows, out_dir, name="f_settle"):
 
 # ================================================================= f_upper ====
 
-def fig_upper(bundles, out_dir, name="f_upper"):
+def fig_upper(bundles, out_dir, name="f_upper", title=None):
   """The upper-body cost of the hierarchy, from the already-scored regime jsons.
 
   Bars are the per-policy mean, but every _Run_ is drawn over its bar: A1a's standing
@@ -643,8 +667,8 @@ def fig_upper(bundles, out_dir, name="f_upper"):
   averaged away.
   """
   policies = policies_present(bundles)
-  metrics = [("ub_arm_vel", "upper-body joint velocity\n" r"$\overline{|\mathrm{dq}|}$ (rad/s)"),
-             ("ub_pose_dev", "upper-body pose deviation\n" r"$\overline{(q-q_\mathrm{def})^2}$ (rad$^2$)")]
+  metrics = [("ub_arm_vel", "upper-body joint speed (rad/s)"),
+             ("ub_pose_dev", "upper-body pose deviation (rad\\textsuperscript{2})")]
   fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 2.9))
   regimes = ("standing", "walking")
   width = 0.38
@@ -669,14 +693,16 @@ def fig_upper(bundles, out_dir, name="f_upper"):
         jit = np.linspace(-0.11, 0.11, len(vals)) if len(vals) > 1 else np.zeros(1)
         for dx, (b, v) in zip(jit, vals):
           thin = bool(b.regimes[regime].get("thin"))
-          ax.plot(xpos + dx, v, marker="o", markersize=2.8, color="0.15",
-                  markerfacecolor="white" if thin else "0.15", markeredgewidth=0.6, zorder=3)
+          # a white rim keeps a dark dot readable on a dark bar
+          ax.plot(xpos + dx, v, marker="o", markersize=3.2, linestyle="",
+                  markeredgecolor="0.15" if thin else "white",
+                  markerfacecolor="white" if thin else "0.15", markeredgewidth=0.5, zorder=3)
           rows.append({"policy": p, "regime": regime, "run": b.tag, "bundle": b.dir.name,
                        key: v, f"{key}_policy_mean": round(m, 6),
                        "n_policy_steps": b.regimes[regime]["n_steps"],
                        "status": "thin (<%d steps)" % THIN_STEPS if thin else "ok"})
     ax.set_xticks(range(len(policies)))
-    ax.set_xticklabels([tex(p) for p in policies], rotation=20, ha="right")
+    ax.set_xticklabels([tex(DISPLAY_NAME.get(p, p)) for p in policies], rotation=20, ha="right")
     ax.set_ylabel(ylabel)
     ax.margins(y=0.14)   # a Run point sitting on the axis top edge reads as clipped
     write_panel_csv(out_dir, name, key,
@@ -691,7 +717,9 @@ def fig_upper(bundles, out_dir, name="f_upper"):
           hatch=REGIME_HATCH["walking"], label="walking"),
     Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="", label="one Run"),
     Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="",
-           markerfacecolor="white", label="thin regime")], ncol=4, height=0.13)
+           markerfacecolor="white", label=f"< {THIN_STEPS * CTRL_DT:.0f} s in regime")], ncol=4, height=0.13)
+  if title:
+    add_title(fig, title)
   return save_pgf(fig, out_dir, name)
 
 
@@ -912,24 +940,25 @@ TRACK_PANELS = [
   ("wz", "cmd_wz", "est_gyro_z", "gt_wz", "rad/s", "$\\omega_z$",
    "gyro $z$ (a direct measurement, not an estimate)"),
 ]
-# Line STYLES, not just colours: the command is a solid line, the estimate dashed and the
-# truth dotted (and, in f_hier, the HL target dash-dot), so every series stays readable where
-# they overlap (a thin dashed grey command was the one line nobody could find under the
-# estimate). (colour, linestyle, width, zorder): the command is drawn first and thickest so it
-# shows wherever the others leave it.
-TRACK_STYLE = {"command": ("0.1", "-", 1.3, 2),
-               "target": ("#009E73", (0, (6, 1.5, 1.5, 1.5)), 1.0, 2.5),
-               "estimate": ("#D55E00", (0, (5, 2)), 1.0, 3),
-               "truth": ("#0072B2", (0, (1, 1.6)), 1.4, 4)}
+# Signal ROLES, deliberately NOT the policy hues (CHAIN_COLOR is plum/blue), and separable in
+# GRAYSCALE, not by hue alone (2026-09-30: the earlier grey/green/ochre trio sat at 1.1-1.6:1
+# lightness contrast and merged when printed): black truth on top; dark green HL target; LIGHT ochre
+# estimate; the command DASHED dark grey. Dashes only on the command: it is piecewise constant (joystick
+# steps); a dash or dot pattern on a stride-frequency zigzag renders as solid blobs, so the dense
+# signals stay solid. (colour, linestyle, width, zorder)
+TRACK_STYLE = {"command": ("0.3", (0, (4, 2)), 1.1, 1),
+               "target": ("#2E6B45", "-", 0.6, 2),
+               "estimate": ("#DDA15E", "-", 0.8, 3),
+               "truth": ("0.0", "-", 0.45, 4)}
 
 
 def _style_handle(kind: str, label: str):
   """Legend proxy carrying the exact colour / dash pattern / width the series is drawn with."""
   c, ls, lw, _z = TRACK_STYLE[kind]
-  return plt.Line2D([], [], color=c, linestyle=ls, linewidth=lw, dash_capstyle="round", label=label)
+  return plt.Line2D([], [], color=c, linestyle=ls, linewidth=max(lw, 1.6), label=label)   # a 0.5 pt sample is unreadable
 
 
-def _track_fig(b, note, downsample=True, figsize=(FIG_W, 4.4)):
+def _track_fig(b, note, downsample=True, figsize=(FIG_W, 4.4), annotate=True):
   """Command vs onboard estimate vs motion-capture truth for one Run, three panels.
   -> (figure, per-panel plotted rows for the CSV sidecar, per-panel RMS report)."""
   df = pd.read_csv(b.flight, usecols=["t", "cmd_vx", "cmd_vy", "cmd_wz",
@@ -959,21 +988,24 @@ def _track_fig(b, note, downsample=True, figsize=(FIG_W, 4.4)):
     r = {k: _rms(est, gt, m) for k, m in regimes.items()}
     r["gap"] = _gap_pct(gt)
     rms_report[axis] = r
-    ax.text(0.005, 0.97, f"estimator RMS vs truth:  standing {r['standing']:.4f}, "
-            f"walking {r['walking']:.4f} {unit}  (truth missing {r['gap']:.0f}% of samples)",
-            transform=ax.transAxes, va="top",
-            ha="left", fontsize=6, color=TRACK_STYLE["estimate"][0])
-    ax.set_ylabel(f"{sym} ({unit})")
+    if annotate:
+      ax.text(0.005, 0.97, f"estimator RMS vs truth:  standing {r['standing']:.4f}, "
+              f"walking {r['walking']:.4f} {unit}  (truth missing {r['gap']:.0f}% of samples)",
+              transform=ax.transAxes, va="top",
+              ha="left", fontsize=6, color="0.3")
+    ax.set_ylabel(f"{AXIS_LABEL[axis]} ({unit})")
     ax.margins(y=0.22)
   axes[-1].set_xlabel("time since Run start (s)")
+  fig.align_ylabels(axes)   # tick labels of different widths left the units at different x
   fig.suptitle(f"velocity tracking vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
                fontsize=8)
   bottom_legend(fig, [_style_handle("command", "operator command"),
                       _style_handle("estimate", "onboard estimate / gyro"),
                       _style_handle("truth", "motion-capture ground truth")],
-                ncol=3, height=0.85 / figsize[1])       # a 0.85 in band under the axes at any figure height
-  fig.text(0.5, 0.78 / figsize[1], note, ha="center", va="top", fontsize=5.6,
-           color="0.35", linespacing=1.6)
+                ncol=3, height=(0.85 if note else 0.4) / figsize[1])   # a band in inches, any height
+  if note:
+    fig.text(0.5, 0.78 / figsize[1], note, ha="center", va="top", fontsize=5.6,
+             color="0.35", linespacing=1.6)
   fig.subplots_adjust(top=0.93)
   return fig, rows, rms_report
 
@@ -1163,6 +1195,21 @@ def fig_stand(bundles, cad_rows, out_dir, name="f_stand", min_seg_s=STAND_MIN_SE
 
 # ================================================================== f_hier ====
 
+def _goal_scale(tag):
+  """(sagittal, lateral) goal scale baked into the policy's high_level.onnx, or None. The HL's
+  action g is tanh-bounded, so this is the largest velocity change it can request per window."""
+  arm = CHAIN_ARMS.get(tag.split(" +")[0])
+  if arm is None or not (REPO / arm[0]).exists():
+    return None
+  cell = json.loads((REPO / arm[0]).read_text()).get(f"{arm[1]}__{SIM_CONDITION}")
+  onnx_path = REPO / Path(cell["bench"]["label"]).parent / "high_level.onnx" if cell else None
+  if onnx_path is None or not onnx_path.exists():
+    return None
+  import onnx
+  meta = {p.key: p.value for p in onnx.load(str(onnx_path)).metadata_props}
+  return tuple(float(x) for x in meta["goal_scale"].split(",")[:2]) if "goal_scale" in meta else None
+
+
 def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
   """HL target vs LL achieved vs ground truth for one Run: four panels (vx, vy, wz, and the
   |V*| saturation). -> (figure, per-panel rows, saturation rows, info for the summary)."""
@@ -1172,8 +1219,13 @@ def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
   t = df["t"].to_numpy(float)
   G = read_mocap(b, t)
   fire = _window_starts(hdf)
-  ll_label = f"LL achieved ({tex(b.base_estimator)}, window-latched)"
-  gyro_label = "LL achieved (gyro, direct measurement)"
+  # The logged tgt0/tgt1 are NOT a velocity: with base_vel_from_imu the controller's velocity
+  # state is the IMU increment since the last HL fire, zero at every fire, so the target is
+  # goal_scale*g, the velocity CHANGE the HL asks for over the next window (owner's choice
+  # 2026-10-03: shown as logged, independent of ground truth, and said so in the caption). Yaw
+  # (tgt2) is absolute: its state is the gyro.
+  ll_label = f"LL delivered ({tex(b.base_estimator)}, window-latched)"
+  gyro_label = "LL delivered (gyro, direct measurement)"
 
   fig, axes = plt.subplots(4, 1, figsize=figsize, sharex=True)
   rows = {}
@@ -1187,7 +1239,8 @@ def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
   for ax, (axis, cmd_c, tgt_c, lo_c, gt_c, unit) in zip(axes, panels):
     rows[axis] = []
     drawn = [("operator command", t - t[0], df[cmd_c].to_numpy(float), "command", {}),
-             ("HL target V*", th - t[0], hdf[tgt_c].to_numpy(float), "target", {})]
+             ("HL target (velocity change over the next window)" if axis != "wz" else "HL target V*",
+              th - t[0], hdf[tgt_c].to_numpy(float), "target", {})]
     if axis == "wz":
       if lo_c in df:
         drawn.append((gyro_label, t - t[0], df[lo_c].to_numpy(float), "estimate", {}))
@@ -1211,42 +1264,47 @@ def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
                       "series": label, "t_s": round(float(x), 4),
                       "value": round(float(v), 6), "unit": unit}
                      for x, v in zip(tt, yy)]
-    ax.set_ylabel(f"{axis} ({unit})")
+    ax.set_ylabel(f"{AXIS_LABEL[axis]} ({unit})")
     ax.margins(y=0.2)
 
-  # Saturation: |V*| against the bound the session actually used. The baked `goal_scale`
-  # is a checkpoint property and is not in the log, so the observed bound is used, exactly
-  # as plot_deploy_logs.view_goaltrack does -- and it is labelled as observed.
+  # Saturation: |g| = |logged target| / goal_scale, the HL's tanh action, against its limit 1.
+  # The goal scale is read from the policy's own high_level.onnx (a policy property); only when
+  # that is unavailable does the Run's observed maximum stand in, and the label says so.
   sat_rows, sat_pct = [], {}
   walk_h = walking_mask(hdf[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
-  for tgt_c, axis, colr in (("tgt0", "vx", "#0072B2"), ("tgt1", "vy", "#D55E00")):
+  gs = _goal_scale(b.policy)
+  for i, (tgt_c, axis, colr) in enumerate((("tgt0", "vx", "#2E6B45"), ("tgt1", "vy", "#8CC49F"))):
     a = np.abs(hdf[tgt_c].to_numpy(float))
-    scale = float(np.round(a.max(), 2)) or 1.0
+    scale = gs[i] if gs else (float(np.round(a.max(), 2)) or 1.0)
     sat = float((a[walk_h] > 0.98 * scale).mean()) if walk_h.any() else float("nan")
     sat_pct[axis] = 100 * sat
     tt, yy = envelope_downsample(th - t[0], a / scale, downsample)
-    axes[3].plot(tt, yy, color=colr, linewidth=0.7, alpha=0.9,
-                 label=f"$|V^*|$ {axis} / {scale:g} (walk saturated {100 * sat:.0f}%)")
+    axes[3].plot(tt, yy, color=colr, linewidth=0.7, zorder=3 if axis == "vx" else 2,
+                 label=f"{AXIS_LABEL[axis]}: at the limit {100 * sat:.0f} % of walking")
     sat_rows += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                  "series": f"|tgt_{axis}|/observed_bound", "t_s": round(float(x), 4),
-                  "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
+                  "series": f"|g_{axis}| = |tgt_{axis}|/goal_scale" if gs else f"|tgt_{axis}|/observed_max",
+                  "t_s": round(float(x), 4), "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
                  for x, v in zip(tt, yy)]
-  axes[3].axhline(1.0, color="red", linestyle=":", linewidth=0.7)
-  axes[3].set_ylabel("fraction of bound")
-  axes[3].legend(fontsize=5.6, loc="upper right", framealpha=0.9)
+  axes[3].axhline(1.0, color="0.4", linestyle=":", linewidth=0.7,
+                  label="action limit ($|g| = 1$)" if gs else "largest target in this Run")
+  axes[3].set_ylim(-0.05, 1.95)   # |g| <= 1 by construction: the two legend rows live in the headroom
+  axes[3].set_ylabel("high-level target (-)")
+  axes[3].legend(loc="upper right", ncol=2, frameon=False)
   axes[3].set_xlabel("time since Run start (s)")
+  fig.align_ylabels(axes)
   fig.suptitle(f"HL goal vs LL delivery vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
                fontsize=8)
   bottom_legend(fig, [
     _style_handle("command", "operator command"),
-    _style_handle("target", "HL target V*"),
-    _style_handle("estimate", f"LL achieved ({tex(b.base_estimator)} vx/vy / gyro wz)"),
+    _style_handle("target", "high-level target"),
+    _style_handle("estimate", "low-level delivered (onboard estimate)"),
     _style_handle("truth", "motion-capture ground truth")],
-    ncol=2, height=1.0 / figsize[1])          # a 1.0 in band under the axes at any figure height
-  fig.text(0.5, 0.925 / figsize[1], note, ha="center", va="top", fontsize=5.6,
-           color="0.35", linespacing=1.6)
+    ncol=2, height=(1.0 if note else 0.55) / figsize[1])   # a band in inches, any figure height
+  if note:
+    fig.text(0.5, 0.925 / figsize[1], note, ha="center", va="top", fontsize=5.6,
+             color="0.35", linespacing=1.6)
   fig.subplots_adjust(top=0.94)
-  info = {"fires": len(fire), "sat_pct": sat_pct, "gap": _gap_pct(G["gt_vx"])}
+  info = {"fires": len(fire), "sat_pct": sat_pct, "gap": _gap_pct(G["gt_vx"]), "goal_scale": gs}
   return fig, rows, sat_rows, info
 
 
@@ -1380,7 +1438,42 @@ def _hw_jacc_legs(b: Bundle, regime: str) -> float:
   return float(jac[sel].mean())
 
 
-def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
+def _tilt_fall_s(flight):
+  """Seconds into a bridge Run at which the controller's tilt trigger first fired, or None."""
+  fl = pd.read_csv(flight, usecols=["t_wall", "trig_tilt"])
+  hit = np.flatnonzero(fl["trig_tilt"].to_numpy() != 0)
+  return float(fl["t_wall"].iloc[hit[0]] - fl["t_wall"].iloc[0]) if len(hit) else None
+
+
+SEQ_DIR = "logs/sim_logs/chain_seq"   # <tag>/{bench,bridge}/<unit>.{walking,standing}.json
+
+
+def chain_seq_units(root, tag, stage, regime):
+  """The scored units of one policy at one simulated stage of the SCHEDULE-REPLAY chain
+  (2026-10-02): bench and bridge both ran the 253 s command schedule and both went through
+  bench_flight_recorder's scorer. A unit is one bench env or one bridge _Run_.
+  -> (units that stayed up, n scored, n fell). A unit that fell is excluded AND counted, the
+  same rule at both stages: its later samples are a reset env or a robot lying down.
+  `jacc_legs` is the control-rate second difference of measured q at both stages."""
+  kept, n, fell = [], 0, 0
+  for f in sorted((root / SEQ_DIR / tag / stage).glob(f"*.{regime}.json")):
+    js = json.loads(f.read_text())
+    n += 1
+    if stage == "bridge":
+      flight = root / "logs/deploy_safety" / js["flight_recorder"]
+      js["fell"] = _tilt_fall_s(flight) is not None
+      js["jacc_legs"] = _hw_jacc_legs(SimpleNamespace(flight=flight), regime)
+    else:
+      js["jacc_legs"] = js.get("jacc_legs_ctrl")
+    if js["fell"]:
+      fell += 1
+      continue
+    kept.append(js)
+  return kept, n, fell
+
+
+def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO, with_notes=True,
+              title=None):
   """training bench -> bridge sim -> hardware, per metric, for metrics defined the same way at
   all three points. One panel per metric, one line per policy; a point a metric does not
   exist at is simply absent, never zero.
@@ -1410,10 +1503,7 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
       # (orient_dev 0.32 against 0.04 for the same policy family). The fall is read from the
       # controller's own tilt trigger, the evidence deploy_gate_analyzer uses; `trig_fall` is
       # the accelerometer one and also fires on a stumble that recovers (gt_h stayed >1.1 m).
-      fl = pd.read_csv(root / "logs/deploy_safety" / js["flight_recorder"],
-                       usecols=["t_wall", "trig_tilt"])
-      hit = np.flatnonzero(fl["trig_tilt"].to_numpy() != 0)
-      js["_fell_s"] = float(fl["t_wall"].iloc[hit[0]] - fl["t_wall"].iloc[0]) if len(hit) else None
+      js["_fell_s"] = _tilt_fall_s(root / "logs/deploy_safety" / js["flight_recorder"])
       bridge_cache[p] = js
     else:
       print(f"[PLOT] NOTE: f_chain: {p}: no scored bridge capture in "
@@ -1449,7 +1539,7 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
   # `wrap=True` measures against the FIGURE, not the tight bbox savefig crops to, so long
   # caveat lines ran off the page. Wrapped explicitly at a width that fits 15 cm at 5 pt.
   import textwrap
-  lines = [w for n in notes for w in textwrap.wrap(n, 118)]
+  lines = [w for n in notes for w in textwrap.wrap(n, 118)] if with_notes else []
   # Heights in inches, so the axes stay the same size however many policies (legend rows) and
   # note lines there are; they were guessed fractions and the notes ran into the legend.
   legend_rows = -(-len(policies) // 5)
@@ -1550,6 +1640,8 @@ def fig_chain(bundles, out_dir, name="f_chain", regime="walking", root=REPO):
   for i, n in enumerate(lines):
     fig.text(0.012, (leg_in + note_in + 0.05) / fig_h - 0.0975 / fig_h * i, n, fontsize=5.0,
              color="0.3", ha="left", va="top")
+  if title:
+    add_title(fig, title)
   print("[PLOT] f_chain: training bench / bridge sim points for "
         + ", ".join(f"{p}:{'y' if p in bench_cache else 'n'}/{'y' if p in bridge_cache else 'n'}"
                     for p in policies))
