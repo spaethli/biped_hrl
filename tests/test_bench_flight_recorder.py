@@ -595,3 +595,137 @@ def test_energy_is_unchanged_when_the_telemetry_fits_inside_the_run():
     out = bfr._energy(F, T, align, "est_v_compl")
     assert out["cot_distance_m"] == pytest.approx(5.0, abs=0.05)   # bounded by the telemetry
     assert out["mech_power_w"] == pytest.approx(100.0, rel=1e-6)
+
+
+# --- schedule replay at the training bench (2026-10-02) -----------------------------------
+# The bench replays the bridge's command schedule and writes a trace; the trace is scored by
+# the SAME score_regime the bridge and the robot go through. These pin the three seams: the
+# schedule has one source, the trace reader feeds the scorer its real quantities, and a unit
+# that fell is flagged rather than averaged in.
+
+def test_key_map_is_the_controllers_own_presets():
+    import bridge_session
+    k = bridge_session.key_commands()
+    assert len(k) == 16
+    assert k["w"] == (1.0, 0.0, 0.0) and k["s"] == (-0.5, 0.0, 0.0)
+    assert k["a"] == (0.0, 0.5, 0.0) and k["e"] == (0.0, 0.0, -0.5)
+    assert [k[str(i)][0] for i in range(10)] == pytest.approx([i / 10 for i in range(10)])
+
+
+def test_default_schedule_is_the_253_s_battery_one_command_per_control_step():
+    import bridge_session
+    c = bridge_session.seq_commands(bridge_session.DEFAULT_SEQ)
+    assert len(c) == 12650                              # 253 s at 50 Hz
+    assert set(c[:400]) == {(0.0, 0.0, 0.0)}             # 0:8
+    assert set(c[400:1900]) == {(0.3, 0.0, 0.0)}         # 3:30
+    assert c[1900] == (0.0, 0.0, 0.0) and c[-1] == (0.0, 0.0, 0.0)
+    assert len(set(c)) == 9
+
+
+def test_limit_rows_are_in_deploy_slot_order():
+    import bridge_session
+    rows = bridge_session.deploy_limit_rows()
+    assert len(rows) == 27
+    assert rows[bfr.KNEE_SLOT] == (-0.12, 2.19, "left_knee")
+    assert rows[12][2] == "waist_yaw" and rows[26][2] == "right_wrist_yaw"
+
+
+def _write_trace(path, n=1500, n_envs=2, fell=(-1, 700)):
+    import bridge_session
+    rows = bridge_session.deploy_limit_rows()
+    z = lambda d: np.zeros((n, n_envs, d), np.float32)  # noqa: E731
+    cmd = z(3)
+    cmd[300:1300, :, 0] = 0.5                            # stand, walk 20 s, stand
+    raw, q, dq, tau = z(27), z(27), z(27), z(27)
+    raw[:, :, 0] = 0.01 * np.arange(n)[:, None]          # leg slot 0 moves 0.01 rad per step
+    q[:, :, bfr.KNEE_SLOT] = 0.5 * 3.0 * (0.02 * np.arange(n)[:, None]) ** 2   # 3 rad/s^2
+    dq[:, :, 7], tau[:, :, 7] = 3.0, 2.0                 # one joint: 6 W
+    quat, ach, phase = z(4), z(2), z(2)
+    quat[..., 0] = 1.0
+    ach[..., 0] = 0.5
+    rew = z(2)
+    rew[300:1300, :, 0] = 1.0
+    np.savez(path, step_dt=0.02, seed=42, label="ckpt.pt", cmd_seq="t", fell_step=np.array(fell),
+             joint_names=np.array([r[2] for r in rows]), joint_min=np.array([r[0] for r in rows]),
+             joint_max=np.array([r[1] for r in rows]), rew_names=np.array(["track", "pen"]),
+             cmd=cmd, raw_q=raw, q=q, dq=dq, tau=tau, quat=quat, gyro=z(3), ach_v=ach,
+             phase=phase, rew=rew)
+
+
+def test_bench_trace_is_scored_by_the_flight_recorder_scorer(tmp_path):
+    _write_trace(tmp_path / "t.npz")
+    k, F, T, align, extra = next(bfr.read_trace(tmp_path / "t.npz"))
+    m = bfr.score_regime(F, T, align, "walking", "ach_v")
+    assert m["n_steps"] == 1000
+    assert m["act_legs_rad"] == pytest.approx(0.01)
+    assert m["mech_power_w"] == pytest.approx(6.0)
+    assert m["cot"] == pytest.approx(6.0 / (0.5 * bfr.MASS_G), rel=1e-3)
+    assert m["err_vx"] == pytest.approx(0.0, abs=1e-6)
+    assert bfr.jacc_legs_ctrl(F, "walking") == pytest.approx(3.0, rel=1e-3)
+    assert bfr.score_regime(F, T, align, "standing", "ach_v")["n_steps"] == 500
+
+
+def test_a_bench_unit_that_fell_is_flagged_and_its_reward_is_regime_split(tmp_path):
+    import argparse
+    _write_trace(tmp_path / "t.npz")
+    out = tmp_path / "units"
+    bfr.process_trace(tmp_path / "t.npz", argparse.Namespace(out_dir=str(out), default_pose_yaml=None))
+    js = {p.name: json.loads(p.read_text()) for p in out.glob("*.json")}
+    assert len(js) == 4                                   # 2 envs x 2 regimes
+    assert js["s42_env00.walking.json"]["fell"] is False
+    assert js["s42_env01.walking.json"]["fell"] is True and js["s42_env01.walking.json"]["fell_step"] == 700
+    assert js["s42_env00.walking.json"]["reward_terms"] == {"track": 1.0, "pen": 0.0}
+    assert js["s42_env00.standing.json"]["reward_terms"]["track"] == 0.0
+    assert js["s42_env00.walking.json"]["jacc_legs_ctrl"] == pytest.approx(3.0, rel=1e-3)
+
+
+# --- the low level's goal reward at bench, bridge and robot (2026-10-06) -------------------
+
+def test_ll_goal_kernels_equal_the_training_reward():
+    """The figure's low-level reward must be the reward the low level TRAINS on, term for term."""
+    import torch
+    from src.tasks.velocity.rl.hrl.goal_space import build_goal_space
+    gs = build_goal_space(("velocity", "orientation", "height"))
+    rng = np.random.default_rng(0)
+    tgt, ach = rng.normal(0, 0.4, (500, 7)), rng.normal(0, 0.4, (500, 7))
+    ref = gs.reward(torch.tensor(tgt), torch.tensor(ach), kernel="exp").numpy().mean()
+    got = bfr.ll_goal_terms(tgt, ach, np.ones(500, bool))
+    assert got["ll_goal_r"] == pytest.approx(ref, rel=1e-9)
+
+
+def test_ll_rows_drop_the_last_step_of_each_window_and_split_regimes():
+    new_window = np.zeros(24, bool)
+    new_window[[0, 8, 16]] = True
+    walk = np.r_[np.ones(12, bool), np.zeros(12, bool)]
+    w = bfr.ll_rows(new_window, walk, "walking")
+    assert not w[7] and w[6] and not w[12:].any()              # step 7 precedes the fire at 8
+    assert bfr.ll_rows(new_window, walk, "standing")[12:].sum() == 12 - 2   # steps 15 and 23 dropped
+
+
+def test_ll_goal_from_hrl_pairs_each_target_with_the_next_state(tmp_path):
+    n = 80
+    h = pd.DataFrame({"cmd_vx": 0.5, "cmd_vy": 0.0, "cmd_wz": 0.0,
+                      "est_vx": np.where(np.arange(n) % 8 == 0, 0.0, 0.1), "est_vy": 0.0})
+    for i in range(7):
+        h[f"tgt{i}"] = 0.0
+        h[f"s{i}"] = 0.0
+    h["s0"] = np.arange(n) * 0.01          # the state drifts; the target stays at 0
+    h.to_csv(tmp_path / "x_hrl.csv", index=False)
+    got = bfr.ll_goal_from_hrl(tmp_path / "x_hrl.csv", "walking")
+    i = np.array([j for j in range(n - 1) if (j + 1) % 8 != 0])
+    want = np.exp(-((0.01 * (i + 1)) ** 2) / 0.25).mean()   # target i against state i+1
+    assert got["ll_goal_vxy"] == pytest.approx(want)
+    assert got["ll_goal_wz"] == pytest.approx(1.0) and got["ll_goal_r"] == pytest.approx(want + 3.0)
+
+
+def test_ll_posture_and_energy_use_the_keeper_weights_gate_and_clamps(tmp_path):
+    """Keeper LL: posture over all 27 joints (shoulders x16, elbow/wrist/ankle roll x4), err^2 clamped
+    at 9, times -0.5; energy -0.05 * min(P / (m g max(|v_cmd|, 0.1)), 10), only when |v_cmd| > 0.1."""
+    _write_trace(tmp_path / "t.npz")
+    k, F, T, align, extra = next(bfr.read_trace(tmp_path / "t.npz"))
+    F["df"][[f"meas_q{j}" for j in range(27)]] = F["default_pose"]           # on the pose ...
+    F["df"]["meas_q13"] = F["default_pose"][13] + 0.1                        # ... but one shoulder
+    m = bfr.ll_posture_energy(F, T, align, "walking")
+    assert m["ll_posture"] == pytest.approx(-0.5 * 16.0 * 0.01 / 27)
+    assert m["ll_energy"] == pytest.approx(-0.05 * 6.0 / (0.5 * bfr.MASS_G), rel=1e-3)
+    assert bfr.ll_posture_energy(F, T, align, "standing")["ll_energy"] == 0.0   # gated off

@@ -48,6 +48,7 @@ A0CPP = REPO / "deploy/robots/h1_2/src/State_RLBase.cpp"
 IOCH = REPO / "deploy/robots/h1_2/include/obs_contract.h"
 ACS = REPO / "scripts/analyze_cadence_settling.py"
 SSA = REPO / "scripts/score_stand_attitude.py"
+DRDY = REPO / "scripts/deploy_readiness.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -525,10 +526,10 @@ MUTATIONS = [
    "    if b.mocap is None:",
    "test_hier_runs_need_both_ground_truth_and_hrl_telemetry"),
 
-  ("operator command drawn dashed again (invisible under the estimate)", PTF,
-   'TRACK_STYLE = {"command": ("0.1", "-", 1.3, 2),',
-   'TRACK_STYLE = {"command": ("0.1", "--", 1.3, 2),',
-   "test_track_line_styles_keep_all_three_series_distinguishable"),
+  ("ground truth drawn in a POLICY colour again (blue = A1a in the benchmark figures; rubric review)", PTF,
+   '               "truth": ("0.0", "-", 0.45, 4)}',
+   '               "truth": ("#0072B2", "-", 0.45, 4)}',
+   "test_track_line_styles_keep_all_four_series_distinguishable"),
 
   ("pairing back to a forward start-time window (encodes operator timing, broke at +125 s)", BFR,
    "        overlap = (min(end_f, end_a) - max(start_f, start_a)).total_seconds()",
@@ -855,6 +856,80 @@ MUTATIONS = [
   ("thin run scores a mean instead of failing closed", SSA,
    "if z.sum() < MIN_ROWS:", "if z.sum() < 0:",
    "test_a_thin_run_scores_nothing_rather_than_a_mean"),
+
+  # 2026-10-02: an orphaned read_all_joints kept logging and bench_flight_recorder paired the
+  # next bridge Run with ITS file. The gate must refuse when the new file is not unique.
+  ("joint telemetry gate accepts a second logging node (pair becomes a guess)", BSN,
+   "if len(new) != 1:", "if len(new) < 1:",
+   "test_joints_gate_needs_one_new_growing_file_from_a_live_node"),
+
+  ("joint telemetry gate accepts a dead node whose file exists", BSN,
+   "return new[0] if proc.poll() is None and new[0].stat().st_size > n0 else None",
+   "return new[0] if new[0].stat().st_size > n0 else None",
+   "test_joints_gate_needs_one_new_growing_file_from_a_live_node"),
+
+  # 2026-10-06 low-level goal reward: same kernels as training, target i against state i+1, and the
+  # last step of a decision window (no post-step state on the robot) dropped at every stage.
+  ("ll shaping: shoulder posture weight lost (keeper weights x16)", BFR,
+   '(("shoulder", 16.0), ("elbow", 4.0)', '(("shoulder", 1.0), ("elbow", 4.0)',
+   "test_ll_posture_and_energy_use_the_keeper_weights_gate_and_clamps"),
+
+  ("ll shaping: energy penalty not gated on the commanded speed", BFR,
+   "* (spd > CMD_THRESHOLD)\n", "\n",
+   "test_ll_posture_and_energy_use_the_keeper_weights_gate_and_clamps"),
+
+  ("ll goal reward: yaw kernel width drifts from goal_space.reward", BFR,
+   '("ll_goal_wz", slice(2, 3), 0.5)', '("ll_goal_wz", slice(2, 3), 0.25)',
+   "test_ll_goal_kernels_equal_the_training_reward"),
+
+  ("ll goal reward: target scored against the PRE-step state", BFR,
+   "return ll_goal_terms(tgt[:-1], s[1:], rows[:-1])", "return ll_goal_terms(tgt[:-1], s[:-1], rows[:-1])",
+   "test_ll_goal_from_hrl_pairs_each_target_with_the_next_state"),
+
+  ("ll goal reward: last step of a window scored across the state reset", BFR,
+   "return ~last_of_window & (walk if regime", "return (walk if regime",
+   "test_ll_rows_drop_the_last_step_of_each_window_and_split_regimes"),
+
+  ("chain units: a fallen unit is counted but still averaged in", PTF,
+   "      fell += 1\n      continue\n    kept.append(js)", "      fell += 1\n    kept.append(js)",
+   "test_bench_units_drop_a_fallen_env_and_carry_the_control_rate_jacc"),
+
+  ("chain units: only the newest bridge Run is read (the files[-1] the figure used to take)", PTF,
+   'for f in sorted((root / SEQ_DIR / tag / stage).glob(f"*.{regime}.json")):',
+   'for f in sorted((root / SEQ_DIR / tag / stage).glob(f"*.{regime}.json"))[-1:]:',
+   "test_every_bridge_run_is_read_and_a_fallen_one_is_excluded_and_counted"),
+
+  ("chain units: a bridge Run whose tilt trigger fired is scored as upright", PTF,
+   'js["fell"] = _tilt_fall_s(flight) is not None', 'js["fell"] = False',
+   "test_every_bridge_run_is_read_and_a_fallen_one_is_excluded_and_counted"),
+
+  # 2026-10-02 schedule replay: bench and bridge run ONE schedule and go through ONE scorer.
+  ("schedule replay: key map swaps lateral and yaw", BSN,
+   "return {k: (float(x), float(y), float(z)) for k, x, y, z in rows}",
+   "return {k: (float(x), float(z), float(y)) for k, x, y, z in rows}",
+   "test_key_map_is_the_controllers_own_presets"),
+
+  ("schedule replay: seconds taken as steps (schedule 50x too short)", BSN,
+   "out += [keys[k]] * round(float(secs) / step_dt)", "out += [keys[k]] * round(float(secs))",
+   "test_default_schedule_is_the_253_s_battery_one_command_per_control_step"),
+
+  ("schedule replay: trace torque paired with position instead of velocity", BFR,
+   '"dq": z["dq"][:, k].astype(float),\n             "knee"',
+   '"dq": z["q"][:, k].astype(float),\n             "knee"',
+   "test_bench_trace_is_scored_by_the_flight_recorder_scorer"),
+
+  ("schedule replay: a bench unit that fell is scored as if it had not", BFR,
+   '"fell": extra["fell_step"] >= 0, "fell_step"', '"fell": False, "fell_step"',
+   "test_a_bench_unit_that_fell_is_flagged_and_its_reward_is_regime_split"),
+
+  ("schedule replay: trace reward pooled across regimes", BFR,
+   'zip(extra["rew"][0], extra["rew"][1][rows].mean(axis=0))',
+   'zip(extra["rew"][0], extra["rew"][1].mean(axis=0))',
+   "test_a_bench_unit_that_fell_is_flagged_and_its_reward_is_regime_split"),
+
+  ("joint telemetry: readiness accepts a Run whose log has zero rows", DRDY,
+   're.search(r"rows=[1-9]", jl[-1]) is not None', 're.search(r"rows=", jl[-1]) is not None',
+   "test_readiness_reports_a_run_without_joint_telemetry_as_infra"),
 ]
 
 

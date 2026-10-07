@@ -3,7 +3,7 @@
 import math
 import os
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -26,7 +26,31 @@ from src.tasks.velocity.mdp.payload_inertia import (
   MOUNT_D_MEAN, eval_pin_params, payload_mount)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bridge_session  # noqa: E402
 from period_payload_stats import period_payload_stats  # noqa: E402
+
+
+def _pin_twist(env, vx, vy, wz, heading=None):
+  """Hold the twist command at one point: collapse the ranges, write the live buffer, and turn
+  standing/heading envs off, so a resample cannot move it."""
+  t = env.unwrapped.command_manager.get_term("twist")
+  t.cfg.ranges.lin_vel_x = (vx, vx)
+  t.cfg.ranges.lin_vel_y = (vy, vy)
+  t.cfg.rel_standing_envs = 0.0
+  t.vel_command_b[:, 0], t.vel_command_b[:, 1], t.vel_command_b[:, 2] = vx, vy, wz
+  t.is_standing_env[:] = False
+  if heading is not None:
+    # Heading hold: wz becomes a live P-correction toward the world heading. Keep the
+    # ang_vel_z range OPEN — the controller clips its correction to it, so collapsing
+    # it to (0,0) would silently disable the hold.
+    t.cfg.heading_command = True
+    t.cfg.ranges.heading = (heading, heading)
+    t.heading_target[:] = heading
+    t.is_heading_env[:] = True
+  else:
+    t.cfg.ranges.ang_vel_z = (wz, wz)
+    t.cfg.heading_command = False
+    t.is_heading_env[:] = False
 
 
 @dataclass(frozen=True)
@@ -100,6 +124,17 @@ class PlayConfig:
   uniform smoothness deficit. Works on A0 (non-hierarchical) too, where c defaults to 8 and
   the flat profile is the control proving any A1 structure is real, not a binning artifact.
   Sibling to ``eval_steps``; reuses ``eval_seeds``."""
+  reward_terms: bool = False
+  """With ``--eval-steps``: the env reward's per-term value (``weight * raw``, per step), mean
+  over envs/steps/seeds and split into walking / standing by the commanded-motion gate
+  (|cmd_xy| + |cmd_yaw| > 0.1, ``bench_flight_recorder.walking_mask``). Read from the live
+  RewardManager, so it is the training reward. Prints ``[REWARD] {json}`` and adds
+  ``reward_terms`` to ``[BENCH]``. A1's LL trains on its intrinsic reward, so for A1 this is
+  the DIAGNOSTIC env reward. Compared against bridge/hardware by ``score_env_reward.py``."""
+  reward_dump: str = ""
+  """With ``--reward-terms``: also write ``<path>.npz`` (post-step qpos/qvel/ctrl, command, gait
+  phase and the live per-term reward of the first 8 envs, seed 0) and ``<path>.mjb`` (the compiled
+  host model), the ground truth that ``score_env_reward.py --validate`` replays offline."""
   check_joint_limits: bool = False
   """Deploy parity check: with ``--eval-steps``, score the policy's COMMANDED joint
   position targets (``action_manager['joint_pos'].processed_actions``, the same quantity
@@ -151,6 +186,18 @@ class PlayConfig:
   fixed-command replays walk STRAIGHT instead of slowly circling (the A0-inherited yaw drift
   curves the path when wz is just pinned to 0). Requires --eval-cmd-vx; overrides eval_cmd_wz
   (wz becomes the live heading correction, clipped to the task's ang_vel_z range)."""
+  eval_cmd_seq: str = ""
+  """Replay a sim-bridge command schedule at the bench: a ``bridge_session.py --seq`` spec
+  (``KEY:SECONDS,...``; ``default`` = its ``DEFAULT_SEQ``, the 253 s battery). Every env steps
+  the same schedule, so the bench and a bridge Run are one experiment on two plants. Sets
+  ``eval_steps`` to the schedule length. The inline ``[BENCH]`` numbers then POOL regimes and
+  are not the result: write ``--eval-trace`` and score it with ``bench_flight_recorder.py
+  --trace``, the scorer the bridge and the robot go through."""
+  eval_trace: str = ""
+  """With ``--eval-steps``/``--eval-cmd-seq``: write ``<path>_s<seed>.npz``, one row per policy
+  step per env in the flight recorder's quantities and DEPLOY slot order (command, commanded
+  target, measured q/dq, actuator torque, IMU-body attitude and gyro, true base velocity, the
+  observed gait phase, first-fall step; with ``--reward-terms`` also the per-term env reward)."""
   eval_payload_kg: float | None = None
   """WP1 payload pilot (2026-08-27): pin an exact torso payload mass (kg, added at the COM)
   for the whole eval rollout, instead of the training-time sampled range. Reuses the existing
@@ -417,6 +464,11 @@ def run_play(task_id: str, cfg: PlayConfig):
   # 42.27 across five draws (+-26%), vs +-2.6% at 64 envs. The old `None -> scene default (1)`
   # silently produced non-comparable numbers twice (the 2026-07-15 goal probe, then the
   # 2026-08-09 jacc benches), so eval paths default to 64 while interactive play stays at 1.
+  seq_cmds = None
+  if cfg.eval_cmd_seq:
+    seq_cmds = bridge_session.seq_commands(
+      bridge_session.DEFAULT_SEQ if cfg.eval_cmd_seq == "default" else cfg.eval_cmd_seq)
+    cfg = replace(cfg, eval_steps=len(seq_cmds))
   _eval_mode = (cfg.eval_steps > 0 or cfg.diagnose_goals > 0 or cfg.diagnose_symmetry > 0
                 or cfg.diagnose_action_rate > 0 or cfg.check_vel_increment > 0
                 or cfg.diagnose_cadence > 0)
@@ -440,20 +492,28 @@ def run_play(task_id: str, cfg: PlayConfig):
     # off, which makes the bias observable and therefore trivially correctable; the probe
     # needs the hardware failure mode, where the reported angle IS the command and only the
     # true joint is displaced. "critic" shares the same term objects as "actor".
-    for grp in ("actor", "critic"):
-      term = env_cfg.observations.get(grp)
-      term = term.terms.get("joint_pos") if term is not None else None
+    # A1 renames "actor" -> "policy" and deletes "actor", so scan every group by term
+    # name rather than by group name, or the probe silently measures nothing on A1.
+    wired = []
+    for gname, grp_cfg in env_cfg.observations.items():
+      term = grp_cfg.terms.get("joint_pos")
       if term is not None:
         term.params = dict(term.params or {})
         term.params["biased"] = True
+        wired.append(gname)
+    # Print it: this wiring IS the probe, and a silent miss (A1 renames the group) makes
+    # the probe report a spurious zero sensitivity rather than failing.
+    print(f"[LEANPROBE] joint_pos biased=True wired on obs groups: {wired}")
+    assert wired, "no obs group has a joint_pos term -- probe would measure nothing"
 
   if cfg.probe_lean > 0 and cfg.probe_gravity_noise:
     # Play mode sets enable_corruption=False (h1_2 env_cfgs.py), which makes the obs manager
     # null every term's noise -- so the gravity sweep would have nothing to vary. Turn
     # corruption back on but strip the noise from every OTHER actor term, so gravity is the
     # only corrupted channel and the sweep stays single-variable.
-    grp = env_cfg.observations.get("actor")
-    if grp is not None:
+    for gname, grp in env_cfg.observations.items():
+      if gname == "critic" or "projected_gravity" not in grp.terms:
+        continue
       grp.enable_corruption = True
       for name, term in grp.terms.items():
         if name != "projected_gravity":
@@ -584,26 +644,10 @@ def run_play(task_id: str, cfg: PlayConfig):
     # disable standing/heading, on the live term (works in benchmark, viewer, and diagnose loops).
     if cfg.eval_cmd_vx is not None:
       vx, vy, wz = cfg.eval_cmd_vx, (cfg.eval_cmd_vy or 0.0), (cfg.eval_cmd_wz or 0.0)
-      t = env.unwrapped.command_manager.get_term("twist")
-      t.cfg.ranges.lin_vel_x = (vx, vx)
-      t.cfg.ranges.lin_vel_y = (vy, vy)
-      t.cfg.rel_standing_envs = 0.0
-      t.vel_command_b[:, 0], t.vel_command_b[:, 1], t.vel_command_b[:, 2] = vx, vy, wz
-      t.is_standing_env[:] = False
+      _pin_twist(env, vx, vy, wz, cfg.eval_cmd_heading)
       if cfg.eval_cmd_heading is not None:
-        # Heading hold: wz becomes a live P-correction toward the world heading. Keep the
-        # ang_vel_z range OPEN — the controller clips its correction to it, so collapsing
-        # it to (0,0) would silently disable the hold.
-        h = cfg.eval_cmd_heading
-        t.cfg.heading_command = True
-        t.cfg.ranges.heading = (h, h)
-        t.heading_target[:] = h
-        t.is_heading_env[:] = True
-        print(f"[A1a] Fixed twist = ({vx} m/s, {vy} m/s, heading-hold {h} rad); walks straight.")
+        print(f"[A1a] Fixed twist = ({vx} m/s, {vy} m/s, heading-hold {cfg.eval_cmd_heading} rad); walks straight.")
       else:
-        t.cfg.ranges.ang_vel_z = (wz, wz)
-        t.cfg.heading_command = False
-        t.is_heading_env[:] = False
         print(f"[A1a] Fixed twist command = ({vx}, {vy}, {wz}) m/s; resampling collapsed to a point.")
 
   # Headless deterministic benchmark: roll out `eval_steps` steps x `eval_seeds` seeds.
@@ -676,9 +720,29 @@ def run_play(task_id: str, cfg: PlayConfig):
         bench_meta[k] = list(v) if isinstance(v, (list, tuple)) else v
 
     seed_results: list[dict] = []
+    rw_sum, rw_n = {}, {"walking": 0, "standing": 0}   # --reward-terms, summed over seeds
+    dump = {k: [] for k in ("qpos", "qvel", "ctrl", "cmd", "phase", "period", "rew", "ct", "force")}
+    tr = None
+    if cfg.eval_trace:
+      # --eval-trace: joints go out in DEPLOY slot order, matched by name (the sim calls slot 12
+      # `torso`, the deploy header `waist_yaw`), so the scorer's LEG/UB slots mean the same joints.
+      _lim = bridge_session.deploy_limit_rows()
+      _sim = [{"torso": "waist_yaw"}.get(n, n) for n in
+              (x.replace("_joint", "").lower() for x in uenv.scene["robot"].joint_names)]
+      _at = uenv.action_manager.get_term("joint_pos")
+      _tgt = getattr(_at, "_target_ids", None)
+      _act = [_sim[i] for i in (range(len(_sim)) if _tgt is None else _tgt)]
+      tr_pj = torch.as_tensor([_sim.index(n) for _, _, n in _lim], device=env.device)
+      tr_pa = torch.as_tensor([_act.index(n) for _, _, n in _lim], device=env.device)
+      tr_torso = uenv.scene["robot"].find_joints([".*torso_joint.*"])[0][0]
+      tr_gyro = uenv.scene["robot/imu_ang_vel"]
+      _om = uenv.observation_manager
+      tr_phase = _om.get_term_cfg(next(g for g, ts in _om.active_terms.items() if "phase" in ts), "phase")
     for seed_idx in range(cfg.eval_seeds):
       seed = 42 + seed_idx
       torch.manual_seed(seed)
+      if seq_cmds is not None:
+        _pin_twist(env, *seq_cmds[0])
       # reset() does in-place buffer updates; must be inside inference_mode or it errors
       # on seed >= 1 (the prior rollout marked those env buffers as inference tensors).
       with torch.inference_mode():
@@ -715,12 +779,7 @@ def run_play(task_id: str, cfg: PlayConfig):
       lim_lo = lim_hi = lim_names = None
       jl_over = jl_max = None
       if cfg.check_joint_limits:
-        import re
-        hdr = (Path(__file__).parent.parent
-               / "deploy/robots/h1_2/include/h1_2_limits.h").read_text()
-        blk = hdr.split("h1_2_joint_limits = {{", 1)[1].split("}};", 1)[0]
-        rows = re.findall(r"\{\s*(-?[\d.]+)f?,\s*(-?[\d.]+)f?\s*\}\s*,?\s*//\s*\d+\s+(\w+)", blk)
-        by_name = {n.lower(): (float(a), float(b)) for a, b, n in rows}
+        by_name = {n: (a, b) for a, b, n in bridge_session.deploy_limit_rows()}
         at = uenv.action_manager.get_term("joint_pos")
         sim_names = uenv.scene["robot"].joint_names
         tgt = at._target_ids if hasattr(at, "_target_ids") else list(range(len(sim_names)))
@@ -766,9 +825,96 @@ def run_play(task_id: str, cfg: PlayConfig):
         # first seed, where the buffer is already zeroed, and load-bearing on every seed
         # after it, else the phi path would start seed 1 on seed 0's stale tail).
         dones = torch.ones(env.unwrapped.num_envs, dtype=torch.bool, device=env.device)
-        for _ in range(cfg.eval_steps):
+        if cfg.eval_trace:
+          _z = lambda d: torch.zeros(cfg.eval_steps, n_envs, d, device=env.device)  # noqa: E731
+          tr = {k: _z(d) for k, d in (("cmd", 3), ("raw_q", 27), ("q", 27), ("dq", 27), ("tau", 27),
+                                      ("quat", 4), ("gyro", 3), ("ach_v", 2), ("phase", 2))}
+          tr_fell = torch.full((n_envs,), -1, device=env.device)
+          if hasattr(runner, "goal_space"):   # hierarchy: the low level's goal V* and achieved state
+            tr["vstar"], tr["ach"] = _z(runner.goal_space.dim), _z(runner.goal_space.dim)
+        for step_i in range(cfg.eval_steps):
           actions = policy(obs, dones) if policy_wants_dones else policy(obs)
+          if tr is not None:
+            # The state the policy just acted on, paired with the command it saw: what one
+            # flight-recorder tick holds. Attitude and gyro are the IMU body's (torso_link, behind
+            # the waist yaw), not the pelvis the inline metrics read.
+            tr["cmd"][step_i] = uenv.command_manager.get_command("twist")[:, :3]
+            tr["q"][step_i] = robot.joint_pos[:, tr_pj]
+            tr["dq"][step_i] = robot.joint_vel[:, tr_pj]
+            tr["tau"][step_i] = robot.qfrc_actuator[:, tr_pj]
+            _w, _x, _y, _zq = robot.root_link_quat_w.unbind(-1)
+            _c, _s = torch.cos(robot.joint_pos[:, tr_torso] / 2), torch.sin(robot.joint_pos[:, tr_torso] / 2)
+            tr["quat"][step_i] = torch.stack(
+              [_w * _c - _zq * _s, _x * _c + _y * _s, _y * _c - _x * _s, _zq * _c + _w * _s], -1)
+            tr["gyro"][step_i] = tr_gyro.data
+            # Pelvis velocity expressed in the TORSO frame, v_T = Rz(-psi) v_P: what both
+            # controllers log as `ach_v` on the bridge (they rotate by the IMU attitude).
+            _vx, _vy = robot.root_link_lin_vel_b[:, 0], robot.root_link_lin_vel_b[:, 1]
+            _cp, _sp = torch.cos(robot.joint_pos[:, tr_torso]), torch.sin(robot.joint_pos[:, tr_torso])
+            tr["ach_v"][step_i] = torch.stack([_cp * _vx + _sp * _vy, _cp * _vy - _sp * _vx], -1)
+            tr["phase"][step_i] = tr_phase.func(uenv, **tr_phase.params)
+            if "vstar" in tr:   # the closure wrote hrl_goal = V* - s for THIS step
+              tr["vstar"][step_i] = uenv.hrl_goal + runner.goal_space.extract(uenv)
+          if seq_cmds is not None and step_i + 1 < len(seq_cmds) and seq_cmds[step_i + 1] != seq_cmds[step_i]:
+            _pin_twist(env, *seq_cmds[step_i + 1])   # so the NEXT observation carries it
+          if cfg.reward_terms:
+            _c = uenv.command_manager.get_command("twist")  # the command the reward is scored on
+            _walk = (_c[:, :2].norm(dim=1) + _c[:, 2].abs()) > 0.1
+          if cfg.reward_dump and seed_idx == 0:   # the phase the reward reads is set in policy()
+            dump["phase"].append(getattr(uenv, "hrl_phase", torch.full((n_envs,), float("nan")))[:8].tolist())
+            dump["period"].append(float("nan") if not hasattr(uenv, "hrl_period")
+                                  else uenv.hrl_period[:8].tolist())
+            dump["cmd"].append(_c[:8, :3].tolist())
           obs, _, dones, extras = env.step(actions.to(env.device))
+          if tr is not None:
+            _t = uenv.action_manager.get_term("joint_pos")
+            tr["raw_q"][step_i] = (_t.raw_action * _t.scale + _t.offset)[:, tr_pa]
+            if "ach" in tr:     # post-step goal state, what training scores V* against
+              tr["ach"][step_i] = runner.goal_space.extract(uenv)
+            tr_fell[(dones.bool()) & (tr_fell < 0)] = step_i
+          if cfg.reward_dump and seed_idx == 0:
+            _d = uenv.sim.data
+            for k, v in (("qpos", _d.qpos), ("qvel", _d.qvel), ("ctrl", _d.ctrl),
+                         ("rew", uenv.reward_manager._step_reward),
+                         ("ct", uenv.scene["feet_ground_contact"].data.current_contact_time),
+                         ("force", uenv.scene["feet_ground_contact"].data.force)):
+              dump[k].append(v[:8].tolist())
+          if cfg.reward_terms:
+            _rm = uenv.reward_manager
+            # A1a: the env's foot_gait is A0's term on A0's fixed 0.6 s clock, which the LL never
+            # sees; the LL trains its own feet_gait on the HL-commanded phase (hrl_runner `cadence`
+            # term). `foot_gait_hl` = that term at the env weight, so the two can be swapped.
+            _fg_hl = None
+            if getattr(runner, "hl_cadence", False):
+              from src.tasks.velocity.mdp import rewards as _mdp_rw
+              _fg_hl = _rm.get_term_cfg("foot_gait").weight * _mdp_rw.feet_gait(
+                uenv, use_commanded_phase=True, **runner._gait_params)
+            for _reg, _m in (("walking", _walk), ("standing", ~_walk)):
+              rw_n[_reg] += int(_m.sum())
+              for _i, _n in enumerate(_rm.active_terms):
+                rw_sum.setdefault(_n, {"walking": 0.0, "standing": 0.0})[_reg] += float(
+                  _rm._step_reward[_m, _i].sum())
+              if _fg_hl is not None:
+                rw_sum.setdefault("foot_gait_hl", {"walking": 0.0, "standing": 0.0})[_reg] += float(
+                  _fg_hl[_m].sum())
+            if tr is not None:
+              if "rew" not in tr:
+                tr_rw = list(_rm.active_terms) + (["foot_gait_hl"] if _fg_hl is not None else [])
+                tr["rew"] = torch.zeros(cfg.eval_steps, n_envs, len(tr_rw), device=env.device)
+              tr["rew"][step_i] = _rm._step_reward if _fg_hl is None else torch.cat(
+                [_rm._step_reward, _fg_hl[:, None]], dim=1)
+          if tr is not None and step_i == cfg.eval_steps - 1:
+            import numpy as np
+            np.savez_compressed(
+              f"{cfg.eval_trace}_s{seed}.npz", step_dt=uenv.step_dt, seed=seed,
+              label=str(resume_path) if resume_path is not None else "unknown",
+              cmd_seq=cfg.eval_cmd_seq, fell_step=tr_fell.cpu().numpy(),
+              joint_names=np.array([n for _, _, n in _lim]),
+              joint_min=np.array([a for a, _, _ in _lim]), joint_max=np.array([b for _, b, _ in _lim]),
+              rew_names=np.array(tr_rw if "rew" in tr else []),
+              **{k: v.cpu().numpy().astype(np.float32) for k, v in tr.items()})
+            print(f"[TRACE] {cfg.eval_trace}_s{seed}.npz  {cfg.eval_steps} steps x {n_envs} envs, "
+                  f"{int((tr_fell >= 0).sum())} fell")
 
           # 1. Tracking error.
           if cfg.check_joint_limits:
@@ -1145,6 +1291,22 @@ def run_play(task_id: str, cfg: PlayConfig):
     bench_out = {**bench_meta, **{k: round(means[k], 6) for k in keys},
                  **{f"{k}_std": round(stds[k], 6) for k in keys},
                  "eval_steps": cfg.eval_steps, "num_envs": n_envs, "eval_seeds": cfg.eval_seeds}
+    if cfg.reward_terms:
+      bench_out["reward_terms"] = {
+        r: {n: round(v[r] / max(rw_n[r], 1), 6) for n, v in rw_sum.items()} for r in rw_n}
+      bench_out["reward_terms_steps"] = rw_n
+      print(f"[REWARD] {json.dumps({'reward_terms': bench_out['reward_terms'], 'env_steps': rw_n})}")
+    if cfg.reward_dump:
+      import mujoco
+      import numpy as np
+      _rm = uenv.reward_manager
+      np.savez_compressed(cfg.reward_dump + ".npz", terms=np.array(_rm.active_terms),
+                          weights=np.array([_rm.get_term_cfg(n).weight for n in _rm.active_terms]),
+                          step_dt=uenv.step_dt,
+                          gait_params=json.dumps(_rm.get_term_cfg("foot_gait").params, default=str),
+                          **{k: np.array(v, dtype=float) for k, v in dump.items()})
+      mujoco.mj_saveModel(uenv.sim.mj_model, cfg.reward_dump + ".mjb", None)
+      print(f"[REWARD] dump -> {cfg.reward_dump}.npz/.mjb")
     print(f"[BENCH] {json.dumps(bench_out)}")
     env.close()
     return
@@ -2084,9 +2246,15 @@ def run_play(task_id: str, cfg: PlayConfig):
       # `term_cfg.noise` live every step, so mutating it here takes effect immediately.
       from mjlab.utils.noise.noise_cfg import UniformNoiseCfg
       om = uenv.observation_manager
+      # A0 keeps one "actor" group; A1 splits it into policy/command/goal and DELETES
+      # "actor" (h1_2_a1/env_cfgs.py), so find the actor-side group carrying the term.
+      ggroup = next(
+        g for g, terms in om.active_terms.items()
+        if g != "critic" and "projected_gravity" in terms
+      )
       gterm = next(
-        c for n, c in zip(om.active_terms["actor"],
-                          om._group_obs_term_cfgs["actor"], strict=False)  # noqa: SLF001
+        c for n, c in zip(om.active_terms[ggroup],
+                          om._group_obs_term_cfgs[ggroup], strict=False)  # noqa: SLF001
         if n == "projected_gravity"
       )
       base = gterm.noise

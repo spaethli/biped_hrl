@@ -553,6 +553,191 @@ def read_flight(csv_path, assume_hold, pose_yaml=None, entry=None):
     }
 
 
+# The deployed A1a low level's goal reward (`goal_space.reward`, ll_goal_kernel=exp): one exp
+# kernel per goal component on V*_i - s_{i+1}, the target of step i against the state after it.
+# (name, goal columns, sigma^2); the sum lies in (0, 4]. Goal order: vx vy wz | gravity xyz | h.
+LL_KERNELS = (("ll_goal_vxy", slice(0, 2), 0.25), ("ll_goal_wz", slice(2, 3), 0.5),
+              ("ll_goal_orient", slice(3, 6), 0.25), ("ll_goal_h", slice(6, 7), 0.01))
+
+
+def ll_goal_terms(target, achieved, rows):
+    """Mean of each goal kernel over `rows`, plus their sum `ll_goal_r`. `target[i]` is V* of step
+    i and `achieved[i]` the goal state AFTER step i."""
+    if rows.sum() < 20:
+        return {}
+    d = (target - achieved)[rows]
+    out = {k: float(np.exp(-(d[:, sl] ** 2).sum(1) / v).mean()) for k, sl, v in LL_KERNELS}
+    out["ll_goal_r"] = sum(out[k] for k, _, _ in LL_KERNELS)
+    out["ll_goal_steps"] = int(rows.sum())
+    return out
+
+
+def ll_rows(new_window, walk, regime):
+    """Steps scored for the low-level goal reward: in the regime, and NOT the last step of a decision
+    window. On the robot and bridge the velocity state is the IMU increment, reset at every HL
+    decision, so the last step of a window has no post-step state in its own window; the same steps
+    are dropped at the bench so all stages sample alike (7 of every 8 at c = 8)."""
+    last_of_window = np.r_[new_window[1:], True]
+    return ~last_of_window & (walk if regime == "walking" else ~walk)
+
+
+def ll_goal_from_hrl(hrl_csv, regime):
+    """Low-level goal reward from a controller's `_hrl.csv` (bridge or robot): `s` is the goal state
+    the controller fed the low level (the onboard estimate), `tgt` its V*, one row per policy step."""
+    h = pd.read_csv(hrl_csv)
+    tgt = h[[f"tgt{i}" for i in range(7)]].to_numpy(float)
+    s = h[[f"s{i}" for i in range(7)]].to_numpy(float)
+    fire = (h["est_vx"].to_numpy() == 0.0) & (h["est_vy"].to_numpy() == 0.0)   # increment reset
+    walk = walking_mask(h[["cmd_vx", "cmd_vy", "cmd_wz"]].to_numpy(float))
+    rows = ll_rows(fire, walk, regime)
+    return ll_goal_terms(tgt[:-1], s[1:], rows[:-1])
+
+
+# The two shaping terms of the deployed A1a low level with no env-reward counterpart (its other nine
+# registry terms and its action rate equal env terms, function, parameters and weight). Coefficients
+# are the KEEPER's (`ll_posture_coef` 0.5, `ll_posture_all_joints`, `ll_posture_weights`,
+# `ll_energy_coef` 0.05): the DR and H-adapt arms freeze that low level, so it is the objective their
+# low level was trained on even though their own configs zero most ll_* coefficients.
+LL_POSTURE_COEF, LL_ENERGY_COEF = 0.5, 0.05
+LL_POSTURE_W = (("shoulder", 16.0), ("elbow", 4.0), ("wrist", 4.0), ("ankle_roll", 4.0))   # others 1
+
+
+def ll_posture_energy(F, T, align, regime):
+    """Signed per-step contributions `ll_posture` (all 27 joints vs the default pose, err^2 clamped
+    at 9, keeper weights, times -0.5) and `ll_energy` (-0.05 * min(P / (m g max(|v_cmd_xy|, 0.1)), 10),
+    gated on |v_cmd_xy| > 0.1; P from the measured torque, so only with a telemetry pair)."""
+    df, walk = F["df"], F["walk_rows"]
+    rows = walk if regime == "walking" else ~walk
+    out = {}
+    names = [F["joints"][j]["name"] for j in range(27)]
+    w = np.array([next((v for k, v in LL_POSTURE_W if k in n), 1.0) for n in names])
+    q = df[[f"meas_q{j}" for j in range(27)]].to_numpy(float)[rows]
+    if len(q):
+        dev = np.minimum((q - F["default_pose"]) ** 2, 9.0) * w
+        out["ll_posture"] = float(-LL_POSTURE_COEF * dev.mean(axis=1).mean())
+    if T is not None and align is not None:
+        ta = T["t"]
+        t_in = ta + (align["b"] + align["m"] * ta)
+        tf = F["t_clock"]
+        inside = (t_in >= tf[0]) & (t_in <= tf[-1])
+        reg = (np.interp(t_in, tf, rows.astype(float)) > 0.5) & inside
+        spd = np.hypot(np.interp(t_in, tf, F["cmd"][:, 0]), np.interp(t_in, tf, F["cmd"][:, 1]))
+        power = np.abs(T["tau"] * T["dq"]).sum(axis=1)
+        cot = np.minimum(power / (np.maximum(spd, 0.1) * MASS_G), 10.0) * (spd > CMD_THRESHOLD)
+        if reg.sum() >= 50:
+            out["ll_energy"] = float(-LL_ENERGY_COEF * cot[reg].mean())
+    return out
+
+
+def ll_shaping_for_run(flight_csv, telemetry_csv, lag_s, skew_ppm, regime):
+    """`ll_posture_energy` for an already-paired Run (a hardware bundle): the alignment is the one
+    its regime json recorded (`pair_lag_s`, `pair_skew_ppm`), so no pair is re-fitted."""
+    F = read_flight(flight_csv, [], None, None)
+    T = read_telemetry(telemetry_csv) if telemetry_csv else None
+    return ll_posture_energy(F, T, {"b": lag_s, "m": skew_ppm * 1e-6} if T is not None else None, regime)
+
+
+def read_trace(npz_path, pose_yaml=None):
+    """Bench trace (`play.py --eval-trace`) -> one `(env, F, T, align, extra)` per env.
+
+    The trace already holds what a _Session pair_ has to reconstruct: one row per policy step,
+    torque on the same clock, joints in deploy slot order. So `F` is filled directly, the
+    alignment is the identity, and `score_regime` / `_energy` run UNCHANGED: the training bench
+    is scored by the code the bridge and the robot are scored by.
+    """
+    with np.load(npz_path) as lazy:      # NpzFile re-inflates an array on EVERY access
+        z = {k: lazy[k] for k in lazy.files}
+    dt = float(z["step_dt"])
+    if abs(dt - CTRL_DT) > 1e-9:
+        raise SystemExit(f"{Path(npz_path).name}: step_dt {dt} is not the {CTRL_DT} s every rate here assumes")
+    n = z["cmd"].shape[0]
+    t = np.arange(n) * dt
+    joints = {s: {"slot": s, "name": str(nm), "min": float(lo), "max": float(hi)}
+              for s, (nm, lo, hi) in enumerate(zip(z["joint_names"], z["joint_min"], z["joint_max"]))}
+    dflt = default_joint_pos(pose_yaml)
+    rew_names = [str(x) for x in z["rew_names"]]
+    for k in range(z["cmd"].shape[1]):
+        cols = {c: z[a][:, k, i] for a, names in (
+            ("quat", ("quat_w", "quat_x", "quat_y", "quat_z")),
+            ("gyro", ("est_gyro_x", "est_gyro_y", "est_gyro_z")),
+            ("ach_v", ("ach_vx", "ach_vy")), ("phase", ("phase_sin", "phase_cos")),
+            ("q", [f"meas_q{j}" for j in range(27)]), ("dq", [f"meas_dq{j}" for j in range(27)]),
+        ) for i, c in enumerate(names)}
+        cmd, raw = z["cmd"][:, k].astype(float), z["raw_q"][:, k].astype(float)
+        F = {"df": pd.DataFrame(cols).astype(float), "meta": {}, "joints": joints, "hold": [],
+             "hold_src": "trace", "raw": raw, "steps": raw, "sidx": np.arange(n), "t": t,
+             "t_clock": t, "cmd": cmd, "walk_rows": walking_mask(cmd), "default_pose": dflt,
+             "step_hz": 1.0 / dt}
+        T = {"t": t, "tau": z["tau"][:, k].astype(float), "dq": z["dq"][:, k].astype(float),
+             "knee": z["q"][:, k, KNEE_SLOT].astype(float)}
+        align = {"b": 0.0, "m": 0.0, "coarse_lag_s": 0.0, "xcorr": 1.0, "resid_ms": 0.0}
+        extra = {"fell_step": int(z["fell_step"][k]),
+                 "rew": (rew_names, z["rew"][:, k]) if rew_names else None,
+                 "ll": (z["vstar"][:, k].astype(float), z["ach"][:, k].astype(float)) if "vstar" in z else None}
+        yield k, F, T, align, extra
+
+
+def jacc_legs_ctrl(F, regime):
+    """Leg joint acceleration from MEASURED q, second difference at the control rate: the one
+    definition that exists at all three stages (sim's `jacc_legs` is analytic qacc at the
+    physics rate, hence OMITTED above). Same formula as plot_thesis_figures._hw_jacc_legs."""
+    meas = F["df"][[f"meas_q{j}" for j in LEG_SLOTS]].to_numpy(float)[F["sidx"]]
+    walk = F["walk_rows"][F["sidx"]]
+    in_reg = walk if regime == "walking" else ~walk
+    sel = in_reg[2:] & in_reg[1:-1] & in_reg[:-2]
+    if sel.sum() < 10:
+        return float("nan")
+    jac = np.linalg.norm((meas[2:] - 2.0 * meas[1:-1] + meas[:-2]) / CTRL_DT ** 2, axis=1)
+    return float(jac[sel].mean())
+
+
+def process_trace(npz_path, args):
+    """Score every env of a bench trace as its own unit, the bench counterpart of one bridge Run."""
+    npz_path = Path(npz_path)
+    if not args.out_dir:
+        raise SystemExit("--trace needs --out-dir (one json per env and regime)")
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with np.load(npz_path) as lazy:
+        z = {k: lazy[k] for k in ("cmd", "seed", "label", "cmd_seq")}
+    print(f"\n=== {npz_path.name} ===  {z['cmd'].shape[0]} steps x {z['cmd'].shape[1]} envs")
+    written, fell, cots = [], 0, []
+    for k, F, T, align, extra in read_trace(npz_path, args.default_pose_yaml):
+        session = {"label": f"s{int(z['seed'])}_env{k:02d}", "source": "bench_trace",
+                   "trace": npz_path.name, "checkpoint": str(z["label"]), "cmd_seq": str(z["cmd_seq"]),
+                   "rollout_seed": int(z["seed"]), "env": k, "hold_joint_ids": [],
+                   "step_hz": F["step_hz"], "command": command_block(F),
+                   # A fell_over terminal resets the env mid-schedule, so the rows after it are a
+                   # different episode. The unit is flagged, never trimmed: the figure excludes
+                   # and counts it, the same rule a fallen bridge Run gets.
+                   "fell": extra["fell_step"] >= 0, "fell_step": extra["fell_step"]}
+        fell += session["fell"]
+        for regime in ("walking", "standing"):
+            m = score_regime(F, T, align, regime, "ach_v")
+            if m.get("empty"):
+                continue
+            m["jacc_legs_ctrl"] = jacc_legs_ctrl(F, regime)
+            m.update(ll_posture_energy(F, T, align, regime))
+            if extra["ll"] is not None:
+                vstar, ach = extra["ll"]
+                # V* is held per window; rebuilt as (V* - s) + s in float32 it carries ~1e-7 noise
+                new_window = np.r_[True, np.any(np.abs(np.diff(vstar, axis=0)) > 1e-4, axis=1)]
+                m.update(ll_goal_terms(vstar, ach, ll_rows(new_window, F["walk_rows"], regime)))
+            if extra["rew"] is not None:
+                rows = F["walk_rows"] if regime == "walking" else ~F["walk_rows"]
+                m["reward_terms"] = {nm: float(v) for nm, v in
+                                     zip(extra["rew"][0], extra["rew"][1][rows].mean(axis=0))}
+            out = out_dir / f"{session['label']}.{regime}.json"
+            out.write_text(json.dumps({**session, **m, "omitted": OMITTED}, indent=2))
+            written.append(out)
+            if regime == "walking" and "cot" in m and not session["fell"]:
+                cots.append(m["cot"])
+    print(f"  {len(written)} json(s), {fell} of {z['cmd'].shape[1]} envs fell"
+          + (f", walking cot {np.mean(cots):.4f} (p5-p95 {np.percentile(cots, 5):.4f}-"
+             f"{np.percentile(cots, 95):.4f}, n={len(cots)})" if cots else ""))
+    return written
+
+
 def read_telemetry(path):
     """Joint telemetry log -> time, torque, joint velocity, knee. Nothing else is alive."""
     d = np.genfromtxt(path, delimiter=",", names=True)
@@ -862,6 +1047,7 @@ def process(csv_path, args):
         if m["thin"]:
             print(f"  WARN {regime}: {m['n_steps']} steps ({m['duration_s']:.1f} s) below the "
                   f"{THIN_STEPS}-step floor; emitted but treat as indicative")
+        m.update(ll_posture_energy(F, T, align, regime))
         payload = {**session, **m, "omitted": OMITTED}
         out = out_dir / f"{session['label']}.{regime}.json"
         out.write_text(json.dumps(payload, indent=2))
@@ -878,7 +1064,10 @@ def process(csv_path, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("csvs", nargs="+", help="flight-recorder csv(s) from logs/deploy_safety/")
+    ap.add_argument("csvs", nargs="*", help="flight-recorder csv(s) from logs/deploy_safety/")
+    ap.add_argument("--trace", nargs="+", default=[],
+                    help="bench trace(s) from `play.py --eval-trace` instead of flight recorders: "
+                         "every env is scored as its own unit into --out-dir")
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--robot", action="store_true", help="write to logs/robot_logs/")
     g.add_argument("--sim", action="store_true", help="write to logs/sim_logs/")
@@ -925,6 +1114,8 @@ def main():
     written = []
     for c in args.csvs:
         written += process(c, args)
+    for c in args.trace:
+        written += process_trace(c, args)
     print(f"\nwrote {len(written)} json file(s)")
     return 0
 
