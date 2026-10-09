@@ -204,6 +204,11 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
   return out
 
 
+def loss_vs(stages):
+  """The stage the grey loss column compares with the bench: the robot where the figure plots it."""
+  return "hardware" if "hardware" in stages else "bridge"
+
+
 def stage_handles(stages=STAGE_KEYS, runs=True, loss=True, vs="bridge", seeds=False):
   h = [Line2D([], [], marker=STAGE_MARKER[s][0], markersize=5, linestyle="", color="0.3",
               markerfacecolor="0.3" if STAGE_MARKER[s][1] else "white", label=STAGE_LABEL[s])
@@ -271,7 +276,7 @@ def chain_points(kept, root, regime):
 
 
 def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
-  vs = "hardware" if "hardware" in stages else "bridge"   # the stage the grey loss column compares with the bench
+  vs = loss_vs(stages)
   nrow = -(-len(keys) // ncol)
   npol = len({r[0] for r in rows(keys[0], stages)})
   fig, axes = plt.subplots(nrow, ncol, figsize=(ptf.FIG_W, (0.95 + 0.3 * npol) * nrow), sharey=True)
@@ -506,12 +511,12 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
       r = dumbbell(axes[i, j], [(name(t), ptf.policy_color(t),
                                  {s: [u[key] for u in pts[t, regime][s] if key in u] for s in stages})
                                 for t in LL_TAGS],
-                   lab, show_labels=(j == 0), nticks=3, better="higher", none_note="fell")
+                   lab, show_labels=(j == 0), nticks=3, better="higher", none_note="fell", vs=loss_vs(stages))
       rows += [{**x, "regime": regime, "term": key} for x in r]
     axes[0, j].set_title(regime.capitalize())
   write_rows(out, f"f_ll_reward{sfx}_all", rows)
   fig.subplots_adjust(hspace=1.0, wspace=0.55)
-  ptf.bottom_legend(fig, stage_handles(stages), ncol=2, height=0.16 if len(rows_def) < 4 else 0.11)
+  ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages)), ncol=2, height=0.16 if len(rows_def) < 4 else 0.11)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
 
@@ -538,11 +543,11 @@ def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
       dr += [(f"{name(t)}, 7 terms", ptf.policy_color(t), seven, t),
              (f"{name(t)}, all 16 active", ptf.policy_color(t), full, t)]
     r = dumbbell(ax, dr, f"episode return, {EPISODE_S:g} s (-)", show_labels=(i == 0), better="higher",
-                 none_note="fell")
+                 none_note="fell", vs=loss_vs(stages))
     rows += [{**x, "regime": regime} for x in r]
     ax.set_title(regime.capitalize())
   write_rows(out, f"f_reward_return{sfx}_all", rows)
-  ptf.bottom_legend(fig, stage_handles(stages, seeds=True), ncol=2, height=0.26)
+  ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages), seeds=True), ncol=2, height=0.26)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_reward_return{sfx}")
 
@@ -556,7 +561,7 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   rows = []
   for i, (ax, t) in enumerate(zip(axes, terms)):
     r = dumbbell(ax, reward_rows(points, regime, lambda v, t=t: v[t], (t,), stages), TERM_LABEL[t],
-                 show_labels=(i % ncol == 0), nticks=3, better="higher")
+                 show_labels=(i % ncol == 0), nticks=3, better="higher", vs=loss_vs(stages))
     rows += [{**x, "term": t} for x in r]
   spare = axes[len(terms):]
   for ax in spare:
@@ -565,10 +570,10 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   fig.subplots_adjust(hspace=0.7, wspace=0.5)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
-    spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
+    spare[0].legend(handles=stage_handles(stages, vs=loss_vs(stages), seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, stage_handles(stages, seeds=True), ncol=2, height=0.18)
+    ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages), seeds=True), ncol=2, height=0.18)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_reward_terms_{regime}{sfx}")
 
@@ -1044,6 +1049,10 @@ CHAIN_LOSS_NOTE_ROBOT = ("Grey numbers: loss from bench to robot, (robot $-$ ben
                          "not part of it.")
 REWARD_LOSS_NOTE = ("Grey numbers: loss from bench to bridge sim, (bench $-$ bridge) / |bench| of the two stage "
                     "means, in percent; positive means a lower reward at the bridge.")
+REWARD_LOSS_NOTE_ROBOT = ("Grey numbers: loss from bench to robot, (bench $-$ robot) / |bench| of the two stage "
+                          "means, in percent; positive means a lower reward on the robot. The robot ran operator "
+                          "commands, not the bench schedule, so this number mixes the sim-to-real gap with the "
+                          "difference in commands; the bridge sim is not part of it.")
 
 
 def replication_table(root):
@@ -1255,7 +1264,7 @@ def write_latex(out, facts):
       + " The yaw-rate goal state is the pelvis rate in training and at the bench but the torso gyro (which "
       "also carries the waist-yaw motion) in the controller. The last step of every high-level decision "
       "window is not scored in $r^\\mathrm{track}$ at any stage (on the robot the velocity state resets at the "
-      "next decision). " + REWARD_LOSS_NOTE))
+      "next decision). " + (REWARD_LOSS_NOTE if sfx else REWARD_LOSS_NOTE_ROBOT)))
   HL_OBJ_TAIL = ("High-level reward: the linear-velocity and yaw-rate tracking terms per step minus 5 times the "
                  "cost of transport of each 0.16\\,s decision window (the high level's own decision times; the "
                  "distance is along the command; velocity from the simulator truth, or motion capture on the "
@@ -1292,13 +1301,13 @@ def write_latex(out, facts):
                     "16-term value); the hierarchical policies one row, the reward their high level trains on. "
                     + HL_OBJ_TAIL + " " + seeds + f" {sf['est']} of the hierarchical robot Runs have no motion capture and "
                     "use the onboard velocity estimate.")
-    figs.append((f"f_reward_return{sfx}", f"fig:reward_return{lab}", cap_return + " " + REWARD_LOSS_NOTE))
+    figs.append((f"f_reward_return{sfx}", f"fig:reward_return{lab}", cap_return + " " + (REWARD_LOSS_NOTE if sfx else REWARD_LOSS_NOTE_ROBOT)))
     for regime in ("walking", "standing"):
       figs.append((f"f_reward_terms_{regime}{sfx}", f"fig:reward_terms_{regime}{lab}",
         f"The reward terms of Fig.~\\ref{{fig:reward_return{lab}}} one by one while {regime} (weight times raw "
         "value, per step; higher is better, penalties are negative). " + ENV_OBJ
         + ("" if sfx else " On the robot, linear-velocity tracking lacks the vertical-velocity part (not "
-           "measured) and the roll/pitch rate is the body-frame gyro.") + " " + seeds + " " + REWARD_LOSS_NOTE))
+           "measured) and the roll/pitch rate is the body-frame gyro.") + " " + seeds + " " + (REWARD_LOSS_NOTE if sfx else REWARD_LOSS_NOTE_ROBOT)))
   tr = facts["train"]
   by = lambda v, k: [r[k] for r in tr if r["variant"] == v]
   span = lambda x, n=0: (f"{min(x):.{n}f}" if f"{min(x):.{n}f}" == f"{max(x):.{n}f}"
