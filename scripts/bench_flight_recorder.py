@@ -637,6 +637,48 @@ def ll_shaping_for_run(flight_csv, telemetry_csv, lag_s, skew_ppm, regime):
     return ll_posture_energy(F, T, {"b": lag_s, "m": skew_ppm * 1e-6} if T is not None else None, regime)
 
 
+# The A1a HIGH level's training reward (hrl_runner.py: `hl_reward_mode=tracking` + `hl_cot_coef`), per
+# decision window of HL_C policy steps: the two tracking kernels summed over the window's steps, minus
+# HL_COT_COEF * window_cot. window_cot = window energy / (max(distance walked ALONG the command, floor)
+# * m g), both gated on |v_cmd_xy| > CMD_THRESHOLD; the cap-to-commanded variant is off for the policies
+# scored here. The tracking kernels are the env's own terms with unit weight (no vz term on the robot).
+HL_C, HL_COT_COEF = 8, 5.0
+HL_FLOOR_M = 0.1 * HL_C * CTRL_DT      # what a threshold-speed (0.1 m/s) walk covers in one window
+
+
+def hl_return(track, energy, dpar, fire, walk):
+    """The high level's reward per policy step, by regime, from per-step arrays on one grid.
+
+    track: raw track_linear_velocity + track_angular_velocity; energy: J spent this step (gated);
+    dpar: signed metres along the command this step (gated); fire: True on the first step of every
+    HL window; walk: the regime mask. Only full windows of HL_C steps count, and a window with any
+    non-finite input (a capture dropout, a step without telemetry) is dropped, never zero-filled.
+    A window belongs to the regime most of its steps are in. -> {regime: {hl_r, hl_track, hl_cot,
+    hl_windows}} with the three rewards per policy step (hl_r = hl_track + hl_cot, hl_cot <= 0), so
+    x 20 s / CTRL_DT is the logged episode return."""
+    starts = np.flatnonzero(fire)
+    ends = np.r_[starts[1:], len(fire)]
+    full = (ends - starts) == HL_C
+    starts = starts[full]
+    out = {}
+    if not len(starts):
+        return out
+    idx = starts[:, None] + np.arange(HL_C)
+    trk, en, dp = track[idx].sum(1), energy[idx].sum(1), dpar[idx].sum(1)
+    cot = en / (np.maximum(dp, HL_FLOOR_M) * MASS_G)
+    ok = np.isfinite(trk) & np.isfinite(cot)
+    wk = walk[idx].mean(1) > 0.5
+    for regime, sel in (("walking", wk), ("standing", ~wk)):
+        sel = sel & ok
+        if sel.sum() < 3:
+            continue
+        n = HL_C * sel.sum()
+        out[regime] = {"hl_track": float(trk[sel].sum() / n), "hl_cot": float(-HL_COT_COEF * cot[sel].sum() / n),
+                       "hl_windows": int(sel.sum())}
+        out[regime]["hl_r"] = out[regime]["hl_track"] + out[regime]["hl_cot"]
+    return out
+
+
 def read_trace(npz_path, pose_yaml=None):
     """Bench trace (`play.py --eval-trace`) -> one `(env, F, T, align, extra)` per env.
 

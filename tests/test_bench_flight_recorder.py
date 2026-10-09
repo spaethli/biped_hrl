@@ -729,3 +729,44 @@ def test_ll_posture_and_energy_use_the_keeper_weights_gate_and_clamps(tmp_path):
     assert m["ll_posture"] == pytest.approx(-0.5 * 16.0 * 0.01 / 27)
     assert m["ll_energy"] == pytest.approx(-0.05 * 6.0 / (0.5 * bfr.MASS_G), rel=1e-3)
     assert bfr.ll_posture_energy(F, T, align, "standing")["ll_energy"] == 0.0   # gated off
+
+
+# ---- hl_return: the high level's training reward, per decision window -----------------------------
+
+def _hl_inputs(n_win, track=1.5, energy=0.8, dpar=0.4):
+    n = n_win * bfr.HL_C
+    fire = np.arange(n) % bfr.HL_C == 0
+    return (np.full(n, track / bfr.HL_C), np.full(n, energy / bfr.HL_C), np.full(n, dpar / bfr.HL_C),
+            fire, np.ones(n, bool))
+
+
+def test_hl_return_matches_the_hand_computed_window():
+    # 4 windows, each: tracking 1.5, energy 0.8 J, 0.4 m along the command.
+    # window CoT = 0.8 / (0.4 * m g); reward per window = 1.5 - 5 * CoT.
+    r = bfr.hl_return(*_hl_inputs(4))["walking"]
+    cot = 0.8 / (0.4 * bfr.MASS_G)
+    assert r["hl_windows"] == 4
+    assert r["hl_track"] == pytest.approx(1.5 / bfr.HL_C)
+    assert r["hl_cot"] == pytest.approx(-5.0 * cot / bfr.HL_C)
+    assert r["hl_r"] == pytest.approx(r["hl_track"] + r["hl_cot"])
+
+
+def test_hl_return_floors_the_distance_of_a_stuck_window():
+    # negative distance along the command: the denominator is the 0.1 m/s floor, not the (negative) sum
+    track, en, dp, fire, walk = _hl_inputs(4, dpar=-0.3)
+    r = bfr.hl_return(track, en, dp, fire, walk)["walking"]
+    assert r["hl_cot"] == pytest.approx(-5.0 * 0.8 / (bfr.HL_FLOOR_M * bfr.MASS_G) / bfr.HL_C)
+
+
+def test_hl_return_drops_a_window_with_a_nonfinite_input_and_a_partial_window():
+    track, en, dp, fire, walk = _hl_inputs(5)
+    en[3 * bfr.HL_C + 2] = np.nan                       # a step without telemetry: that window is dropped
+    track, en, dp, fire, walk = (a[:-3] for a in (track, en, dp, fire, walk))   # and the last is partial
+    assert bfr.hl_return(track, en, dp, fire, walk)["walking"]["hl_windows"] == 3
+
+
+def test_hl_return_splits_windows_by_the_regime_most_of_their_steps_are_in():
+    track, en, dp, fire, walk = _hl_inputs(8)
+    walk[: 4 * bfr.HL_C] = False                         # first 4 windows stand
+    out = bfr.hl_return(track, en, dp, fire, walk)
+    assert out["standing"]["hl_windows"] == 4 and out["walking"]["hl_windows"] == 4

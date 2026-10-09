@@ -11,7 +11,7 @@ report_figures.tex.
   f_hier_{A1a,A1a_DR}       the same Runs: command -> HL target -> LL delivery -> truth
   f_chain_clean             walking metrics at training bench / bridge sim / robot (dumbbells)
   f_upper_3pol              upper-body cost per policy, every unloaded Run pooled over seeds and sessions
-  f_reward_total, f_reward_return, f_reward_terms_{walking,standing}
+  f_reward_return, f_reward_terms_{walking,standing}
                             the env reward at the three stages (dumbbells)
 
 Stages are CATEGORICAL (different command profiles, different instruments), so every cross-stage
@@ -72,13 +72,12 @@ CHAIN_VARIANTS = ("A0", "A1a", "A1a_DR")      # cotcap removed from the report (
 CHAIN_LABEL = {
   "cot": "cost of transport (-)",
   "mech_power_w": "mechanical power (W)",
+  "stride_period_s": "stride period (s)",
   "act_legs_rad": "leg action rate (rad)",
   "jacc_legs": "leg joint accel. (rad/s\\textsuperscript{2})",
   "err_yaw": "yaw-rate error (rad/s)",
   "orient_dev": "torso tilt (-)",
   "omega_xy": "roll/pitch rate (rad/s)",
-  "ub_pose_dev": "upper-body pose dev. (rad\\textsuperscript{2})",
-  "ub_arm_vel": "upper-body joint speed (rad/s)",
   "err_vx": "sagittal velocity error (m/s)",
   "err_vy": "lateral velocity error (m/s)",
 }
@@ -86,13 +85,23 @@ CHAIN_LABEL = {
 # through ONE scorer (ptf.chain_seq_units). The simulation figures add the ground-truth velocity
 # errors, which only the two simulated stages can measure; standing has no energy metrics.
 CHAIN_TAGS = ("A0_s42", "A0_s123", "A1a_s42", "A1a_s123", "A1a_DR_s42", "A1a_DR_s123")
-CHAIN_KEYS = [k for k, _ in ptf.CHAIN_METRICS]
-SIM_KEYS = {"walking": CHAIN_KEYS + ["err_vx", "err_vy"],
-            "standing": [k for k in CHAIN_KEYS if k not in ("cot", "mech_power_w")] + ["err_vx", "err_vy"]}
+# Panel order (owner, 2026-10-08): energy and gait clock on top, then the velocity errors, then the
+# smoothness and posture metrics. The upper body has its own figure (f_upper_3pol). The robot has no
+# true velocity, so its figure has no sagittal/lateral error; standing has no energy and no stride clock.
+CHAIN_SEED_TAGS = CHAIN_TAGS + ("A0_s7", "A1a_s7", "A1a_DR_s7")   # seed 7 has bench and bridge but no robot Runs
+CHAIN_KEYS = ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev",
+              "omega_xy"]
+SIM_KEYS = {"walking": ["cot", "mech_power_w", "stride_period_s", "err_vx", "err_vy", "err_yaw", "act_legs_rad",
+                        "jacc_legs", "orient_dev", "omega_xy"],
+            "standing": ["err_vx", "err_vy", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev", "omega_xy"]}
 UPPER_VARIANTS = ("A0", "A1a", "A1a_DR")
 
 REWARD_SEQ = "data/2026-10-02-chain-seq/env_reward_seq.json"   # score_env_reward.py: robot + schedule-replay bridge Runs
-REWARD_TAGS = ("A0_s42", "A1a_s42", "A1a_DR_s42")
+# Schedule B (2026-10-07), the replication of the schedule-replay chain on other commands:
+# data/2026-10-07-chain-seq-B/score_replication.py scores the pre-registered criteria into this json.
+REPLICATION = "data/2026-10-07-chain-seq-B/replication.json"
+REWARD_SEEDS = ("42", "123", "7")
+REWARD_TAGS = tuple(f"{v}_s{sd}" for v in ("A0", "A1a", "A1a_DR") for sd in REWARD_SEEDS)   # a policy = its seeds, averaged
 STAGE_KEYS = ("bench", "bridge", "hardware")
 STAGE_LABEL = {"bench": "training bench", "bridge": "bridge sim", "hardware": "robot"}
 # (marker, filled): hollow for the two simulated stages, filled for the robot
@@ -122,6 +131,23 @@ def pick(bundles, key):
 LOSS_GREY = "0.4"    # the loss column and its legend entry: secondary to the data, still above 3:1 on white
 
 
+def merge_seeds(rows):
+  """rows: [(label, colour, {stage: [unit values]}, tag)] with one row per SEED of a policy (same label).
+  -> ([(label, colour, {stage: [one mean per seed]})], {label: {stage: [(seed, units)]}}). A policy's value
+  at a stage is the mean of its seeds' own means, so a seed with many units (64 bench environments) does not
+  outweigh one with few; a seed with no unit at the stage (every bridge Run fell) is absent, not zero."""
+  merged, detail = {}, {}
+  for label, colour, stages, tag in rows:
+    seed = ptf._variant_seed(tag)[1]
+    m = merged.setdefault(label, (label, colour, {st: [] for st in stages}))
+    d = detail.setdefault(label, {st: [] for st in stages})
+    for st, v in stages.items():
+      if len(v):
+        m[2][st].append(float(np.mean(v)))
+        d[st].append((seed, len(v)))
+  return list(merged.values()), detail
+
+
 def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_note=None, vs="bridge"):
   """rows: [(label, colour, {stage: [values]})], top to bottom. One marker per stage at the stage
   mean and a light bar over the row's range of means; the bench's many envs also get a 5th-95th
@@ -136,6 +162,9 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
   A row with a bench value and NO value at `vs` prints `none_note` in the same column ("fell"), so a
   missing number is not read as a zero loss."""
   out = []
+  detail = None
+  if rows and len(rows[0]) == 4:      # seed rows: merge to one row per policy, no whisker
+    rows, detail = merge_seeds(rows)
   n = len(rows)
   for i, (label, colour, stages) in enumerate(rows):
     y = n - 1 - i
@@ -155,12 +184,14 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
       mk, filled = STAGE_MARKER.get(s, ("o", False))
       ax.plot(m, y, marker=mk, markersize=5, linestyle="", markeredgewidth=1.0, color=colour,
               markerfacecolor=colour if filled else "white", zorder=3)
-      if s == "bench" and len(stages[s]) > 1:
+      if len(stages[s]) > 1 and detail is None and s == "bench":
         lo, hi = np.percentile(stages[s], [5, 95])
         ax.plot([lo, hi], [y, y], marker="|", markersize=4, linewidth=0.9, color=colour, zorder=2)
       out += [{"row": label, "stage": s, "value": round(float(v), 6),
                "n": len(stages[s]), "stage_mean": round(m, 6),
-               f"loss_pct_bench_to_{vs}": "" if loss is None else round(loss, 2)} for v in stages[s]]
+               f"loss_pct_bench_to_{vs}": "" if loss is None else round(loss, 2),
+               **({"seed": detail[label][s][k][0], "units": detail[label][s][k][1]} if detail else {})}
+              for k, v in enumerate(stages[s])]
   ax.set_yticks(range(n))
   if show_labels:   # on shared y axes the labels are set ONCE: an empty list on a sibling wipes them all
     ax.set_yticklabels([ptf.tex(r[0]) for r in reversed(rows)])
@@ -173,11 +204,11 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
   return out
 
 
-def stage_handles(stages=STAGE_KEYS, runs=True, loss=True, vs="bridge"):
+def stage_handles(stages=STAGE_KEYS, runs=True, loss=True, vs="bridge", seeds=False):
   h = [Line2D([], [], marker=STAGE_MARKER[s][0], markersize=5, linestyle="", color="0.3",
               markerfacecolor="0.3" if STAGE_MARKER[s][1] else "white", label=STAGE_LABEL[s])
        for s in stages]
-  if runs:
+  if runs and not seeds:      # seed rows carry no whisker: the spread between seeds is too small to see
     if "bench" in stages:
       h.append(Line2D([], [], marker="|", markersize=4, linewidth=0.9, color="0.3",
                       label="bench: 5th to 95th\npercentile of environments"))
@@ -218,27 +249,32 @@ def chain_points(kept, root, regime):
       ptf.SAVE_PDF = save_pdf
       import pandas as pd
       for k in CHAIN_KEYS:
+        if k == "stride_period_s":      # not a panel of ptf.fig_chain: the Run's realized period, from its regime json
+          hw[k] = {t: [float(b.regimes[regime][k]) for b in kept if b.policy == t and regime in b.regimes
+                       and np.isfinite(b.regimes[regime].get(k, np.nan))] for t in CHAIN_TAGS}
+          continue
         d = pd.read_csv(Path(tmp) / f"chain_{k}.csv")
         d = d[(d["stage"] == "hardware") & d["value"].notna()]
         hw[k] = {t: d[d.policy == t]["value"].astype(float).tolist() for t in CHAIN_TAGS}
   units, counts = {}, {}
-  for t in CHAIN_TAGS:
+  for t in CHAIN_SEED_TAGS:
     for st in ("bench", "bridge"):
       units[t, st], n, fell = ptf.chain_seq_units(root, t, st, regime)
       counts[t, st] = (n, fell)
 
   def rows(key, stages):
-    return [(name(t, seed=True), ptf.policy_color(t),
+    return [(name(t), ptf.policy_color(t),
              {st: hw.get(key, {}).get(t, []) if st == "hardware" else
                   [float(u[key]) for u in units[t, st] if u.get(key) is not None and np.isfinite(u[key])]
-              for st in stages}) for t in CHAIN_TAGS]
+              for st in stages}, t) for t in CHAIN_SEED_TAGS]     # 4-tuples: dumbbell averages the seeds
   return rows, counts
 
 
 def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   vs = "hardware" if "hardware" in stages else "bridge"   # the stage the grey loss column compares with the bench
   nrow = -(-len(keys) // ncol)
-  fig, axes = plt.subplots(nrow, ncol, figsize=(ptf.FIG_W, 2.05 * nrow), sharey=True)
+  npol = len({r[0] for r in rows(keys[0], stages)})
+  fig, axes = plt.subplots(nrow, ncol, figsize=(ptf.FIG_W, (0.95 + 0.3 * npol) * nrow), sharey=True)
   axes = list(np.atleast_1d(axes).flat)
   for i, (ax, key) in enumerate(zip(axes, keys)):
     write_rows(out, f"{fname}_{key}",
@@ -250,10 +286,10 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   fig.subplots_adjust(hspace=0.55, wspace=0.5)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
-    spare[0].legend(handles=stage_handles(stages, vs=vs), loc="center left", bbox_to_anchor=(0.28, 0.5),
+    spare[0].legend(handles=stage_handles(stages, vs=vs, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, stage_handles(stages, vs=vs), ncol=2, height=0.11)
+    ptf.bottom_legend(fig, stage_handles(stages, vs=vs, seeds=True), ncol=2, height=0.11)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, fname)
 
@@ -287,6 +323,31 @@ def load_reward_points(root):
   return out
 
 
+HL_RETURN = "data/2026-10-02-chain-seq/hl_return.json"   # score_env_reward.py --hl-return
+HL_ROW = "{}"   # the row says which policy; the caption says which objective
+
+
+def hl_points(root):
+  """{tag: {stage: [{regime: {hl_r, hl_track, hl_cot, hl_windows}} per unit]}} for the hierarchical
+  REWARD_TAGS: the reward their HIGH level trains on (bench_flight_recorder.hl_return). Fallen bench envs
+  and bridge Runs are excluded as everywhere else; robot Runs without motion capture use the onboard
+  estimate for the velocity."""
+  if not (root / HL_RETURN).exists():
+    raise SystemExit(f"{HL_RETURN} is missing: python scripts/score_env_reward.py --bridge-dir "
+                     "logs/sim_logs/chain_seq --hl-return " + HL_RETURN)
+  res = json.loads((root / HL_RETURN).read_text())
+  out = {}
+  for tag in REWARD_TAGS:
+    if tag.startswith("A0"):
+      continue
+    d = res[tag]
+    out[tag] = {"bench": [u for u in d["bench"].values() if not u["fell"]],
+                "bridge": [u for u in d["bridge"].values()
+                           if ptf._tilt_fall_s(root / "logs/deploy_safety" / u["capture"]) is None],
+                "hardware": list(d["hardware"].values())}
+  return out
+
+
 def stage_values(pts, stage, regime, terms):
   """The `terms` of every unit of one stage that has them in this regime."""
   out = []
@@ -298,31 +359,60 @@ def stage_values(pts, stage, regime, terms):
   return out
 
 
-def reward_rows(points, regime, key, terms, stages):
-  return [(name(t), ptf.policy_color(t),
-           {s: [key(v) for v in stage_values(p, s, regime, terms)] for s in stages})
+def reward_rows(points, regime, key, terms, stages, hl=None):
+  """One row per policy. With `hl` (hl_points) a hierarchical policy is scored on the reward its high
+  level trains on instead of the environment reward."""
+  return [(HL_ROW.format(name(t)) if hl and t in hl else name(t), ptf.policy_color(t),
+           {s: [u[regime]["hl_r"] for u in hl[t][s] if regime in u] if hl and t in hl else
+               [key(v) for v in stage_values(p, s, regime, terms)] for s in stages}, t)
           for t, p in points.items()]
 
 
-def full17(pts, regime):
-  """All 17 terms: live at the bench; 7 log terms + the 10 plant-replay terms at the bridge."""
+def full_active(pts, regime):
+  """All 16 ACTIVE terms (the 17th, cost_of_transport, has weight 0): live at the bench; 7 log terms + the
+  9 plant-replay terms at the bridge."""
   return {"bench": [sum(u[regime].values()) for u in pts["bench"] if regime in u],
           "bridge": [sum(b[regime][t] for t in TERMS_IN[regime]) + sum(b["replay"][regime].values())
                      for b in pts["bridge"] if "replay" in b]}
 
 
-def fig_reward_total(points, out, stages=STAGE_KEYS, sfx=""):
-  fig, axes = plt.subplots(1, 2, figsize=(ptf.FIG_W, 2.6), sharex=True, sharey=True)
+def seed_facts(points, hl, root):
+  """The sentences the seed-averaged reward captions quote, computed from the plotted units."""
+  from collections import Counter
+  hb = json.loads((root / REWARD_SEQ).read_text())
+  total = Counter(r["policy"] for r in hb["bridge"].values())
+  sd = lambda t: ptf._variant_seed(t)[1]
+  span = lambda v: str(min(v)) if min(v) == max(v) else f"{min(v)} to {max(v)}"
+  fell = [f"{name(t)} seed {sd(t)} ({len(points[t]['bridge'])} of {total[t]} stayed upright)"
+          for t in points if len(points[t]["bridge"]) < total[t]]
+  def robot(units):    # {tag: [units]} -> "Flat: 1 Run (seed 42), 2 (seed 123); ..."
+    out = []
+    for v in dict.fromkeys(ptf._variant_seed(t)[0] for t in units):
+      got = [f"{len(units[t])} Run{'s' * (len(units[t]) != 1)} of seed {sd(t)}" for t in units
+             if ptf._variant_seed(t)[0] == v and len(units[t])]
+      out.append(f"{name(v + '_s42')}: " + (", ".join(got) if got else "none"))
+    return "; ".join(out)
+  return {"bench": span([len(p["bench"]) for p in points.values()]),
+          "bridge": span(list(total[t] for t in points)),
+          "fell": "; ".join(fell),
+          "robot_env": robot({t: p["hardware"] for t, p in points.items()}),
+          "robot_hl": robot({t: v["hardware"] for t, v in hl.items()}),
+          "est": sum(u["ref"] == "est_v_compl" for v in hl.values() for u in v["hardware"])}
+
+
+def sim_rows(points, hl, regime, stages, scale=1.0):
+  """The two simulated stages, one row per policy on ITS objective: Flat on the extrinsic (environment)
+  reward over all 16 active terms, a hierarchical policy on the reward its high level trains on. The
+  captions say the objectives differ. `scale` turns per step into per episode."""
   rows = []
-  for i, (ax, regime) in enumerate(zip(axes, ("walking", "standing"))):
-    r = dumbbell(ax, reward_rows(points, regime, lambda v: sum(v.values()), TERMS_IN[regime], stages),
-                 "summed reward per step (-)", show_labels=(i == 0), better="higher")
-    rows += [{**x, "regime": regime} for x in r]
-    ax.set_title(regime.capitalize())
-  write_rows(out, f"f_reward_total{sfx}_all", rows)
-  ptf.bottom_legend(fig, stage_handles(stages), ncol=2, height=0.3)
-  grey_loss_note(fig)
-  ptf.save_pgf(fig, out, f"f_reward_total{sfx}")
+  for t, p in points.items():
+    if t in hl:
+      vals = {s: [scale * u[regime]["hl_r"] for u in hl[t][s] if regime in u] for s in stages}
+    else:
+      full = full_active(p, regime)
+      vals = {s: [scale * v for v in full[s]] for s in stages}
+    rows.append((name(t), ptf.policy_color(t), vals, t))
+  return rows
 
 
 # The hierarchies on the objective their LOW LEVEL trains on (2026-10-06): goal_space.reward's exp
@@ -413,7 +503,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
                         transform=axes[i, j].transAxes, ha="center", va="center", color="0.4")
         axes[i, j].set_axis_off()
         continue
-      r = dumbbell(axes[i, j], [(name(t, seed=True), ptf.policy_color(t),
+      r = dumbbell(axes[i, j], [(name(t), ptf.policy_color(t),
                                  {s: [u[key] for u in pts[t, regime][s] if key in u] for s in stages})
                                 for t in LL_TAGS],
                    lab, show_labels=(j == 0), nticks=3, better="higher", none_note="fell")
@@ -426,24 +516,33 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
 
 
-def fig_reward_return(points, out, stages=STAGE_KEYS, sfx=""):
-  """On W&B's scale: return = per-step reward x episode length. Two rows per policy: the 7 terms
-  reproducible at all three stages, and all 17 terms (bench live, bridge by plant replay)."""
-  fig, axes = plt.subplots(1, 2, figsize=(ptf.FIG_W, 3.0), sharex=True, sharey=True)
+def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
+  """On W&B's scale: return = per-step reward x episode length. Simulated stages only: every policy on
+  all 16 active environment terms, hierarchies also on their high-level reward. With the robot: the 7
+  terms reproducible at all three stages (Flat also all 16 at the bench and bridge), hierarchies on the
+  high-level reward."""
+  nv, nh = len(points) // len(REWARD_SEEDS), len(hl) // len(REWARD_SEEDS)
+  nrow = nv + (0 if "hardware" not in stages else nv - nh)   # with the robot, Flat has two rows
+  fig, axes = plt.subplots(1, 2, figsize=(ptf.FIG_W, 1.4 + 0.3 * nrow), sharex=True, sharey=True)
   rows = []
   for i, (ax, regime) in enumerate(zip(axes, ("walking", "standing"))):
-    dr = []
-    for t, p in points.items():
+    dr = sim_rows(points, hl, regime, stages, EPISODE_S) if "hardware" not in stages else []
+    for t, p in ([] if dr else points.items()):
+      if t in hl:    # a hierarchical policy: the return its high level trains on, one row
+        dr.append((HL_ROW.format(name(t)), ptf.policy_color(t),
+                   {s: [EPISODE_S * u[regime]["hl_r"] for u in hl[t][s] if regime in u] for s in stages}, t))
+        continue
       seven = {s: [EPISODE_S * sum(v.values()) for v in stage_values(p, s, regime, TERMS_IN[regime])]
                for s in stages}
-      full = {s: [EPISODE_S * v for v in vals] for s, vals in full17(p, regime).items()}
-      dr += [(f"{name(t)}, 7 terms", ptf.policy_color(t), seven),
-             (f"{name(t)}, all 17", ptf.policy_color(t), full)]
-    r = dumbbell(ax, dr, f"episode return, {EPISODE_S:g} s (-)", show_labels=(i == 0), better="higher")
+      full = {s: [EPISODE_S * v for v in vals] for s, vals in full_active(p, regime).items()}
+      dr += [(f"{name(t)}, 7 terms", ptf.policy_color(t), seven, t),
+             (f"{name(t)}, all 16 active", ptf.policy_color(t), full, t)]
+    r = dumbbell(ax, dr, f"episode return, {EPISODE_S:g} s (-)", show_labels=(i == 0), better="higher",
+                 none_note="fell")
     rows += [{**x, "regime": regime} for x in r]
     ax.set_title(regime.capitalize())
   write_rows(out, f"f_reward_return{sfx}_all", rows)
-  ptf.bottom_legend(fig, stage_handles(stages), ncol=2, height=0.26)
+  ptf.bottom_legend(fig, stage_handles(stages, seeds=True), ncol=2, height=0.26)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_reward_return{sfx}")
 
@@ -466,10 +565,10 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   fig.subplots_adjust(hspace=0.7, wspace=0.5)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
-    spare[0].legend(handles=stage_handles(stages), loc="center left", bbox_to_anchor=(0.28, 0.5),
+    spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, stage_handles(stages), ncol=2, height=0.18)
+    ptf.bottom_legend(fig, stage_handles(stages, seeds=True), ncol=2, height=0.18)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_reward_terms_{regime}{sfx}")
 
@@ -560,7 +659,10 @@ def fig_payload(rows, out, name_="f_payload"):
 # The crossed rel_standing_envs design (2026-09-21): Flat and Hierarchical trained at 5 / 12 / 20 % standing
 # environments, each benched at zero command (the stand_pay0 cell, 64 envs x 600 steps x 2 rollout seeds).
 # Read from the [BENCH] line of every .log (crossed_bench.json lacks the Hierarchical 5 % arms).
-SHARE_DIR = "data/2026-09-21-rse-crossed"
+# Seed 7 (12 % only) was benched later on the same protocol; that batch's seed-42 re-benches were a
+# cross-session check and are not plotted.
+SHARE_SRC = (("data/2026-09-21-rse-crossed", "*__stand_pay0*.log"), ("data/2026-10-09-rse-s7", "*_s7__stand_pay0*.log"))
+SHARE_MARKER = {"42": "o", "123": "^", "7": "D"}
 SHARE_EVAL_S = 600 * 0.02    # eval_steps x step_dt of the stand_pay0 cell
 SHARE_PANELS = (("act_legs_rad", "standing leg\naction rate (rad)"),
                 ("td_per_foot", "touchdowns per foot\nin a 12 s stand (-)"))
@@ -571,7 +673,7 @@ def share_points(root):
   into their checkpoint, an independent retrain (`_repro2`) is its own row."""
   import re
   per = {}
-  for f in sorted((root / SHARE_DIR).glob("*__stand_pay0*.log")):
+  for f in sorted(f for d, g in SHARE_SRC for f in (root / d).glob(g)):
     m = re.match(r"(a0|a1a)_rse(\d\d)_(s\d+(?:_repro\d)?)__stand_pay0", f.name)
     line = next(l for l in f.read_text().splitlines() if l.startswith("[BENCH] "))
     b = json.loads(line[len("[BENCH] "):])
@@ -601,7 +703,7 @@ def fig_standing_share(rows, out, name_="f_standing_share"):
         x0 = 100 * s + (k - 0.5) * 1.2
         jit = np.linspace(-0.35, 0.35, len(cell)) if len(cell) > 1 else [0.0]
         for dx, r in zip(jit, cell):
-          ax.plot(x0 + dx, r[key], marker="o" if r["seed"] == "42" else "^", markersize=3.6, linestyle="",
+          ax.plot(x0 + dx, r[key], marker=SHARE_MARKER[r["seed"]], markersize=3.6, linestyle="",
                   color=col, zorder=3)
           panel.append({**{c: r[c] for c in ("variant", "rse", "run", "seed", "n_bench")},
                         "x": round(x0 + dx, 3), "value": round(r[key], 6)})
@@ -624,8 +726,8 @@ def fig_standing_share(rows, out, name_="f_standing_share"):
   handles = [Line2D([], [], color=ptf.CHAIN_COLOR[v], marker="o", markersize=3.4, linewidth=0.8, label=NAMES[v])
              for v in ("A0", "A1a")]
   handles += [Line2D([], [], color="0.3", marker=m, linestyle="", markersize=3.4, label=f"seed {s}")
-              for m, s in (("o", 42), ("^", 123))]
-  ptf.bottom_legend(fig, handles, ncol=4, height=0.15)
+              for s, m in SHARE_MARKER.items()]
+  ptf.bottom_legend(fig, handles, ncol=5, height=0.15)
   ptf.save_pgf(fig, out, name_)
   return facts
 
@@ -916,6 +1018,7 @@ TEX_HEAD = r"""%% Generated by scripts/plot_report_figures.py -- edit the captio
 \usepackage[textwidth=15cm]{geometry}
 \usepackage{pgf}
 \usepackage[font=small,labelfont=bf]{caption}
+\usepackage{booktabs,tabularx,array}
 \begin{document}
 \section*{Report figures}
 Hardware Runs are from 2026-09-16, seed 42 and unloaded unless stated. Flat = the flat PPO policy (A0),
@@ -941,6 +1044,105 @@ CHAIN_LOSS_NOTE_ROBOT = ("Grey numbers: loss from bench to robot, (robot $-$ ben
                          "not part of it.")
 REWARD_LOSS_NOTE = ("Grey numbers: loss from bench to bridge sim, (bench $-$ bridge) / |bench| of the two stage "
                     "means, in percent; positive means a lower reward at the bridge.")
+
+
+def replication_table(root):
+  """Schedule A vs schedule B on the pre-registered criteria, every number from REPLICATION."""
+  if not (root / REPLICATION).exists():
+    print(f"[REPORT] {REPLICATION} missing: replication table skipped (run score_replication.py)")
+    return ""
+  R = json.loads((root / REPLICATION).read_text())
+  pc = lambda x: "$0$" if round(100 * x) == 0 else f"${100 * x:+.0f}$"
+  span = lambda r, fmt=pc, unit="\\,\\%": f"{fmt(r[0])} to {fmt(r[1])}{unit}"
+  num = lambda x, n=2: f"${x:.{n}f}$"
+  rr = lambda r, n=2: f"{num(r[0], n)}--{num(r[1], n)}"
+  x_ = lambda r: f"${r[0]:.2f}$--${r[1]:.2f}\\times$"
+
+  def where(cmd):
+    vx, vy, wz = cmd
+    return ("at a stop" if max(abs(vx), abs(vy), abs(wz)) <= 0.1 else "walking sideways" if abs(vy) > 0.1
+            else "turning" if abs(wz) > 0.1 else f"at {vx:g}\\,m/s")
+
+  def col(s):
+    x = R[s]
+    speeds = ", ".join(f"{v:g}" for v in x["speeds"])
+    n_runs = sorted(set(x["bridge_runs"].values()))
+    others = sum(v for t, v in x["bridge_runs"].items() if t not in ("A1a_s42", "A1a_s123"))
+    fw = {}
+    for t, fl in x["fall_where"].items():
+      for _, cmd in fl:
+        fw.setdefault(t, []).append(where(cmd))
+    w123 = ", ".join(f"{fw['A1a_s123'].count(w)} {w}" for w in dict.fromkeys(fw.get("A1a_s123", [])))
+    ll = x["ll"]
+    share = min(v[1] for v in ll.values() if v is not None and v[0] < 0)
+    return [
+      f"{x['duration_s']:.0f}\\,s ({x['walking_s']:.0f}\\,s walking); sagittal {speeds}\\,m/s; "
+      f"{x['bench_envs']} bench environments, {'/'.join(map(str, n_runs))} bridge Runs per policy",
+      f"flat {span(x['cot_loss']['flat'])}, hierarchies {span(x['cot_loss']['hier'])}",
+      f"bench: hierarchies {rr(x['cot']['bench']['hier'])} $<$ flat {rr(x['cot']['bench']['flat'])}"
+      f"\\newline bridge: hierarchies {rr(x['cot']['bridge']['hier'])} $>$ flat {rr(x['cot']['bridge']['flat'])}",
+      f"Hierarchical s123 ${x['falls']['A1a_s123']}/{x['bridge_runs']['A1a_s123']}$ ({w123}), "
+      f"Hierarchical s42 ${x['falls']['A1a_s42']}/{x['bridge_runs']['A1a_s42']}$, all others $0/{others}$"
+      f"\\newline bench: ${x['bench_falls'][0]}$ of ${x['bench_falls'][1]}$ environments",
+      f"flat {x_(x['stand_ratio']['flat'])}, hierarchies {x_(x['stand_ratio']['hier'])}",
+      f"bridge: flat {rr(x['err_vx']['bridge']['flat'], 3)} $<$ hierarchies "
+      f"{rr(x['err_vx']['bridge']['hier'], 3)}\\,m/s; best hierarchy: "
+      + ("H-adapt, both seeds" if set(x["best_hier_bridge"]) == {"A1a_hadapt_s42", "A1a_hadapt_s123"}
+         else ", ".join(x["best_hier_bridge"])),
+      f"Hierarchical s42 {pc(ll['A1a_s42'][0])}\\,\\%, Hierarchical + DR s42 / s123 {pc(ll['A1a_DR_s42'][0])} / "
+      f"{pc(ll['A1a_DR_s123'][0])}\\,\\%; goal tracking carries $\\geq {100 * share:.0f}\\,\\%$ of each loss",
+    ]
+
+  sg, sa = R["sign"]["figure"], R["sign"]["all"]
+  label = {"A1a_hadapt": "H-adapt", "A0_DR": "Flat + DR"}
+  metric = {k: v.split(" (")[0] for k, v in CHAIN_LABEL.items()}
+  flips = "; ".join(f"{label.get(ptf._variant_seed(t)[0]) or name(t)} s{ptf._variant_seed(t)[1]} {rg} "
+                    f"{metric.get(k, k)} ({pc(a)} vs {pc(b)}\\,\\%)" for t, rg, k, a, b in sa["flips"])
+  crit = ["Command schedule", "Walking cost of transport, bench $\\rightarrow$ bridge",
+          "Walking energy ranking", "Falls (bridge Runs)", "Standing leg action rate, bridge $\\div$ bench",
+          "Walking sagittal error vs.\\ true velocity", "Walking low-level reward $r^\\mathrm{lo}$, "
+          "bench $\\rightarrow$ bridge"]
+  rows = list(zip(crit, col("A"), col("B")))
+  rows.append(("Sign of the bench $\\rightarrow$ bridge change, every metric", "(reference)",
+               f"${sg['agree']}$ of ${sg['n']}$ cells (the six policies of Figs.~\\ref{{fig:chain_sim_walking}} "
+               f"and \\ref{{fig:chain_sim_standing}}); ${sa['agree']}$ of ${sa['n']}$ over all ten"
+               + (f", the exception: {flips}" if flips else "")))
+  holds = R["holds"]["B"]
+  tags = list(R["A"]["bridge_runs"])
+  n_flat = sum(t.startswith("A0") for t in tags)
+  new = sorted(set(R["B"]["speeds"]) - set(R["A"]["speeds"]))
+  sr = [(R["A"]["stand_ratio_tag"][t], R["B"]["stand_ratio_tag"][t]) for t in tags]
+  sr = [(a, b) for a, b in sr if a is not None and b is not None]
+  stand = ("standing ratios are larger under B for every policy, flat included, since its stands are shorter "
+           "and each follows a stop, so standing magnitudes depend on the schedule and the ordering does not"
+           if all(b > a for a, b in sr) else "standing ratios move between the schedules; the ordering holds")
+  verdict = ("All criteria hold" if all(holds.values()) else
+             "Criteria that do not hold: " + ", ".join(k for k, v in holds.items() if not v))
+  body = " \\\\\n    \\midrule\n    ".join(" & ".join(r) for r in rows)
+  return f"""
+\\begin{{table}}[p]
+  \\centering\\small
+  \\begin{{tabularx}}{{\\textwidth}}{{>{{\\raggedright\\arraybackslash}}p{{3.2cm}} >{{\\raggedright\\arraybackslash}}X >{{\\raggedright\\arraybackslash}}X}}
+    \\toprule
+    \\textbf{{Criterion}} & \\textbf{{Schedule A}} & \\textbf{{Schedule B}} \\\\
+    \\midrule
+    {body} \\\\
+    \\bottomrule
+  \\end{{tabularx}}
+  \\caption{{Replication of the bench-to-bridge comparison on a second command schedule. Schedule B commands
+  sagittal speeds schedule A never does ({", ".join(f"{v:g}" for v in new)}\\,m/s), speed changes without a stop and back-to-back direction changes
+  (lateral and yaw at $\\pm 0.5$ and backward $-0.5$\\,m/s in both); everything else (policies, plant, scorer,
+  fall rule) is unchanged. The criteria and their thresholds were written down before any schedule-B data
+  existed. {verdict}. Ranges are over the {n_flat} flat (Flat, Flat + DR) and the {len(tags) - n_flat} hierarchical policies
+  (Hierarchical, Hierarchical + DR, H-adapt; both seeds each); a policy whose bridge Runs all fell has no
+  bridge value. Last row: cells whose schedule-A change exceeds the bridge Run-to-Run spread
+  ({100 * R['thr']['walking']:.0f}\\,\\% walking, {100 * R['thr']['standing']:.0f}\\,\\% standing). Walking
+  losses differ between the schedules by a median of {R['walk_diff_pp'][0]:.0f} percentage point{'' if round(R['walk_diff_pp'][0]) == 1 else 's'} (at most
+  {R['walk_diff_pp'][1]:.0f}, over the {R['walk_diff_pp'][2]} cells of the six figure policies); {stand}.}}
+  \\label{{tab:replication}}
+\\end{{table}}
+\\clearpage
+"""
 
 
 def write_latex(out, facts):
@@ -978,20 +1180,21 @@ def write_latex(out, facts):
     c = facts["chain"][regime]
     span = lambda v: str(v[0]) if len(set(v)) == 1 else f"{min(v)} to {max(v)}"
     runs = lambda v: span(v) + (" Run" if set(v) == {1} else " Runs")
-    fell = [f"{name(t, seed=True)} at the {STAGE_LABEL[st]} ({k} of {n})" for (t, st), (n, k) in c.items() if k]
-    return (span([c[t, "bench"][0] for t in CHAIN_TAGS]), runs([c[t, "bridge"][0] for t in CHAIN_TAGS]),
+    fell = [f"{name(t, True)} at the {STAGE_LABEL[st]} ({k} of {n})" for (t, st), (n, k) in c.items() if k]
+    return (span([c[t, "bench"][0] for t in CHAIN_SEED_TAGS]), runs([c[t, "bridge"][0] for t in CHAIN_SEED_TAGS]),
             "A unit that fell is excluded from the means: " + "; ".join(fell) + "." if fell
             else "No unit fell.")
   sim = ("Both stages run one identical 253\\,s command schedule (stand, sagittal 0.3, 0.5 and 1.0 m/s, "
          "backward, sideways, turning, walk-turn-stop) and are scored by the same code. Training bench: "
-         "{nb} environments per policy in the training environment (circle: mean; whisker: 5th to 95th "
-         "percentile over environments, which differ in randomised foot friction, encoder bias and torso "
-         "centre of mass). Bridge sim: the exported policy in the robot's C++ controller with the onboard "
-         "estimator, against the shipped MuJoCo plant ({nr} per policy; square: mean of the Runs, which "
-         "repeat one plant; single Runs are not drawn, the largest range between the Runs of one policy is "
+         "{nb} environments per seed in the training environment (circle; the environments differ in "
+         "randomised foot friction, encoder bias and torso centre of mass). Bridge sim: the exported policy in the robot's C++ controller with the onboard "
+         "estimator, against the shipped MuJoCo plant ({nr} per seed; square: mean of the Runs, which "
+         "repeat one plant; single Runs are not drawn, the largest range between the Runs of one seed is "
          "{bsp:.0f}\\,\\% of their mean on any panel here and every Run is in the panel data). {fell} "
          "Commanded joint targets are unclipped at the bench and clipped to the joint limits by the "
          "controller at the bridge.")
+  cseeds = ("Each policy is the mean over its three seeds (42, 123, 7) of the seeds' own means; a seed with no "
+            "unit left at a stage drops out of that stage's mean, which then covers fewer seeds.")
   for regime in ("walking", "standing"):
     nb, nr, fell = units(regime)
     figs.append((f"f_chain_sim_{regime}", f"fig:chain_sim_{regime}",
@@ -1000,14 +1203,16 @@ def write_latex(out, facts):
       + " Velocity errors are against the simulator's true pelvis velocity, read in the IMU (torso) frame; "
       "yaw-rate error, tilt and roll/pitch rate are the IMU's. Leg joint acceleration is the second "
       "difference of measured joint position at the control rate."
-      + (" Cost of transport is the undirected, diagnostic form." if regime == "walking" else "")
-      + " " + CHAIN_LOSS_NOTE))
+      + (" Cost of transport is the undirected, diagnostic form. Stride period is the realized interval "
+         "between the same foot's steps, recovered from the dominant period of the knee joint." if regime == "walking" else "")
+      + " " + cseeds + " " + CHAIN_LOSS_NOTE))
   nb, nr, fell = units("walking")
   figs.append(("f_chain_clean", "fig:chain",
     "Walking metrics at three deploy stages. Training bench and bridge sim as in "
     f"Fig.~\\ref{{fig:chain_sim_walking}} (one identical 253\\,s command schedule, one scorer; {nb} bench "
-    f"environments and {nr} at the bridge per policy). {fell} Robot: Runs of 2026-09-16 under operator commands "
-    "(diamond: mean of the Runs), so the robot is not command-matched to the simulated stages and a "
+    f"environments and {nr} at the bridge per seed). {fell} Robot: Runs of 2026-09-16 under operator commands "
+    "(diamond: mean of the Runs), flown with seeds 42 and 123 only, so the robot mean covers two seeds and the "
+    "simulated stages three. " + cseeds + " The robot is not command-matched to the simulated stages and a "
     "row shows a range, not a trend. One hierarchical s42 robot Run is omitted as an outlier (1.25 to 2.9 "
     "times its policy median on six of eight metrics). Cost of transport is the undirected, diagnostic form; "
     "its distance is the simulator's true velocity in simulation and motion capture or the onboard estimate "
@@ -1019,7 +1224,6 @@ def write_latex(out, facts):
     "unloaded Runs of the policy, both seeds, sessions of 2026-09-14 and -16 "
     f"(n = {n['A0']} / {n['A1a']} / {n['A1a_DR']} Runs); dots: single Runs; hollow: less than 10 s in "
     "the regime."))
-  rn = facts["reward_n"]
   ENV_OBJ = ("This is the environment reward, the training objective of the flat policies; the hierarchical "
              "policies are scored on it but do not train on it (their low level: "
              "Fig.~\\ref{fig:ll_reward_sim}; their high level trains on the two tracking terms shown here "
@@ -1052,34 +1256,49 @@ def write_latex(out, facts):
       "also carries the waist-yaw motion) in the controller. The last step of every high-level decision "
       "window is not scored in $r^\\mathrm{track}$ at any stage (on the robot the velocity state resets at the "
       "next decision). " + REWARD_LOSS_NOTE))
+  HL_OBJ_TAIL = ("High-level reward: the linear-velocity and yaw-rate tracking terms per step minus 5 times the "
+                 "cost of transport of each 0.16\\,s decision window (the high level's own decision times; the "
+                 "distance is along the command; velocity from the simulator truth, or motion capture on the "
+                 "robot). The objectives of Flat and the hierarchical policies differ, so absolute values do not "
+                 "compare between them; the grey numbers do. The hierarchical low level trains on a third "
+                 "objective, Fig.~\\ref{fig:ll_reward_sim}.")
+  sf = facts["reward_seed"]
   seven = ("the seven reward terms that can be recomputed from a log (linear-velocity and yaw-rate tracking, "
            "torso tilt, roll/pitch rate, default pose, action rate, stand-still)")
-  ru = facts["reward_units"]
-  span = lambda v: str(v[0]) if len(set(v)) == 1 else " / ".join(map(str, v))
-  simsrc = (f"the training bench (the live reward, {span(ru['bench'])} environments stepping the 253\\,s "
-            f"command schedule) and the bridge sim (recomputed from the logs of {span(ru['bridge'])} "
-            "Run(s) per policy of the same schedule)")
+  simsrc = (f"the training bench (the live reward, {sf['bench']} environments per seed stepping the 253\\,s "
+            f"command schedule) and the bridge sim (recomputed from the logs of {sf['bridge']} Runs per seed of the "
+            "same schedule)")
+  seeds = ("Each policy is the mean over its three seeds (42, 123, 7) of the seeds' own means. A stage is averaged over the seeds that have it: Runs that fell are "
+           "excluded. At the bridge " + (sf["fell"] if sf["fell"] else "no Run fell")
+           + "; a seed with no Run left drops out of the bridge mean, which then covers fewer seeds. The robot "
+           "flew seeds 42 and 123 only.")
   for sfx, where, lab in (("_sim", simsrc + ".", "_sim"),
-                          ("", simsrc + f", and the robot (recomputed from the logs; n = {rn[0]} / {rn[1]} / "
-                               f"{rn[2]} Runs under operator commands).", "")):
-    figs.append((f"f_reward_total{sfx}", f"fig:reward_total{lab}",
-      f"Summed per-step reward of {seven}, at {where} " + ENV_OBJ + " Markers are means; whiskers as in "
-      "Fig.~\\ref{fig:chain_sim_walking}. " + REWARD_LOSS_NOTE))
-    figs.append((f"f_reward_return{sfx}", f"fig:reward_return{lab}",
-      "Episode return (per-step reward times the 20 s episode, the scale of the flat policy's training "
-      "return). " + ENV_OBJ + " Per "
-      "policy: the seven reproducible terms, and all 17 terms at the training bench (live) and the bridge "
-      "sim, where the ten contact and whole-body terms are recomputed by replaying the logged plant state "
-      "in the bridge's own MuJoCo model (validated against the live reward on bench states)."
-      + ("" if sfx else " The robot has no contact sensing, so it has no 17-term value.")
-      + " The hierarchical policies' gait term is scored on the gait clock their high level commands, the "
-      "one their low level trains on. " + REWARD_LOSS_NOTE))
+                          ("", simsrc + f", and the robot (recomputed from the logs; environment reward: "
+                               f"{sf['robot_env']}; high-level reward: {sf['robot_hl']}).", "")):
+    if sfx:
+      full16 = ("Flat is scored on the environment (extrinsic) reward over all 16 active terms (17 are "
+                "defined, cost of transport has weight 0): live at the training bench; at the bridge sim the "
+                "seven terms that can be recomputed from the log (" + seven.split("(")[1].rstrip(")") + ") plus nine "
+                "contact and whole-body terms recomputed by replaying the logged plant state in the bridge's own "
+                "MuJoCo model (validated against the live reward on bench states). The hierarchical policies "
+                "do not train on this reward: they are scored on the reward their high level trains on, so "
+                "the rows have different objectives. ")
+      cap_return = ("Episode return (per-step reward times the 20 s episode, the scale of the training return), "
+                    f"at {where} " + full16 + HL_OBJ_TAIL + " " + seeds)
+    else:
+      cap_return = ("Episode return (per-step reward times the 20 s episode, the scale of the training return). "
+                    "Flat has two rows: the seven terms reproducible at all three stages, and all 16 active "
+                    "terms at the training bench and the bridge sim (the robot has no contact sensing, so no "
+                    "16-term value); the hierarchical policies one row, the reward their high level trains on. "
+                    + HL_OBJ_TAIL + " " + seeds + f" {sf['est']} of the hierarchical robot Runs have no motion capture and "
+                    "use the onboard velocity estimate.")
+    figs.append((f"f_reward_return{sfx}", f"fig:reward_return{lab}", cap_return + " " + REWARD_LOSS_NOTE))
     for regime in ("walking", "standing"):
       figs.append((f"f_reward_terms_{regime}{sfx}", f"fig:reward_terms_{regime}{lab}",
-        f"The reward terms of Fig.~\\ref{{fig:reward_total{lab}}} one by one while {regime} (weight times raw "
+        f"The reward terms of Fig.~\\ref{{fig:reward_return{lab}}} one by one while {regime} (weight times raw "
         "value, per step; higher is better, penalties are negative). " + ENV_OBJ
         + ("" if sfx else " On the robot, linear-velocity tracking lacks the vertical-velocity part (not "
-           "measured) and the roll/pitch rate is the body-frame gyro.") + " " + REWARD_LOSS_NOTE))
+           "measured) and the roll/pitch rate is the body-frame gyro.") + " " + seeds + " " + REWARD_LOSS_NOTE))
   tr = facts["train"]
   by = lambda v, k: [r[k] for r in tr if r["variant"] == v]
   span = lambda x, n=0: (f"{min(x):.{n}f}" if f"{min(x):.{n}f}" == f"{max(x):.{n}f}"
@@ -1101,29 +1320,25 @@ def write_latex(out, facts):
     "machine; the three hierarchical runs here repeat its configuration on this one (seeds 42, 7, 123). After "
     f"iteration {TRAIN_XMAX} every run stays within 1\\,\\% of its final value."))
   c, sl = facts["lean"]["cell"], facts["lean"]["slope"]
-  hier = [m for (v, on, _), (m, _) in c.items() if v != "A0"]
   nl = lambda v, on: " / ".join(str(c.get((v, on, s), (0, 0))[1]) for s in ("42", "123"))
   figs.append(("f_lean", "fig:lean",
     "Standing upright needs a hand calibration for the flat policy and none for the hierarchy. Left: torso "
-    "pitch of the robot standing still at zero command (IMU, rows where no leg joint moves faster than "
-    "0.1\\,rad/s), every unloaded Run of 2026-09-16 and -23; bars are the mean per policy and seed. Without "
-    f"the joint offset the flat policy leans back by {-c['A0', False, '42'][0]:.1f}\\,deg (seed 42) and "
-    f"{-c['A0', False, '123'][0]:.1f}\\,deg (seed 123). The offset, one constant from a hand calibration "
-    f"(the mean of five trials), brings seed 42 to {c['A0', True, '42'][0]:+.1f}\\,deg but leaves seed 123 at "
-    f"{c['A0', True, '123'][0]:+.1f}\\,deg. Every hierarchical policy stands within {min(hier):+.1f} to "
-    f"{max(hier):+.1f}\\,deg with no offset. Runs per seed (42 / 123): Flat with offset {nl('A0', True)}, "
-    f"without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, Hierarchical + DR {nl('A1a_DR', False)}. "
-    "Right: in simulation, the change of standing pitch per unit of encoder bias placed on one sagittal leg "
-    "joint, or split over all three (least-squares slope over biases from $-0.032$ to $+0.032$\\,rad, seed-42 "
-    f"policies, 64 environments). The flat policy turns an encoder error into lean ({sl['A0', 'all']:+.2f}\\,rad/rad "
-    f"for all three joints); the hierarchy barely does ({sl['A1a', 'all']:+.2f}, "
-    f"{abs(sl['A0', 'all'] / sl['A1a', 'all']):.1f} times less, opposite sign)."))
+    "pitch on the robot at zero command (IMU, still rows only: no leg joint faster than 0.1\\,rad/s), every "
+    "unloaded Run of 2026-09-16 and -23; bars are the mean per policy and seed. Runs per seed (42 / 123): "
+    f"Flat with offset {nl('A0', True)}, without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, "
+    f"Hierarchical + DR {nl('A1a_DR', False)}. Right: simulated standing pitch per unit of encoder bias on "
+    "one sagittal leg joint or all three (slope over $\\pm0.032$\\,rad, seed 42, 64 environments); flat "
+    f"{sl['A0', 'all']:+.2f}, hierarchical {sl['A1a', 'all']:+.2f}\\,rad/rad for all three joints."))
   c, srow = facts["share"]["cell"], facts["share"]["rows"]
   lo, mid = min(r["rse"] for r in srow), sorted({r["rse"] for r in srow})[1]
   tds = [r["td_per_foot"] for r in srow if r["variant"] == "A1a" and r["rse"] == lo]
   flat = [c["act_legs_rad", "A0", s][0] for s in sorted({r["rse"] for r in srow})]
   rep = [r["act_legs_rad"] for r in srow if r["variant"] == "A0" and r["rse"] == mid]
   ncell = lambda v: " / ".join(str(c["act_legs_rad", v, s][1]) for s in sorted({r["rse"] for r in srow}))
+  hi = max(r["rse"] for r in srow)
+  hier = lambda s: [r for r in srow if r["variant"] == "A1a" and r["rse"] == s]
+  span = lambda rs, k, f: f"{f.format(min(r[k] for r in rs))} to {f.format(max(r[k] for r in rs))}"
+  worst = max(hier(mid), key=lambda r: r["act_legs_rad"])
   figs.append(("f_standing_share", "fig:standing_share",
     "Standing in simulation against the share of standing environments in training, a crossed design: both "
     "architectures trained at 5, 12 and 20\\,\\% standing environments, otherwise unchanged. Bench at zero "
@@ -1131,13 +1346,18 @@ def write_latex(out, facts):
     f"{100 * lo:g}\\,\\% the hierarchical policy marches in place: standing leg action rate "
     f"{c['act_legs_rad', 'A1a', lo][0]:.3f} rad against the flat policy's {c['act_legs_rad', 'A0', lo][0]:.4f} "
     f"({c['act_legs_rad', 'A1a', lo][0] / c['act_legs_rad', 'A0', lo][0]:.0f} times), and "
-    f"{min(tds):.0f} to {max(tds):.0f} touchdowns per foot where a still stand gives 1 (the floor). From "
-    f"{100 * mid:g}\\,\\% on it stands like the flat policy ({c['act_legs_rad', 'A1a', mid][0]:.4f} rad, "
-    f"{c['td_per_foot', 'A1a', mid][0]:.2f} touchdowns per foot). The flat policy never steps at any share and "
+    f"{min(tds):.0f} to {max(tds):.0f} touchdowns per foot where a still stand gives 1 (the floor). At "
+    f"{100 * mid:g}\\,\\% it depends on the checkpoint: {span(hier(mid), 'act_legs_rad', '{:.4f}')} rad and "
+    f"{span(hier(mid), 'td_per_foot', '{:.2f}')} touchdowns per foot across its {len(hier(mid))} checkpoints, the "
+    f"seed-{worst['seed']} one standing with extra steps ({worst['act_legs_rad']:.4f} rad, "
+    f"{worst['td_per_foot']:.2f} touchdowns per foot). At {100 * hi:g}\\,\\% its {len(hier(hi))} checkpoints "
+    f"stand at {span(hier(hi), 'act_legs_rad', '{:.4f}')} rad and {span(hier(hi), 'td_per_foot', '{:.2f}')} "
+    "touchdowns per foot. The flat policy never steps at any share and "
     f"moves within {min(flat):.4f} to {max(flat):.4f} rad, against {min(rep):.4f} to {max(rep):.4f} rad across "
     f"its {len(rep)} checkpoints at {100 * mid:g}\\,\\% alone. Touchdowns per foot = 12\\,s / the bench's stride period. "
-    "Markers: one trained checkpoint each (circle seed 42, triangle seed 123; repeated benches of one "
-    "checkpoint averaged, an independent retrain of seed 42 drawn separately), n = "
+    "Markers: one trained checkpoint each (circle seed 42, triangle seed 123, diamond seed 7; repeated benches "
+    "of one checkpoint averaged, an independent retrain of seed 42 drawn separately; the seed-7 checkpoints "
+    "were benched in a later batch on the same protocol), n = "
     f"{ncell('A0')} Flat and {ncell('A1a')} Hierarchical; lines join the means. The flat 5\\,\\% "
     "checkpoint is an earlier training of the same recipe whose critic lacks the five privileged "
     "environment parameters; its actor configuration is identical. Leg action rate on a log axis."))
@@ -1177,6 +1397,7 @@ def write_latex(out, facts):
 \\end{{figure}}
 \\clearpage
 """ for f, l, c in figs)
+  body += replication_table(ptf.REPO)
   body += ("\n\\section*{Zoom variants}\nEvery walking segment and the start-up of the Runs in "
            "Figs.~\\ref{fig:track_A1a} to \\ref{fig:hier_A1a_DR}, to choose from. Same figures, same "
            "y-limits, only the window moves (each walking segment plus 2\\,s either side, at least 10\\,s).\n")
@@ -1262,7 +1483,7 @@ def main() -> int:
   # metric of the simulation figure: the number that justifies not drawing single bridge Runs.
   facts["bridge_spread_pct"] = {
     r: max(100 * (max(v) - min(v)) / abs(np.mean(v)) for k in SIM_KEYS[r]
-           for _, _, st in rows(k, ("bridge",)) for v in [st["bridge"]] if len(v) > 1 and np.mean(v))
+           for _, _, st, _ in rows(k, ("bridge",)) for v in [st["bridge"]] if len(v) > 1 and np.mean(v))
     for r, rows in (("walking", rows_w), ("standing", rows_s))}
   print(f"[REPORT] chain: largest bridge Run-to-Run spread {facts['bridge_spread_pct']} %")
   write_rows(out, "f_chain_units", [{"policy": t, "stage": st, "regime": r, "n_scored": n, "n_fell": k}
@@ -1281,14 +1502,14 @@ def main() -> int:
   ptf.fig_upper(pooled, out, name="f_upper_3pol")
 
   points = load_reward_points(root)
+  hlp = hl_points(root)
   print("[REPORT] reward: hardware Runs per policy "
         + str({t: len(p["hardware"]) for t, p in points.items()}))
   for stages, sfx in ((STAGE_KEYS, ""), (STAGE_KEYS[:2], "_sim")):
-    fig_reward_total(points, out, stages, sfx)
-    fig_reward_return(points, out, stages, sfx)
+    fig_reward_return(points, hlp, out, stages, sfx)
     for regime in ("walking", "standing"):
       fig_reward_terms(points, out, regime, stages, sfx)
-  facts["reward_units"] = {s: [len(p[s]) for p in points.values()] for s in ("bench", "bridge")}
+  facts["reward_seed"] = seed_facts(points, hlp, root)
   llp = ll_points(kept, root)
   for stages, sfx in ((STAGE_KEYS, ""), (STAGE_KEYS[:2], "_sim")):
     fig_ll_reward(llp, out, stages, sfx)
@@ -1298,7 +1519,6 @@ def main() -> int:
                          for t in LL_TAGS for s in STAGE_KEYS]
   facts["ll_partial"] = [x for x in facts["ll_partial"] if x[2]]
   print(f"[REPORT] low-level goal reward units per policy {facts['ll_n']}")
-  facts["reward_n"] = [len(p["hardware"]) for p in points.values()]
 
   trow = train_points(root)
   fig_training(trow, out)

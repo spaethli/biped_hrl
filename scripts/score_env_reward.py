@@ -40,10 +40,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
-from bench_flight_recorder import (CMD_THRESHOLD, attach_mocap, projected_gravity_xy,  # noqa: E402
-                                   read_flight)
+from bench_flight_recorder import (CMD_THRESHOLD, CTRL_DT, HL_C, attach_mocap, hl_return,  # noqa: E402
+                                   projected_gravity_xy, read_flight, read_telemetry, ref_columns,
+                                   walking_mask)
 
 REPO = Path(__file__).resolve().parents[1]
 DEPLOY_YAML = REPO / "deploy/robots/h1_2/config/policy/velocity/v0/params/deploy.yaml"
@@ -380,17 +382,24 @@ def validate(dump_path, rewards):
   return res
 
 
-def score_flight(csv_path, rewards, entry=None, mocap=True):
-  """-> {regime: {term: mean}, "_n": {regime: policy steps}, "_ref": velocity reference}."""
+def score_flight(csv_path, rewards, entry=None, mocap=True, fallback=None, steps_out=None):
+  """-> {regime: {term: mean}, "_n": {regime: policy steps}, "_ref": velocity reference}.
+  `fallback` (an estimator name, e.g. "est_v_compl") is the velocity reference when there is neither a
+  plant truth nor usable motion capture; without it such a Run is refused. `steps_out`, if a dict, is
+  filled with the per-policy-step arrays (F, v, cmd, raw tracking kernels) for callers that need more
+  than the regime means."""
   F = read_flight(csv_path, assume_hold=False, entry=entry)
   df, sidx, steps, cmd = F["df"], F["sidx"], F["steps"], F["cmd"]
   ref, has_vz = "ach_v", bool(np.any(df["ach_vz"].to_numpy(float) != 0.0)) if "ach_vz" in df else False
   if not np.any(df[["ach_vx", "ach_vy"]].to_numpy(float) != 0.0):
     mo = attach_mocap(F, csv_path) if mocap else None
-    if mo is None or mo["gt_coverage"] < 0.5:
+    if mo is not None and mo["gt_coverage"] >= 0.5:
+      ref = "gt_v"
+    elif fallback:
+      ref = fallback
+    else:
       raise SystemExit(f"{csv_path}: no velocity truth (no ach_v, no usable mocap)")
-    ref = "gt_v"
-  v = df[["ach_vx", "ach_vy"] if ref == "ach_v" else ["gt_vx", "gt_vy"]].to_numpy(float)[sidx]
+  v = df[list(ref_columns(ref))].to_numpy(float)[sidx]
   gyro = df[["est_gyro_x", "est_gyro_y", "est_gyro_z"]].to_numpy(float)[sidx]
   q = df[["quat_w", "quat_x", "quat_y", "quat_z"]].to_numpy(float)[sidx]
   meas = df[[f"meas_q{j}" for j in range(27)]].to_numpy(float)[sidx]
@@ -425,6 +434,8 @@ def score_flight(csv_path, rewards, entry=None, mocap=True):
   ar = np.full(len(steps), np.nan)
   ar[1:] = ((a[1:] - a[:-1]) ** 2).sum(1)
   vals["action_rate_l2"] = ar
+  if steps_out is not None:
+    steps_out.update(F=F, v=v, cmd=c, walk=walk, ref=ref, track=vals["track_linear_velocity"] + vals["track_angular_velocity"])
   out = {"_ref": ref, "_vz_included": has_vz, "_n": {}}
   for regime, m in (("walking", walk), ("standing", ~walk)):
     out["_n"][regime] = int(m.sum())
@@ -444,17 +455,117 @@ def score_flight(csv_path, rewards, entry=None, mocap=True):
   return out
 
 
+def _gated_steps(cmd, v, power_step):
+  """Per-step gated energy (J) and signed distance along the command (m), as hrl_runner gates them."""
+  norm = np.linalg.norm(cmd[:, :2], axis=1)
+  eng = norm > CMD_THRESHOLD
+  dpar = (v * cmd[:, :2]).sum(1) / np.maximum(norm, 1e-6) * CTRL_DT * eng
+  return power_step * eng, dpar
+
+
+def hl_return_trace(npz_path, rewards):
+  """The high level's reward (bench_flight_recorder.hl_return) for every env of a bench trace
+  (`play.py --eval-trace ... --reward-terms True`). The tracking kernels are the trace's own live
+  RewardManager values divided by their weights; windows start at step 0 and every HL_C steps.
+  -> {"s42_env00": {"fell": bool, "walking": {...}, "standing": {...}}}."""
+  with np.load(npz_path) as lazy:
+    z = {k: lazy[k] for k in ("cmd", "rew", "rew_names", "tau", "dq", "ach_v", "fell_step", "seed")}
+  names = [str(x) for x in z["rew_names"]]
+  w = {k: rewards[k].weight for k in ("track_linear_velocity", "track_angular_velocity")}
+  n, n_env = z["cmd"].shape[:2]
+  fire = np.arange(n) % HL_C == 0
+  out = {}
+  for k in range(n_env):
+    track = sum(z["rew"][:, k, names.index(t)].astype(float) / w[t] for t in w)
+    power = np.abs(z["tau"][:, k] * z["dq"][:, k]).sum(1).astype(float) * CTRL_DT
+    cmd = z["cmd"][:, k].astype(float)
+    en, dp = _gated_steps(cmd, z["ach_v"][:, k].astype(float), power)
+    out[f"s{int(z['seed'])}_env{k:02d}"] = {"fell": bool(z["fell_step"][k] >= 0),
+                                            **hl_return(track, en, dp, fire, walking_mask(cmd))}
+  return out
+
+
+def hl_return_flight(flight_csv, hrl_csv, telemetry_csv, lag_s, skew_ppm, rewards, mocap=True):
+  """The same for one bridge or robot Run. Windows are the controller's own HL decisions (the rows of
+  its `_hrl.csv` where the velocity increment resets); torque and joint speed come from the paired
+  telemetry log (the alignment the Run's regime json recorded); the velocity reference is the plant's
+  truth at the bridge, motion capture on the robot and the onboard estimate where there is none."""
+  st = {}
+  score_flight(flight_csv, rewards, mocap=mocap, fallback="est_v_compl", steps_out=st)
+  F = st["F"]
+  tstep = F["t_clock"][F["sidx"]]
+  n = len(tstep)
+  h = pd.read_csv(hrl_csv)
+  j = np.clip(np.searchsorted(h["t"].to_numpy(float), F["t"][F["sidx"]]), 0, len(h) - 1)
+  fire = ((h["est_vx"] == 0.0) & (h["est_vy"] == 0.0)).to_numpy()[j]
+  T = read_telemetry(telemetry_csv)
+  t_in = T["t"] + (lag_s + skew_ppm * 1e-6 * T["t"])
+  e_tel = np.abs(T["tau"] * T["dq"]).sum(1) * np.diff(T["t"], prepend=T["t"][0])
+  b = np.searchsorted(tstep, t_in, side="right") - 1
+  ok = (b >= 0) & (b < n) & (t_in <= F["t_clock"][-1])
+  cnt = np.bincount(b[ok], minlength=n)
+  power_step = np.where(cnt > 0, np.bincount(b[ok], weights=e_tel[ok], minlength=n), np.nan)
+  en, dp = _gated_steps(st["cmd"], st["v"], power_step)
+  return {"ref": st["ref"], **hl_return(st["track"], en, dp, fire, st["walk"])}
+
+
+def hl_return_main(args):
+  """--hl-return OUT: {tag: {"bench": {unit: ...}, "bridge": {...}, "hardware": {...}}}."""
+  rewards = task_cfg()
+  res = {}
+  for tag_dir in sorted((REPO / args.bridge_dir).glob("*/")):
+    tr = tag_dir / "bench" / "trace_s42.npz"
+    entry = res.setdefault(tag_dir.name, {"bench": {}, "bridge": {}, "hardware": {}})
+    if tr.exists():
+      entry["bench"] = hl_return_trace(tr, rewards)
+    for f in sorted((tag_dir / "bridge").glob("*.walking.json")):
+      js = json.loads(f.read_text())
+      fl = REPO / "logs/deploy_safety" / js["flight_recorder"]
+      if not fl.with_name(fl.stem + "_hrl.csv").exists() or not js.get("all_joints"):
+        continue
+      entry["bridge"][js["label"]] = {**hl_return_flight(
+        fl, fl.with_name(fl.stem + "_hrl.csv"), Path(args.traj_dir).expanduser() / js["all_joints"], js["pair_lag_s"],
+        js["pair_skew_ppm"], rewards, mocap=False), "capture": js["flight_recorder"]}
+      print(f"[HLRET] bridge {tag_dir.name}/{js['label']}")
+  for d in sorted(REPO.glob(args.hw_glob)):
+    if not (d / "run.json").exists():
+      continue
+    run = json.loads((d / "run.json").read_text())
+    fl = d / run["flight_recorder"]
+    if float(run.get("payload_kg") or 0.0) > 0 or not run.get("all_joints") or \
+        not fl.with_name(fl.stem + "_hrl.csv").exists():
+      continue
+    try:
+      r = hl_return_flight(fl, fl.with_name(fl.stem + "_hrl.csv"), d / run["all_joints"], run["pair_lag_s"],
+                           run["pair_skew_ppm"], rewards)
+    except SystemExit as e:
+      print(f"[HLRET] skip {d.name}: {e}")
+      continue
+    res.setdefault(run["policy_tag"], {"bench": {}, "bridge": {}, "hardware": {}})["hardware"][d.name] = r
+    print(f"[HLRET] robot {run['policy_tag']}/{d.name} ref={r['ref']}")
+  Path(args.hl_return).write_text(json.dumps(res, indent=1))
+  return 0
+
+
 def main():
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  ap.add_argument("--out", required=True)
+  ap.add_argument("--out", help="the env-reward scores of the robot and bridge Runs (json)")
+  ap.add_argument("--hl-return", help="instead: the HIGH level's training reward of every bench env, bridge "
+                  "Run and robot Run under --bridge-dir / --hw-glob (json)")
   ap.add_argument("--hw-glob", default="logs/robot_logs/2026_09_16-*/")
   ap.add_argument("--bridge-dir", default="logs/sim_logs/chain")
+  ap.add_argument("--traj-dir", default="~/ramlab_ws/trajectories",
+                  help="where read_all_joints wrote the bridge Runs' joint telemetry (--hl-return)")
   ap.add_argument("--dump-dir", default="data/2026-09-25-env-reward",
                   help="play.py --reward-dump outputs dump_A0_s42 / dump_A1a_s42: the live weights for the "
                        "plant replay, and the ground truth --validate replays")
   ap.add_argument("--validate", action="store_true",
                   help="only: round-trip selftest + replay the bench dumps against the live reward")
   args = ap.parse_args()
+  if args.hl_return:
+    return hl_return_main(args)
+  if not args.out:
+    ap.error("--out is required")
   rewards = task_cfg()
   dumps = {"A0": REPO / args.dump_dir / "dump_A0_s42", "A1a": REPO / args.dump_dir / "dump_A1a_s42"}
   if args.validate:
