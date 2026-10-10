@@ -341,6 +341,12 @@ python scripts/bridge_session.py --policy hrl --tag <name> --seq "0:45"
 
 Add `--no-band` to skip the elastic-band release (needs `python-xlib`). The band only
 matters for judging *policy behaviour* — loop timing and estimator logging are unaffected.
+The band key goes to the `MuJoCo` window owned by the simulator the session launched (`_NET_WM_PID`).
+Title matching failed twice while logging "focus verified": a substring match on `unitree` typed `9` into
+an editor (2026-10-09), and a `MuJoCo` prefix match picked another MuJoCo-titled window (2026-10-10, 9
+Runs hung). A logged release is not proof, so after the first forward hold the session checks the sim's
+true/commanded sagittal speed (`walking_ratio`, ~1 free, ~0 held) and aborts below 0.5. A held Hierarchical
+Run never falls, so an undetected one makes the hierarchy look safer.
 On hardware, any normal session logs all seven arms; A0 is the only policy that stands
 genuinely still, so it is the only source of an exact `v = 0` truth.
 

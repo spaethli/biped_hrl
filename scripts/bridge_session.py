@@ -127,7 +127,7 @@ def setup_env():
   return env
 
 
-def _focus_mujoco_window(d, X, label):
+def _focus_mujoco_window(d, X, label, pid=None):
   """Focus the mujoco window WITHOUT raising it (2026-08-04): XTEST keys are GLFW key
   callbacks, which only fire for the FOCUSED window, but a forced raise would steal the
   desktop during an unattended run. Returns the window on success, None (having already
@@ -152,9 +152,21 @@ def _focus_mujoco_window(d, X, label):
 
   wins = []
   walk(d.screen().root, wins)
-  hit = next((w for n, w in wins if 'mujoco' in n.lower() or 'unitree' in n.lower()), None)
+  # The simulator's title is 'MuJoCo : Unitree H1-2'. A substring match also hit any editor or
+  # terminal titled with the repo path (unitree_rl_mjlab) and typed the key into it (2026-10-09).
+  # 2026-10-10: a title prefix is not enough either -- another window titled 'MuJoCo...' took the
+  # key with focus verified on IT, and 9 Runs hung on the band. `pid` pins the window to the
+  # simulator this session launched (GLFW sets _NET_WM_PID).
+  def owner(w):
+    try:
+      prop = w.get_full_property(d.intern_atom('_NET_WM_PID'), X.AnyPropertyType)
+      return prop.value[0] if prop else None
+    except Exception:
+      return None
+  hit = next((w for n, w in wins if str(n).lower().startswith('mujoco') and (pid is None or owner(w) == pid)),
+             None)
   if hit is None:
-    print(f'[{label}] no mujoco window found -- key NOT sent')
+    print(f'[{label}] no mujoco window{f" of pid {pid}" if pid else ""} found -- key NOT sent')
     return None
   hit.set_input_focus(X.RevertToParent, X.CurrentTime)
   d.sync()
@@ -171,7 +183,7 @@ def _focus_mujoco_window(d, X, label):
   return hit
 
 
-def release_band(key='9'):
+def release_band(key='9', pid=None):
   """Toggle the bridge's elastic band: a GLFW key on the mujoco window, so XTEST it. NB
   this is a TOGGLE, not a release: sending it twice re-attaches the band. The analyzer's
   travel check is the backstop that catches a failed release (and every other cause)."""
@@ -182,7 +194,7 @@ def release_band(key='9'):
     print('[band] python-xlib not installed -- band NOT released (pip install python-xlib)')
     return False
   d = display.Display()
-  hit = _focus_mujoco_window(d, X, 'band')
+  hit = _focus_mujoco_window(d, X, 'band', pid)
   if hit is None:
     return False
   code = d.keysym_to_keycode(ord(key))
@@ -192,7 +204,7 @@ def release_band(key='9'):
   return True
 
 
-def reset_sim():
+def reset_sim(pid=None):
   """Backspace on the mujoco window -> `mj_resetData(m, d); mj_forward(m, d)`
   (main.cc:632-634, `user_key_cb`): an actual physics-state reset to the model's initial
   keyframe, not a joint-position hold. This is what makes restand-after-a-real-fall work at
@@ -212,7 +224,7 @@ def reset_sim():
     print('[reset] python-xlib not installed -- sim NOT reset (pip install python-xlib)')
     return False
   d = display.Display()
-  hit = _focus_mujoco_window(d, X, 'reset')
+  hit = _focus_mujoco_window(d, X, 'reset', pid)
   if hit is None:
     return False
   code = d.keysym_to_keycode(XK.string_to_keysym('BackSpace'))
@@ -220,6 +232,30 @@ def reset_sim():
   xtest.fake_input(d, X.KeyRelease, code); d.sync()
   print('[reset] sim reset (Backspace, focus verified)')
   return True
+
+
+def walking_ratio(csv):
+  """Median true / commanded sagittal speed over the newest forward-walking stretch of a growing
+  flight recorder (`ach_vx` is the sim's true velocity), its first 3 s and anything after a tilt
+  trigger dropped; None below 2 s of such rows. ~1 walking, ~0 on the harness (2026-10-10: held
+  Runs -0.16..0.11, free 0.79..1.07)."""
+  import pandas as pd
+  try:
+    d = pd.read_csv(csv, usecols=['t_wall', 'cmd_vx', 'cmd_vy', 'cmd_wz', 'ach_vx', 'trig_tilt'],
+                    on_bad_lines='skip').apply(pd.to_numeric, errors='coerce').dropna()
+  except Exception:
+    return None
+  if (d.trig_tilt != 0).any():
+    d = d.loc[:d.index[(d.trig_tilt != 0).to_numpy()][0] - 1]
+  fwd = (d.cmd_vx >= 0.2) & (d.cmd_vy.abs() < 0.05) & (d.cmd_wz.abs() < 0.05)
+  if not fwd.any():
+    return None
+  seg = (fwd != fwd.shift()).cumsum()
+  w = d[fwd & (seg == seg[fwd].iloc[-1])]
+  w = w[w.t_wall - w.t_wall.iloc[0] > 3.0]
+  if len(w) == 0 or w.t_wall.iloc[-1] - w.t_wall.iloc[0] < 2.0:
+    return None
+  return float((w.ach_vx / w.cmd_vx).median())
 
 
 class FallWatcher:
@@ -388,7 +424,7 @@ def main():
     restand_count[0] += 1
     print(f'[{time.strftime("%T")}] [restand] #{restand_count[0]}: 0 -> reset -> resume')
     hold('0', 3.0, 'zero cmd before reset (auto-restand)')
-    reset_sim()
+    reset_sim(bridge.pid)
     time.sleep(2)
     watcher.fallen.clear()
 
@@ -421,7 +457,7 @@ def main():
     # inside release_band's 0.4 s window) and cost a run of a 9-run battery. The analyzer's
     # travel check catches it afterwards, which is the backstop; this stops us paying 83 s
     # and a slot to learn nothing.
-    if not args.no_band and not release_band():
+    if not args.no_band and not release_band(pid=bridge.pid):
       raise SystemExit(
         '[band] ABORTING before the command sequence: the elastic band was NOT released, '
         'so the robot is still on the harness and nothing it does is interpretable. '
@@ -434,9 +470,18 @@ def main():
       # the file never appears, so the watcher polls harmlessly and never fires.
       watcher = FallWatcher(Path(f'{base}_hrl.csv'))
       watcher.start()
+    travel_ok = args.no_band
     for item in args.seq.split(','):
       k, secs = item.split(':')
       hold(k, float(secs), 'commanded', watcher=watcher)
+      if not travel_ok and (r := walking_ratio(Path(f'{base}.csv'))) is not None:
+        # The backstop for every way a release can fail silently (2026-10-10): focus can be verified
+        # on the right window and the band still be on. Checked after the first forward hold.
+        print(f'[band] travel check: true / commanded sagittal speed {r:.2f}')
+        if r < 0.5:
+          raise SystemExit('[band] ABORTING: the robot did not walk forward under a forward command, '
+                           'so it is still on the harness. Re-run this session.')
+        travel_ok = True
       if watcher is not None and watcher.fallen.is_set():
         restand()
     press('p', 'Passive')
@@ -458,6 +503,9 @@ def main():
     fifo.unlink(missing_ok=True)
     for f in logs.values():
       f.close()
+  if not travel_ok:
+    print('[band] WARNING: travel check never ran (no forward hold, or a fall before one); '
+          'the band release is unverified')
   if restand_count[0]:
     print(f'[restand] {restand_count[0]} recovery/recoveries this session -- the run is '
           f'still NO-GO if any phase fell (recovery buys per-phase evidence, not '
