@@ -1076,12 +1076,16 @@ def replication_table(root):
     x = R[s]
     speeds = ", ".join(f"{v:g}" for v in x["speeds"])
     n_runs = sorted(set(x["bridge_runs"].values()))
-    others = sum(v for t, v in x["bridge_runs"].items() if t not in ("A1a_s42", "A1a_s123"))
+    hier = [t for t in x["bridge_runs"] if t.startswith("A1a_s")]    # Hierarchical without DR: the one that falls
+    others = sum(v for t, v in x["bridge_runs"].items() if t not in hier)
     fw = {}
     for t, fl in x["fall_where"].items():
       for _, cmd in fl:
         fw.setdefault(t, []).append(where(cmd))
-    w123 = ", ".join(f"{fw['A1a_s123'].count(w)} {w}" for w in dict.fromkeys(fw.get("A1a_s123", [])))
+    wh = lambda t: f" ({', '.join(f'{fw[t].count(w)} {w}' for w in dict.fromkeys(fw[t]))})" if t in fw else ""
+    seeds = lambda v: [t for t in x["ll"] if ptf._variant_seed(t)[0] == v and x["ll"][t] is not None]
+    lls = lambda v: (f"{name(v)} s{' / s'.join(ptf._variant_seed(t)[1] for t in seeds(v))} "
+                     f"{' / '.join(pc(x['ll'][t][0]) for t in seeds(v))}\\,\\%")
     ll = x["ll"]
     share = min(v[1] for v in ll.values() if v is not None and v[0] < 0)
     return [
@@ -1090,41 +1094,37 @@ def replication_table(root):
       f"flat {span(x['cot_loss']['flat'])}, hierarchies {span(x['cot_loss']['hier'])}",
       f"bench: hierarchies {rr(x['cot']['bench']['hier'])} $<$ flat {rr(x['cot']['bench']['flat'])}"
       f"\\newline bridge: hierarchies {rr(x['cot']['bridge']['hier'])} $>$ flat {rr(x['cot']['bridge']['flat'])}",
-      f"Hierarchical s123 ${x['falls']['A1a_s123']}/{x['bridge_runs']['A1a_s123']}$ ({w123}), "
-      f"Hierarchical s42 ${x['falls']['A1a_s42']}/{x['bridge_runs']['A1a_s42']}$, all others $0/{others}$"
+      ", ".join(f"Hierarchical s{ptf._variant_seed(t)[1]} ${x['falls'][t]}/{x['bridge_runs'][t]}${wh(t)}"
+                for t in hier) + f", all others ${sum(x['falls'][t] for t in x['falls'] if t not in hier)}/{others}$"
       f"\\newline bench: ${x['bench_falls'][0]}$ of ${x['bench_falls'][1]}$ environments",
       f"flat {x_(x['stand_ratio']['flat'])}, hierarchies {x_(x['stand_ratio']['hier'])}",
       f"bridge: flat {rr(x['err_vx']['bridge']['flat'], 3)} $<$ hierarchies "
-      f"{rr(x['err_vx']['bridge']['hier'], 3)}\\,m/s; best hierarchy: "
-      + ("H-adapt, both seeds" if set(x["best_hier_bridge"]) == {"A1a_hadapt_s42", "A1a_hadapt_s123"}
-         else ", ".join(x["best_hier_bridge"])),
-      f"Hierarchical s42 {pc(ll['A1a_s42'][0])}\\,\\%, Hierarchical + DR s42 / s123 {pc(ll['A1a_DR_s42'][0])} / "
-      f"{pc(ll['A1a_DR_s123'][0])}\\,\\%; goal tracking carries $\\geq {100 * share:.0f}\\,\\%$ of each loss",
+      f"{rr(x['err_vx']['bridge']['hier'], 3)}\\,m/s",
+      f"{lls('A1a')}, {lls('A1a_DR')}; goal tracking carries $\\geq {100 * share:.0f}\\,\\%$ of each loss",
     ]
 
   sg, sa = R["sign"]["figure"], R["sign"]["all"]
-  label = {"A1a_hadapt": "H-adapt", "A0_DR": "Flat + DR"}
   metric = {k: v.split(" (")[0] for k, v in CHAIN_LABEL.items()}
-  flips = "; ".join(f"{label.get(ptf._variant_seed(t)[0]) or name(t)} s{ptf._variant_seed(t)[1]} {rg} "
+  flips = "; ".join(f"{name(t)} s{ptf._variant_seed(t)[1]} {rg} "
                     f"{metric.get(k, k)} ({pc(a)} vs {pc(b)}\\,\\%)" for t, rg, k, a, b in sa["flips"])
   crit = ["Command schedule", "Walking cost of transport, bench $\\rightarrow$ bridge",
           "Walking energy ranking", "Falls (bridge Runs)", "Standing leg action rate, bridge $\\div$ bench",
           "Walking sagittal error vs.\\ true velocity", "Walking low-level reward $r^\\mathrm{lo}$, "
           "bench $\\rightarrow$ bridge"]
   rows = list(zip(crit, col("A"), col("B")))
-  rows.append(("Sign of the bench $\\rightarrow$ bridge change, every metric", "(reference)",
-               f"${sg['agree']}$ of ${sg['n']}$ cells (the six policies of Figs.~\\ref{{fig:chain_sim_walking}} "
-               f"and \\ref{{fig:chain_sim_standing}}); ${sa['agree']}$ of ${sa['n']}$ over all ten"
-               + (f", the exception: {flips}" if flips else "")))
+  rows.append(("Sign of the bench $\\rightarrow$ bridge change, every metric",
+               f"(reference: cells whose change exceeds the bridge Run-to-Run spread, "
+               f"{100 * R['thr']['walking']:.0f}\\,\\% walking, {100 * R['thr']['standing']:.0f}\\,\\% standing)",
+               f"${sg['agree']}$ of ${sg['n']}$ cells (the {len(CHAIN_SEED_TAGS)} policies of Figs.~\\ref{{fig:chain_sim_walking}} "
+               f"and \\ref{{fig:chain_sim_standing}})"
+               + (f"; ${sa['agree']}$ of ${sa['n']}$ over all {len(R['A']['bridge_runs'])}" if sa != sg else "")
+               + (f", the exception{'s' if len(sa['flips']) > 1 else ''}: {flips}" if flips else "")
+               + f"; walking losses move by a median of {R['walk_diff_pp'][0]:.0f} (at most "
+               f"{R['walk_diff_pp'][1]:.0f}) percentage points"))
   holds = R["holds"]["B"]
   tags = list(R["A"]["bridge_runs"])
   n_flat = sum(t.startswith("A0") for t in tags)
   new = sorted(set(R["B"]["speeds"]) - set(R["A"]["speeds"]))
-  sr = [(R["A"]["stand_ratio_tag"][t], R["B"]["stand_ratio_tag"][t]) for t in tags]
-  sr = [(a, b) for a, b in sr if a is not None and b is not None]
-  stand = ("standing ratios are larger under B for every policy, flat included, since its stands are shorter "
-           "and each follows a stop, so standing magnitudes depend on the schedule and the ordering does not"
-           if all(b > a for a, b in sr) else "standing ratios move between the schedules; the ordering holds")
   verdict = ("All criteria hold" if all(holds.values()) else
              "Criteria that do not hold: " + ", ".join(k for k, v in holds.items() if not v))
   body = " \\\\\n    \\midrule\n    ".join(" & ".join(r) for r in rows)
@@ -1138,16 +1138,10 @@ def replication_table(root):
     {body} \\\\
     \\bottomrule
   \\end{{tabularx}}
-  \\caption{{Replication of the bench-to-bridge comparison on a second command schedule. Schedule B commands
-  sagittal speeds schedule A never does ({", ".join(f"{v:g}" for v in new)}\\,m/s), speed changes without a stop and back-to-back direction changes
-  (lateral and yaw at $\\pm 0.5$ and backward $-0.5$\\,m/s in both); everything else (policies, plant, scorer,
-  fall rule) is unchanged. The criteria and their thresholds were written down before any schedule-B data
-  existed. {verdict}. Ranges are over the {n_flat} flat (Flat, Flat + DR) and the {len(tags) - n_flat} hierarchical policies
-  (Hierarchical, Hierarchical + DR, H-adapt; both seeds each); a policy whose bridge Runs all fell has no
-  bridge value. Last row: cells whose schedule-A change exceeds the bridge Run-to-Run spread
-  ({100 * R['thr']['walking']:.0f}\\,\\% walking, {100 * R['thr']['standing']:.0f}\\,\\% standing). Walking
-  losses differ between the schedules by a median of {R['walk_diff_pp'][0]:.0f} percentage point{'' if round(R['walk_diff_pp'][0]) == 1 else 's'} (at most
-  {R['walk_diff_pp'][1]:.0f}, over the {R['walk_diff_pp'][2]} cells of the six figure policies); {stand}.}}
+  \\caption{{Replication of the bench-to-bridge comparison on a second command schedule (B: new speeds
+  {", ".join(f"{v:g}" for v in new)}\\,m/s, speed and direction changes without a stop), scored on criteria fixed before
+  any schedule-B data existed; {verdict[0].lower() + verdict[1:]}. Ranges span the {n_flat} flat and {len(tags) - n_flat}
+  hierarchical policies (seeds 42, 123 and 7 each); a policy whose bridge Runs all fell has no bridge value.}}
   \\label{{tab:replication}}
 \\end{{table}}
 \\clearpage
