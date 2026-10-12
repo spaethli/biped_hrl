@@ -744,8 +744,8 @@ def fig_standing_share(rows, out, name_="f_standing_share"):
 # pitch-per-encoder-bias slopes from play.py --probe-lean (logs in data/2026-10-05-lean/).
 LEAN_GLOBS = ("logs/robot_logs/2026_09_16-*/", "logs/robot_logs/2026_09_23-*/")
 LEAN_PROBES = {"A0": "data/2026-10-05-lean/probe_A0_s42.log", "A1a": "data/2026-10-05-lean/probe_A1a_s42.log"}
-LEAN_CATS = (("A0", True, "Flat\nwith offset"), ("A0", False, "Flat\nno offset"),
-             ("A1a", False, "Hierarchical"), ("A1a_DR", False, "Hierarchical\n+ DR"))
+LEAN_CATS = (("A0", True, "Flat, with offset"), ("A0", False, "Flat, no offset"),
+             ("A1a", False, "Hierarchical"), ("A1a_DR", False, "Hierarchical + DR"))
 LEAN_GROUPS = (("ankle_pitch", "ankle"), ("knee", "knee"), ("hip_pitch", "hip"), ("all", "all three"))
 
 
@@ -802,7 +802,7 @@ def fig_lean(rows, slopes, out, name_="f_lean"):
         ax.plot([x0 - 0.14, x0 + 0.14], [m, m], color=col, linewidth=1.4, zorder=2)
         facts[v, on, seed] = (m, len(cell))
   ax.set_xticks(range(len(LEAN_CATS)))
-  ax.set_xticklabels([c[2] for c in LEAN_CATS])
+  ax.set_xticklabels([c[2] for c in LEAN_CATS], rotation=30, ha="right", rotation_mode="anchor")
   ax.set_xlim(-0.6, len(LEAN_CATS) - 0.4)
   ax.set_ylabel("quiet-stand torso pitch (deg)\n(negative = leaning back)")
   ptf.write_panel_csv(out, name_, "pitch", ["variant", "seed", "run", "offset", "pitch_deg", "still_pct", "n_rows",
@@ -816,7 +816,7 @@ def fig_lean(rows, slopes, out, name_="f_lean"):
     bx.bar(xs, ys, width=w * 0.92, color=ptf.CHAIN_COLOR[v], zorder=2)
     srows += [{"variant": v, "group": g, "slope_rad_per_rad": round(y, 4)} for (g, _), y in zip(LEAN_GROUPS, ys)]
   bx.set_xticks(range(len(LEAN_GROUPS)))
-  bx.set_xticklabels([l for _, l in LEAN_GROUPS])
+  bx.set_xticklabels([l for _, l in LEAN_GROUPS], rotation=30, ha="right", rotation_mode="anchor")
   bx.set_xlabel("biased encoder(s)")
   bx.set_ylabel("simulated pitch per\nencoder bias (rad/rad)")
   ptf.write_panel_csv(out, name_, "slope", ["variant", "group", "slope_rad_per_rad"], srows)
