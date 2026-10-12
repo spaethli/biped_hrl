@@ -123,7 +123,7 @@ CADENCE_GLOB = "data/*/cadence_settling.json"   # merged by bundle name, the new
 MOCAP_CSV = "mocap_aligned.csv"   # mocap_align.py output, on the flight recorder's `t` grid
 PERIOD_RANGE = (0.35, 1.0)      # analyze_cadence_settling.PERIOD_RANGE (deploy yaml)
 ARM_THRESHOLDS = (0.05, 0.10, 0.15, 0.20)  # rad/s, analyze_cadence_settling.ARM_THRESHOLDS
-FIG_W = 5.9                     # in; ~15 cm thesis column
+FIG_W = 4.16                    # in; A5 report, textwidth ~10.6 cm
 SAVE_PDF = False                # save_pgf also writes a .pdf beside the .pgf (plot_report_figures.py)
 FIGURES = ("cadence", "settle", "upper", "smooth", "power",
            "track", "stand", "hier", "chain", "seedband")

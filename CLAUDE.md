@@ -146,7 +146,7 @@ scale & resolution, units & labels, colors, emphasis, ink:content, accessibility
   Run is a data decision: the owner made the one in `f_chain_clean`.)
 - After every figure change: render, VIEW the PNG, check the six attributes. Ask for the main point and venue if
   unstated.
-- Venue: thesis report, one column ~15 cm (`FIG_W = 5.9` in). Report style (owner, 2026-09-29): **sans-serif**
+- Venue: thesis report, A5 report, one column ~10.6 cm (`FIG_W = 4.16` in, since 2026-10-12; was 15 cm / 5.9 in). Report style (owner, 2026-09-29): **sans-serif**
   (the `.pgf` is typeset in `\sffamily`; `report_figures.tex` loads Helvetica), **nothing below 8 pt**, no grid
   lines, no top/right spines. Code: `scripts/plot_report_figures.py` (selection, style, and the
   generated `figures/report_figures/report_figures.tex` with every caption) over `scripts/plot_thesis_figures.py`
