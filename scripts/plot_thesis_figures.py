@@ -557,7 +557,7 @@ def fig_cadence(bundles, cad_rows, out_dir, name="f_cadence"):
   from matplotlib.lines import Line2D
   bottom_legend(fig, [
     Line2D([], [], color="0.3", marker="o", markersize=3.6, linestyle="",
-           label="one Run (mean, p5-p95)"),
+           label="one run (mean, p5-p95)"),
     Line2D([], [], color="0.3", marker="o", markersize=3.6, linestyle="",
            markerfacecolor="white",
            label=r"thin regime ($<$%d steps)" % THIN_STEPS)],
@@ -715,7 +715,7 @@ def fig_upper(bundles, out_dir, name="f_upper", title=None):
     Patch(facecolor="0.55", edgecolor="0.3", label="standing"),
     Patch(facecolor="0.55", edgecolor="0.3", alpha=REGIME_ALPHA["walking"],
           hatch=REGIME_HATCH["walking"], label="walking"),
-    Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="", label="one Run"),
+    Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="", label="one run"),
     Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="",
            markerfacecolor="white", label=f"< {THIN_STEPS * CTRL_DT:.0f} s in regime")], ncol=4, height=0.13)
   if title:
@@ -779,7 +779,7 @@ def fig_smooth(bundles, out_dir, name="f_smooth", downsample=True, window_s=60.0
   axes[0].set_title("commanded leg action rate (legs only, radians)")
   axes[1].set_ylabel(tex("jacc_legs_ctrl") + " (rad/s$^2$)")
   axes[1].set_title("measured leg joint acceleration (control rate)")
-  axes[1].set_xlabel("time since Run start (s)"
+  axes[1].set_xlabel("time since run start (s)"
                      + (f", first {window_s:.0f} s" if window_s else ""))
   bottom_legend(fig, policy_handles(picks), ncol=4, height=0.11)
   for key in rows:
@@ -859,7 +859,7 @@ def fig_power(bundles, out_dir, name="f_power", downsample=True):
   cap = float(np.percentile(np.concatenate(drawn), 99.9))
   over = int(sum(int((d > cap).sum()) for d in drawn))
   axes[0].set_ylim(0, cap * 1.05)
-  axes[-1].set_xlabel("time since Run start (s)")
+  axes[-1].set_xlabel("time since run start (s)")
   fig.suptitle(r"mechanical power $\sum_j |\tau_{\mathrm{est},j}\,\dot q_j|$ (measured), "
                "walking regime shaded", fontsize=8)
   from matplotlib.patches import Patch
@@ -995,7 +995,7 @@ def _track_fig(b, note, downsample=True, figsize=(FIG_W, 4.4), annotate=True):
               ha="left", fontsize=6, color="0.3")
     ax.set_ylabel(f"{AXIS_LABEL[axis]} ({unit})")
     ax.margins(y=0.22)
-  axes[-1].set_xlabel("time since Run start (s)")
+  axes[-1].set_xlabel("time since run start (s)")
   fig.align_ylabels(axes)   # tick labels of different widths left the units at different x
   fig.suptitle(f"velocity tracking vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
                fontsize=8)
@@ -1278,19 +1278,21 @@ def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
     scale = gs[i] if gs else (float(np.round(a.max(), 2)) or 1.0)
     sat = float((a[walk_h] > 0.98 * scale).mean()) if walk_h.any() else float("nan")
     sat_pct[axis] = 100 * sat
-    tt, yy = envelope_downsample(th - t[0], a / scale, downsample)
+    tt, yy = envelope_downsample(th - t[0], hdf[tgt_c].to_numpy(float) / scale, downsample)   # signed g
     axes[3].plot(tt, yy, color=colr, linewidth=0.7, zorder=3 if axis == "vx" else 2,
                  label=f"{AXIS_LABEL[axis]}: at the limit {100 * sat:.0f} % of walking")
     sat_rows += [{"policy": b.policy, "run": b.tag, "bundle": b.dir.name,
-                  "series": f"|g_{axis}| = |tgt_{axis}|/goal_scale" if gs else f"|tgt_{axis}|/observed_max",
+                  "series": f"g_{axis} = tgt_{axis}/goal_scale" if gs else f"tgt_{axis}/observed_max",
                   "t_s": round(float(x), 4), "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
                  for x, v in zip(tt, yy)]
   axes[3].axhline(1.0, color="0.4", linestyle=":", linewidth=0.7,
-                  label="action limit ($|g| = 1$)" if gs else "largest target in this Run")
-  axes[3].set_ylim(-0.05, 1.95)   # |g| <= 1 by construction: the two legend rows live in the headroom
-  axes[3].set_ylabel("high-level target (-)")
+                  label="action limits ($g = \\pm 1$)" if gs else "largest target in this run")
+  axes[3].axhline(-1.0, color="0.4", linestyle=":", linewidth=0.7)
+  axes[3].set_ylim(-1.1, 3.1)   # |g| <= 1 by construction: the two legend rows live in the headroom above +1
+  axes[3].set_yticks([-1, 0, 1])
+  axes[3].set_ylabel("high-level action $g$ (-)")
   axes[3].legend(loc="upper right", ncol=2, frameon=False)
-  axes[3].set_xlabel("time since Run start (s)")
+  axes[3].set_xlabel("time since run start (s)")
   fig.align_ylabels(axes)
   fig.suptitle(f"HL goal vs LL delivery vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
                fontsize=8)
