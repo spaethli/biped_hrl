@@ -284,7 +284,7 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   for i, (ax, key) in enumerate(zip(axes, keys)):
     write_rows(out, f"{fname}_{key}",
                dumbbell(ax, rows(key, stages), CHAIN_LABEL[key], show_labels=(i % ncol == 0),
-                        nticks=3, better="lower", none_note="fell", vs=vs))
+                        nticks=2, better="lower", none_note="fell", vs=vs))
   spare = axes[len(keys):]
   for ax in spare:
     ax.set_axis_off()
@@ -511,7 +511,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
       r = dumbbell(axes[i, j], [(name(t), ptf.policy_color(t),
                                  {s: [u[key] for u in pts[t, regime][s] if key in u] for s in stages})
                                 for t in LL_TAGS],
-                   lab, show_labels=(j == 0), nticks=3, better="higher", none_note="fell", vs=loss_vs(stages))
+                   lab, show_labels=(j == 0), nticks=2, better="higher", none_note="fell", vs=loss_vs(stages))
       rows += [{**x, "regime": regime, "term": key} for x in r]
     axes[0, j].set_title(regime.capitalize())
   write_rows(out, f"f_ll_reward{sfx}_all", rows)
@@ -561,7 +561,7 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   rows = []
   for i, (ax, t) in enumerate(zip(axes, terms)):
     r = dumbbell(ax, reward_rows(points, regime, lambda v, t=t: v[t], (t,), stages), TERM_LABEL[t],
-                 show_labels=(i % ncol == 0), nticks=3, better="higher", vs=loss_vs(stages))
+                 show_labels=(i % ncol == 0), nticks=2, better="higher", vs=loss_vs(stages))
     rows += [{**x, "term": t} for x in r]
   spare = axes[len(terms):]
   for ax in spare:
