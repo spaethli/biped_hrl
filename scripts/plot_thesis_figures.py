@@ -453,7 +453,7 @@ def fit_inside(fig):
     sp = fig.subplotpars
     fig.subplots_adjust(left=sp.left + (dl + 0.01) / W, right=sp.right - (dr + 0.01) / W)
   fig.canvas.draw()
-  for ax in fig.axes:   # x tick labels of a narrow panel that touch: keep every other tick
+  for ax in (a for a in fig.axes if getattr(a, "_thin_ticks", False)):   # numeric x ticks of a narrow panel that touch: keep every other
     lo, hi = sorted(ax.get_xlim())
     ticks = [t for t in ax.get_xticks() if lo <= t <= hi]
     boxes = [_inches(fig, l.get_window_extent(rend)) for l, t in zip(ax.get_xticklabels(), ax.get_xticks())

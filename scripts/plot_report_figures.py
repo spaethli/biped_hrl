@@ -197,11 +197,12 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
               for k, v in enumerate(stages[s])]
   ax.set_yticks(range(n))
   if show_labels:   # on shared y axes the labels are set ONCE: an empty list on a sibling wipes them all
-    ax.set_yticklabels([ptf.tex(r[0]).replace(" + ", r"\,+\,") for r in reversed(rows)])   # thin spaces: the longest row label sets the left margin
+    ax.set_yticklabels([ptf.tex(r[0]).replace(" + ", "\n+ ") for r in reversed(rows)])   # two lines: the longest row label sets the left margin
   ax.tick_params(axis="y", length=0, labelleft=show_labels)
   from matplotlib.ticker import MaxNLocator
   ax.xaxis.set_major_locator(MaxNLocator(nticks))
   ax.set_ylim(-0.7, n - 0.3)
+  ax._thin_ticks = True   # fit_inside drops every other tick where the labels touch
   ax.set_xlabel(textwrap.fill(xlabel, 18, break_long_words=False, break_on_hyphens=False))   # three narrow panels per row: a long label runs into its neighbour
   ax.margins(x=0.08)
   return out
@@ -787,7 +788,7 @@ def lean_slopes(root):
 
 def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
   if left_only:
-    fig, ax = plt.subplots(figsize=(0.65 * ptf.FIG_W, 2.6))
+    fig, ax = plt.subplots(figsize=(ptf.FIG_W, 2.6))
   else:
     fig, (ax, bx) = plt.subplots(1, 2, figsize=(ptf.FIG_W, 2.6), gridspec_kw={"width_ratios": [3, 2]})
   ax.axhline(0, color="0.6", linewidth=0.6, zorder=0)
