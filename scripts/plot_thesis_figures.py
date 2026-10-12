@@ -418,8 +418,64 @@ def check_panel_csv(out_dir: Path, names: list[str]) -> int:
   return bad
 
 
+FIT_W = None   # set to FIG_W by the report script: report figures must not overhang their canvas
+
+
+def _inches(fig, bb):
+  return bb.transformed(fig.dpi_scale_trans.inverted())
+
+
+def fit_inside(fig):
+  """Make every drawn artist land inside the figure rectangle without shrinking a font: legends lose
+  columns until they fit the width, the side margins absorb tick/row labels that hang out, and the
+  bottom rises by what a taller legend needs. savefig's bbox="tight" would otherwise grow the canvas."""
+  W, H = fig.get_size_inches()
+  fig.canvas.draw()
+  rend = fig.canvas.get_renderer()
+  for leg in list(fig.legends):
+    n = leg._ncols
+    while _inches(fig, leg.get_window_extent(rend)).width > W - 0.02 and n > 1:
+      n -= 1   # a drawn legend does not re-lay itself out on set_ncols: rebuild it
+      cols = [t.get_color() for t in leg.get_texts()]
+      new = fig.legend(handles=leg.legend_handles, labels=[t.get_text() for t in leg.get_texts()],
+                       loc="lower center", ncol=n, frameon=False, bbox_to_anchor=(0.5, 0.0))
+      for t, c in zip(new.get_texts(), cols):
+        t.set_color(c)
+      leg.remove()
+      leg = new
+      fig.canvas.draw()
+  for _ in range(4):
+    fig.canvas.draw()
+    bbs = [_inches(fig, ax.get_tightbbox(rend)) for ax in fig.axes]
+    dl, dr = max(0.0, -min(b.x0 for b in bbs)), max(0.0, max(b.x1 for b in bbs) - W)
+    if dl < 0.005 and dr < 0.005:
+      break
+    sp = fig.subplotpars
+    fig.subplots_adjust(left=sp.left + (dl + 0.01) / W, right=sp.right - (dr + 0.01) / W)
+  fig.canvas.draw()
+  for ax in fig.axes:   # x tick labels of a narrow panel that touch: keep every other tick
+    lo, hi = sorted(ax.get_xlim())
+    ticks = [t for t in ax.get_xticks() if lo <= t <= hi]
+    boxes = [_inches(fig, l.get_window_extent(rend)) for l, t in zip(ax.get_xticklabels(), ax.get_xticks())
+             if lo <= t <= hi and l.get_text()]
+    if any(a.x1 + 0.03 > b.x0 for a, b in zip(boxes, boxes[1:])):
+      ax.set_xticks(ticks[1::2] or ticks[:1])
+  fig.canvas.draw()
+  if fig.legends:
+    top = max(_inches(fig, leg.get_window_extent(rend)).y1 for leg in fig.legends)
+    gap = min(_inches(fig, ax.get_tightbbox(rend)).y0 for ax in fig.axes) - top
+    if gap < 0.05:
+      fig.subplots_adjust(bottom=fig.subplotpars.bottom + (0.05 - gap) / H)
+  fig.canvas.draw()
+  bb = fig.get_tightbbox(rend)   # a Figure returns inches already
+  print(f"[FIT] overhang l/r/b/t (in): {-bb.x0:+.2f} {bb.x1 - W:+.2f} {-bb.y0:+.2f} {bb.y1 - H:+.2f}")
+
+
 def save_pgf(fig, out_dir: Path, name: str) -> Path:
   out_dir.mkdir(parents=True, exist_ok=True)
+  if FIT_W:
+    print(f"[FIT] {name}", end=" ")
+    fit_inside(fig)
   path = out_dir / f"{name}.pgf"
   fig.savefig(path)
   if SAVE_PDF:

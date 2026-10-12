@@ -24,6 +24,7 @@ import argparse
 import csv
 import dataclasses
 import json
+import textwrap
 import sys
 import tempfile
 from pathlib import Path
@@ -47,9 +48,11 @@ plt.rcParams.update({
   "font.size": 8, "axes.labelsize": 8, "axes.titlesize": 8, "legend.fontsize": 8,
   "xtick.labelsize": 8, "ytick.labelsize": 8,
   "axes.grid": False, "axes.spines.top": False, "axes.spines.right": False,
+  "savefig.bbox": "tight", "savefig.pad_inches": 0,   # crop to the ink, no margin: the figure is the plot
 })
 NAMES = {"A0": "Flat", "A1a": "Hierarchical", "A1a_DR": "Hierarchical + DR"}
 ptf.DISPLAY_NAME.update(NAMES)
+ptf.FIT_W = ptf.FIG_W
 ptf.AXIS_LABEL.update({"vx": "sagittal", "vy": "lateral", "wz": "yaw rate"})
 
 
@@ -194,12 +197,12 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
               for k, v in enumerate(stages[s])]
   ax.set_yticks(range(n))
   if show_labels:   # on shared y axes the labels are set ONCE: an empty list on a sibling wipes them all
-    ax.set_yticklabels([ptf.tex(r[0]) for r in reversed(rows)])
+    ax.set_yticklabels([ptf.tex(r[0]).replace(" + ", r"\,+\,") for r in reversed(rows)])   # thin spaces: the longest row label sets the left margin
   ax.tick_params(axis="y", length=0, labelleft=show_labels)
   from matplotlib.ticker import MaxNLocator
   ax.xaxis.set_major_locator(MaxNLocator(nticks))
   ax.set_ylim(-0.7, n - 0.3)
-  ax.set_xlabel(xlabel)
+  ax.set_xlabel(textwrap.fill(xlabel, 18, break_long_words=False, break_on_hyphens=False))   # three narrow panels per row: a long label runs into its neighbour
   ax.margins(x=0.08)
   return out
 
@@ -288,7 +291,7 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   spare = axes[len(keys):]
   for ax in spare:
     ax.set_axis_off()
-  fig.subplots_adjust(hspace=0.55, wspace=0.5)   # room for the grey loss column
+  fig.subplots_adjust(hspace=0.55, wspace=0.8)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
     spare[0].legend(handles=stage_handles(stages, vs=vs, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
@@ -515,7 +518,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
       rows += [{**x, "regime": regime, "term": key} for x in r]
     axes[0, j].set_title(regime.capitalize())
   write_rows(out, f"f_ll_reward{sfx}_all", rows)
-  fig.subplots_adjust(hspace=1.0, wspace=0.55)
+  fig.subplots_adjust(hspace=1.0, wspace=0.85)
   ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages)), ncol=2, height=0.16 if len(rows_def) < 4 else 0.11)
   grey_loss_note(fig)
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
@@ -567,7 +570,7 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   for ax in spare:
     ax.set_axis_off()
   write_rows(out, f"f_reward_terms_{regime}{sfx}_all", rows)
-  fig.subplots_adjust(hspace=0.7, wspace=0.5)   # room for the grey loss column
+  fig.subplots_adjust(hspace=0.7, wspace=0.8)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
     spare[0].legend(handles=stage_handles(stages, vs=loss_vs(stages), seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
@@ -782,8 +785,11 @@ def lean_slopes(root):
   return out
 
 
-def fig_lean(rows, slopes, out, name_="f_lean"):
-  fig, (ax, bx) = plt.subplots(1, 2, figsize=(ptf.FIG_W, 2.6), gridspec_kw={"width_ratios": [3, 2]})
+def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
+  if left_only:
+    fig, ax = plt.subplots(figsize=(0.65 * ptf.FIG_W, 2.6))
+  else:
+    fig, (ax, bx) = plt.subplots(1, 2, figsize=(ptf.FIG_W, 2.6), gridspec_kw={"width_ratios": [3, 2]})
   ax.axhline(0, color="0.6", linewidth=0.6, zorder=0)
   panel, facts = [], {}
   for x, (v, on, _) in enumerate(LEAN_CATS):
@@ -807,19 +813,20 @@ def fig_lean(rows, slopes, out, name_="f_lean"):
   ax.set_ylabel("quiet-stand torso pitch (deg)\n(negative = leaning back)")
   ptf.write_panel_csv(out, name_, "pitch", ["variant", "seed", "run", "offset", "pitch_deg", "still_pct", "n_rows",
                                             "x"], panel)
-  bx.axhline(0, color="0.6", linewidth=0.6, zorder=0)
-  w = 0.38
-  srows = []
-  for k, v in enumerate(("A0", "A1a")):
-    xs = np.arange(len(LEAN_GROUPS)) + (k - 0.5) * w
-    ys = [slopes[v, g] for g, _ in LEAN_GROUPS]
-    bx.bar(xs, ys, width=w * 0.92, color=ptf.CHAIN_COLOR[v], zorder=2)
-    srows += [{"variant": v, "group": g, "slope_rad_per_rad": round(y, 4)} for (g, _), y in zip(LEAN_GROUPS, ys)]
-  bx.set_xticks(range(len(LEAN_GROUPS)))
-  bx.set_xticklabels([l for _, l in LEAN_GROUPS], rotation=30, ha="right", rotation_mode="anchor")
-  bx.set_xlabel("biased encoder(s)")
-  bx.set_ylabel("simulated pitch per\nencoder bias (rad/rad)")
-  ptf.write_panel_csv(out, name_, "slope", ["variant", "group", "slope_rad_per_rad"], srows)
+  if not left_only:
+    bx.axhline(0, color="0.6", linewidth=0.6, zorder=0)
+    w = 0.38
+    srows = []
+    for k, v in enumerate(("A0", "A1a")):
+      xs = np.arange(len(LEAN_GROUPS)) + (k - 0.5) * w
+      ys = [slopes[v, g] for g, _ in LEAN_GROUPS]
+      bx.bar(xs, ys, width=w * 0.92, color=ptf.CHAIN_COLOR[v], zorder=2)
+      srows += [{"variant": v, "group": g, "slope_rad_per_rad": round(y, 4)} for (g, _), y in zip(LEAN_GROUPS, ys)]
+    bx.set_xticks(range(len(LEAN_GROUPS)))
+    bx.set_xticklabels([l for _, l in LEAN_GROUPS], rotation=30, ha="right", rotation_mode="anchor")
+    bx.set_xlabel("biased encoder(s)")
+    bx.set_ylabel("simulated pitch per\nencoder bias (rad/rad)")
+    ptf.write_panel_csv(out, name_, "slope", ["variant", "group", "slope_rad_per_rad"], srows)
   handles = [Line2D([], [], color=ptf.CHAIN_COLOR[v], marker="s", linestyle="", markersize=4, label=NAMES[v])
              for v in ("A0", "A1a", "A1a_DR")]
   handles += [Line2D([], [], color="0.3", marker=m, linestyle="", markersize=3.4, label=f"seed {s}")
@@ -1332,6 +1339,12 @@ def write_latex(out, facts):
     f"Hierarchical + DR {nl('A1a_DR', False)}. Right: simulated standing pitch per unit of encoder bias on "
     "one sagittal leg joint or all three (slope over $\\pm0.032$\\,rad, seed 42, 64 environments); flat "
     f"{sl['A0', 'all']:+.2f}, hierarchical {sl['A1a', 'all']:+.2f}\\,rad/rad for all three joints."))
+  figs.append(("f_lean_left", "fig:lean_left",
+    "Standing upright needs a hand calibration for the flat policy and none for the hierarchy. Torso "
+    "pitch on the robot at zero command (IMU, still rows only: no leg joint faster than 0.1\\,rad/s), every "
+    "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed. Number of runs per seed (42 / 123): "
+    f"Flat with offset {nl('A0', True)}, without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, "
+    f"Hierarchical + DR {nl('A1a_DR', False)}."))
   c, srow = facts["share"]["cell"], facts["share"]["rows"]
   lo, mid = min(r["rse"] for r in srow), sorted({r["rse"] for r in srow})[1]
   tds = [r["td_per_foot"] for r in srow if r["variant"] == "A1a" and r["rse"] == lo]
@@ -1528,6 +1541,7 @@ def main() -> int:
   facts["train"] = trow
   lrow, lsl = lean_points(root), lean_slopes(root)
   facts["lean"] = {"cell": fig_lean(lrow, lsl, out), "slope": lsl, "n": len(lrow)}
+  fig_lean(lrow, lsl, out, "f_lean_left", left_only=True)
   srow = share_points(root)
   facts["share"] = {"cell": fig_standing_share(srow, out), "rows": srow}
   prow = payload_points(root)
