@@ -1342,12 +1342,12 @@ def _hier_fig(b, note, downsample=True, figsize=(FIG_W, 5.0)):
                   "t_s": round(float(x), 4), "value": round(float(v), 6), "unit": f"fraction of {scale:g}"}
                  for x, v in zip(tt, yy)]
   axes[3].axhline(1.0, color="0.4", linestyle=":", linewidth=0.7,
-                  label="action limits ($g = \\pm 1$)" if gs else "largest target in this run")
+                  label="_nolegend_" if gs else "largest target in this run")   # with a baked scale the caption names the dotted lines
   axes[3].axhline(-1.0, color="0.4", linestyle=":", linewidth=0.7)
   axes[3].set_ylim(-1.1, 3.1)   # |g| <= 1 by construction: the two legend rows live in the headroom above +1
   axes[3].set_yticks([-1, 0, 1])
-  axes[3].set_ylabel("high-level action $g$ (-)")
-  axes[3].legend(loc="upper right", ncol=2, frameon=False)
+  axes[3].set_ylabel("high-level action\n$g$ (-)")
+  axes[3].legend(loc="upper right", ncol=1, frameon=False)   # one column: two columns are wider than the panel and run over the y axis
   axes[3].set_xlabel("time since run start (s)")
   fig.align_ylabels(axes)
   fig.suptitle(f"HL goal vs LL delivery vs ground truth -- {tex(b.policy)}, {tex(b.tag)}",
