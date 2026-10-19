@@ -99,12 +99,14 @@ CHAIN_KEYS = ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad
               "omega_xy"]
 SIM_KEYS = {"walking": ["cot", "mech_power_w", "stride_period_s", "err_vx", "err_vy", "err_yaw", "act_legs_rad",
                         "jacc_legs", "orient_dev", "omega_xy"],
-            "standing": ["err_vx", "err_vy", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev", "omega_xy"]}
+            "standing": ["err_vx", "err_vy", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev"]}   # no roll/pitch rate: 2 columns x 3 rows on one page (owner, 2026-10-15)
 # f_chain_sim_walking is split over two pages (owner, 2026-10-15): two floats of one figure number, in 2 columns.
 # Part a: energy, gait clock, then the velocity errors; part b: smoothness and posture.
 CHAIN_SIM_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "err_vx", "err_vy"]),
                    ("b", ["act_legs_rad", "jacc_legs", "orient_dev", "omega_xy"]))
-CONTINUED = "f_chain_sim_walking_b"     # emitted with \ContinuedFloat: "Figure N (continued)"
+CHAIN_CLEAN_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad", "jacc_legs"]),
+                     ("b", ["orient_dev", "omega_xy"]))     # the robot figure, split like f_chain_sim_walking
+CONTINUED = {"f_chain_sim_walking_b", "f_chain_clean_b"}     # emitted with \ContinuedFloat: "Figure N (continued)"
 UPPER_VARIANTS = ("A0", "A1a", "A1a_DR")
 
 REWARD_SEQ = "data/2026-10-02-chain-seq/env_reward_seq.json"   # score_env_reward.py: robot + schedule-replay bridge Runs
@@ -221,7 +223,7 @@ def loss_vs(stages):
   return "hardware" if "hardware" in stages else "bridge"
 
 
-def stage_handles(stages=STAGE_KEYS, runs=True, loss=True, vs="bridge", seeds=False):
+def stage_handles(stages=STAGE_KEYS, runs=True, seeds=False):
   h = [Line2D([], [], marker=STAGE_MARKER[s][0], markersize=5, linestyle="", color="0.3",
               markerfacecolor="0.3" if STAGE_MARKER[s][1] else "white", label=STAGE_LABEL[s])
        for s in stages]
@@ -229,17 +231,7 @@ def stage_handles(stages=STAGE_KEYS, runs=True, loss=True, vs="bridge", seeds=Fa
     if "bench" in stages:
       h.append(Line2D([], [], marker="|", markersize=4, linewidth=0.9, color="0.3",
                       label="training plant: 5th to 95th\npercentile of environments"))
-  if loss and "bench" in stages and vs in stages:
-    h.append(Line2D([], [], linestyle="", label="grey numbers:\nloss from training\nplant to " + ("robot" if vs == "hardware" else "deployment plant") + ",\n% (+ = worse)"))
   return h
-
-
-def grey_loss_note(fig):
-  """Colour the loss entry of the figure's legend like the numbers it explains."""
-  for leg in fig.legends + [a.get_legend() for a in fig.axes if a.get_legend()]:
-    for t in leg.get_texts():
-      if t.get_text().startswith("grey numbers"):
-        t.set_color(LOSS_GREY)
 
 
 def write_rows(out, name_, rows):
@@ -291,7 +283,9 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   vs = loss_vs(stages)
   nrow = -(-len(keys) // ncol)
   npol = len({r[0] for r in rows(keys[0], stages)})
-  fig, axes = plt.subplots(nrow, ncol, figsize=(ptf.FIG_W, ((0.95 if ncol == 3 else 0.65) + 0.3 * npol) * nrow), sharey=True)
+  extra = 0.5 if nrow == 1 else 0     # a one-row figure has too little height for the legend band under it
+  fig, axes = plt.subplots(nrow, ncol, figsize=(ptf.FIG_W, ((0.95 if ncol == 3 else 0.65) + 0.3 * npol) * nrow + extra),
+                           sharey=True)
   axes = list(np.atleast_1d(axes).flat)
   for i, (ax, key) in enumerate(zip(axes, keys)):
     write_rows(out, f"{fname}_{key}",
@@ -303,11 +297,10 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   fig.subplots_adjust(hspace=0.55, wspace=0.8)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
-    spare[0].legend(handles=stage_handles(stages, vs=vs, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
+    spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, stage_handles(stages, vs=vs, seeds=True), ncol=2, height=0.11)
-  grey_loss_note(fig)
+    ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.11 + extra / fig.get_figheight())
   ptf.save_pgf(fig, out, fname)
 
 
@@ -528,8 +521,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
     axes[0, j].set_title(regime.capitalize())
   write_rows(out, f"f_ll_reward{sfx}_all", rows)
   fig.subplots_adjust(hspace=1.0, wspace=0.85)
-  ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages)), ncol=2, height=0.16 if len(rows_def) < 4 else 0.11)
-  grey_loss_note(fig)
+  ptf.bottom_legend(fig, (h := stage_handles(stages)), ncol=len(h), height=0.16 if len(rows_def) < 4 else 0.11)
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
 
 
@@ -559,8 +551,7 @@ def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
     rows += [{**x, "regime": regime} for x in r]
     ax.set_title(regime.capitalize())
   write_rows(out, f"f_reward_return{sfx}_all", rows)
-  ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages), seeds=True), ncol=2, height=0.26)
-  grey_loss_note(fig)
+  ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.26)
   ptf.save_pgf(fig, out, f"f_reward_return{sfx}")
 
 
@@ -582,11 +573,10 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
   fig.subplots_adjust(hspace=0.7, wspace=0.8)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
-    spare[0].legend(handles=stage_handles(stages, vs=loss_vs(stages), seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
+    spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, stage_handles(stages, vs=loss_vs(stages), seeds=True), ncol=2, height=0.18)
-  grey_loss_note(fig)
+    ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.18)
   ptf.save_pgf(fig, out, f"f_reward_terms_{regime}{sfx}")
 
 
@@ -1233,29 +1223,40 @@ def write_latex(out, facts):
          "sagittal and lateral velocity errors; the next shows the smoothness and posture metrics" if regime == "walking" else "") + ". "
       + sim.format(nb=nb, nr=nr, bsp=facts["bridge_spread_pct"][regime]))
     rest = (sim_rest.format(fell=fell) + " Velocity errors are against the simulator's true pelvis velocity, read in the IMU (torso) frame; "
-      "yaw-rate error, orientation deviation and roll/pitch rate are the IMU's. Leg joint acceleration is the second "
+      "yaw-rate error, orientation deviation" + (" and roll/pitch rate are" if regime == "walking" else " are")
+      + " the IMU's. Leg joint acceleration is the second "
       "difference of measured joint position at the control rate."
       + (" Cost of transport is the undirected, diagnostic form. Stride period is the realized interval "
          "between the same foot's steps, recovered from the dominant period of the knee joint." if regime == "walking" else "")
       + " " + cseeds + " " + CHAIN_LOSS_NOTE)
     cap_all = cap + rest
     if regime == "standing":
-      figs.append((f"f_chain_sim_{regime}", f"fig:chain_sim_{regime}", cap_all))
+      figs.append((f"f_chain_sim_{regime}", f"fig:chain_sim_{regime}",
+        "Standing metrics at the two simulated deploy stages; stages, markers and grey numbers as in "
+        "Fig.~\\ref{fig:chain_sim_walking}. The largest range between the runs of one seed "
+        f"at the deployment plant is {facts['bridge_spread_pct'][regime]:.0f}\\,\\% of their mean on any panel. "
+        + fell + " Velocity errors are against the simulator's true pelvis velocity, read in the IMU (torso) frame; "
+        "yaw-rate error and orientation deviation are the IMU's. Leg joint acceleration is the second difference of "
+        "measured joint position at the control rate. " + cseeds))
     else:
       figs.append(("f_chain_sim_walking_a", "fig:chain_sim_walking", cap))
-      figs.append((CONTINUED, None, "Smoothness and posture metrics; rows and markers as in the first part." + rest))
+      figs.append(("f_chain_sim_walking_b", None, "Smoothness and posture metrics; rows and markers as in the first part." + rest))
   nb, nr, fell = units("walking")
-  figs.append(("f_chain_clean", "fig:chain",
+  cap = (
     "Walking metrics at three deploy stages. Training plant and deployment plant as in "
     f"Fig.~\\ref{{fig:chain_sim_walking}} (one identical 253\\,s command schedule, one scorer; {nb} "
-    f"environments at the training plant and {nr} runs at the deployment plant per seed). {fell} Robot: runs of 2026-09-16 under operator commands "
+    f"environments at the training plant and {nr} at the deployment plant per seed). {fell} Robot: runs of 2026-09-16 under operator commands "
     "(diamond: mean of the runs), flown with seeds 42 and 123 only, so the robot mean covers two seeds and the "
-    "simulated stages three. " + cseeds + " The robot is not command-matched to the simulated stages and a "
-    "row shows a range, not a trend. One hierarchical s42 robot run is omitted as an outlier (1.25 to 2.9 "
+    "simulated stages three. The robot is not command-matched to the simulated stages and a "
+    "row shows a range, not a trend.")
+  rest = (" " + cseeds + " One hierarchical s42 robot run is omitted as an outlier (1.25 to 2.9 "
     "times its policy median on six of eight metrics). Cost of transport is the undirected, diagnostic form; "
     "its distance is the simulator's true velocity in simulation and motion capture or the onboard estimate "
     "on the robot. Leg joint acceleration is the second difference of measured joint position at the control "
-    "rate at all three stages. " + CHAIN_LOSS_NOTE_ROBOT))
+    "rate at all three stages. " + CHAIN_LOSS_NOTE_ROBOT)
+  figs.append(("f_chain_clean_a", "fig:chain", cap))
+  figs.append(("f_chain_clean_b", None, "Orientation deviation and roll/pitch rate; rows and markers as in the "
+               "first part." + rest))
   n = facts["upper_n"]
   figs.append(("f_upper_3pol", "fig:upper",
     "Upper-body joint speed and pose deviation on the robot, standing and walking. Bars: mean over all "
@@ -1436,7 +1437,7 @@ def write_latex(out, facts):
   body = "".join(f"""
 \\begin{{figure}}[p]
   \\centering
-  {cont if f == CONTINUED else ""}
+  {cont if f in CONTINUED else ""}
   \\input{{{f}.pgf}}
   \\caption{{{c}}}
   {lab + "{" + l + "}" if l else ""}
@@ -1521,10 +1522,11 @@ def main() -> int:
   print(f"[REPORT] chain: dropped {sorted(CHAIN_EXCLUDE)} and the cotcap runs")
   rows_w, n_w = chain_points(kept, root, "walking")
   rows_s, n_s = chain_points(kept, root, "standing")
-  fig_chain_seq(rows_w, CHAIN_KEYS, STAGE_KEYS, out, "f_chain_clean")
+  for part, keys in CHAIN_CLEAN_PARTS:
+    fig_chain_seq(rows_w, keys, STAGE_KEYS, out, f"f_chain_clean_{part}", ncol=2)
   for part, keys in CHAIN_SIM_PARTS:
     fig_chain_seq(rows_w, keys, STAGE_KEYS[:2], out, f"f_chain_sim_walking_{part}", ncol=2)
-  fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS[:2], out, "f_chain_sim_standing")
+  fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS[:2], out, "f_chain_sim_standing", ncol=2)
   facts["chain"] = {"walking": n_w, "standing": n_s}
   # Largest deployment-plant run-to-run spread, (max - min) / mean over the runs of one policy, over every
   # metric of the simulation figure: the number that justifies not drawing single deployment-plant runs.
