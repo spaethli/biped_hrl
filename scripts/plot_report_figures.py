@@ -234,6 +234,18 @@ def stage_handles(stages=STAGE_KEYS, runs=True, seeds=False):
   return h
 
 
+def one_row_legend(fig, handles, old_frac, pad=0.08):
+  """One-row legend under the axes in a band exactly as tall as the legend (+ pad, inches). `old_frac` is the
+  band fraction the figure was tuned with; the figure shrinks by the slack so the axes keep their size."""
+  leg = fig.legend(handles=handles, loc="lower center", ncol=len(handles), frameon=False)
+  fig.canvas.draw()
+  band = leg.get_window_extent().transformed(fig.dpi_scale_trans.inverted()).height + pad
+  leg.remove()
+  w, h = fig.get_size_inches()
+  fig.set_size_inches(w, h * (1 - old_frac) + band)
+  ptf.bottom_legend(fig, handles, ncol=len(handles), height=band / fig.get_figheight())
+
+
 def write_rows(out, name_, rows):
   out.mkdir(parents=True, exist_ok=True)
   if not rows:
@@ -300,7 +312,7 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
     spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.11 + extra / fig.get_figheight())
+    one_row_legend(fig, stage_handles(stages, seeds=True), 0.11 + extra / fig.get_figheight())
   ptf.save_pgf(fig, out, fname)
 
 
@@ -521,7 +533,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
     axes[0, j].set_title(regime.capitalize())
   write_rows(out, f"f_ll_reward{sfx}_all", rows)
   fig.subplots_adjust(hspace=1.0, wspace=0.85)
-  ptf.bottom_legend(fig, (h := stage_handles(stages)), ncol=len(h), height=0.16 if len(rows_def) < 4 else 0.11)
+  one_row_legend(fig, stage_handles(stages), 0.16 if len(rows_def) < 4 else 0.11)
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
 
 
@@ -551,7 +563,7 @@ def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
     rows += [{**x, "regime": regime} for x in r]
     ax.set_title(regime.capitalize())
   write_rows(out, f"f_reward_return{sfx}_all", rows)
-  ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.26)
+  one_row_legend(fig, stage_handles(stages, seeds=True), 0.26)
   ptf.save_pgf(fig, out, f"f_reward_return{sfx}")
 
 
@@ -576,7 +588,7 @@ def fig_reward_terms(points, out, regime, stages=STAGE_KEYS, sfx=""):
     spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
                     frameon=False, borderaxespad=0)
   else:
-    ptf.bottom_legend(fig, (h := stage_handles(stages, seeds=True)), ncol=len(h), height=0.18)
+    one_row_legend(fig, stage_handles(stages, seeds=True), 0.18)
   ptf.save_pgf(fig, out, f"f_reward_terms_{regime}{sfx}")
 
 
