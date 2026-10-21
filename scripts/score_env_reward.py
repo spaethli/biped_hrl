@@ -19,7 +19,9 @@ as RewardManager._step_reward.
 
 The other 10 (foot_gait, foot_clearance, foot_slip, soft_landing, self_collisions, angular_momentum,
 joint_acc_l2, joint_pos_limits, is_terminated) need contact, foot and whole-body state. On HARDWARE they
-are absent (never zero). On the BRIDGE they are recomputed by PLANT REPLAY: the log carries the plant's
+are absent (never zero); joint_acc_l2 is NOT recoverable from the robot's 50 Hz joint log: a finite
+difference of dq reads 0.41-0.65x the plant qacc while walking (0.24-0.38x standing), the ratio moving with
+the policy (2026-10-21, 58 bridge captures), so no constant corrects it. On the BRIDGE they are recomputed by PLANT REPLAY: the log carries the plant's
 full generalized state at every policy step, so it is put back into the bridge's own MJCF and one
 `mj_forward` per step (torque = the logged PD target, kp(q_des - q) - kd dq) gives contacts, forces,
 foot sites, angular momentum and qacc as the plant computed them. Height: `gt_h` (A1a telemetry) or,
