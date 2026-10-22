@@ -854,6 +854,7 @@ def score_regime(F, T, align, regime, vel_ref):
     dflt = F["default_pose"]
     out["ub_pose_dev"] = float(((mq[:, UB_SLOTS] - dflt[UB_SLOTS]) ** 2).mean(axis=1).mean())
     out["ub_arm_vel"] = float(np.abs(mdq[:, UB_SLOTS]).mean())
+    out["body_joint_vel"] = float(np.abs(mdq).mean())   # all 27 joints, same rows
 
     ank = {"ank_roll_span_l": "left_ankle_roll", "ank_roll_span_r": "right_ankle_roll",
            "ank_pitch_span_l": "left_ankle_pitch", "ank_pitch_span_r": "right_ankle_pitch"}

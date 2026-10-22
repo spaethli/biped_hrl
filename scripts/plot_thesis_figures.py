@@ -467,6 +467,10 @@ def fit_inside(fig):
     if gap < 0.05:
       fig.subplots_adjust(bottom=fig.subplotpars.bottom + (0.05 - gap) / H)
   fig.canvas.draw()
+  db = -fig.get_tightbbox(rend).y0    # an x label below the canvas (no figure legend to rise above)
+  if db > 0.005:
+    fig.subplots_adjust(bottom=fig.subplotpars.bottom + (db + 0.01) / H)
+    fig.canvas.draw()
   bb = fig.get_tightbbox(rend)   # a Figure returns inches already
   print(f"[FIT] overhang l/r/b/t (in): {-bb.x0:+.2f} {bb.x1 - W:+.2f} {-bb.y0:+.2f} {bb.y1 - H:+.2f}")
 

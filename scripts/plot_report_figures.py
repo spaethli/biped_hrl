@@ -83,6 +83,7 @@ CHAIN_LABEL = {
   "omega_xy": "roll/pitch rate (rad/s)",
   "err_vx": "sagittal velocity error (m/s)",
   "err_vy": "lateral velocity error (m/s)",
+  "body_joint_vel": "joint speed (rad/s)",
 }
 # The schedule-replay chain (2026-10-02): bench and bridge run ONE 253 s command schedule and go
 # through ONE scorer (ptf.chain_seq_units). The simulation figures add the ground-truth velocity
@@ -96,16 +97,16 @@ CHAIN_TAGS = ("A0_s42", "A0_s123", "A1a_s42", "A1a_s123", "A1a_DR_s42", "A1a_DR_
 # stride clock.
 CHAIN_SEED_TAGS = CHAIN_TAGS + ("A0_s7", "A1a_s7", "A1a_DR_s7")   # seed 7 has bench and bridge but no robot Runs
 CHAIN_KEYS = ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev",
-              "omega_xy"]
+              "omega_xy", "body_joint_vel"]
 SIM_KEYS = {"walking": ["cot", "mech_power_w", "stride_period_s", "err_vx", "err_vy", "err_yaw", "act_legs_rad",
-                        "jacc_legs", "orient_dev", "omega_xy"],
+                        "jacc_legs", "orient_dev", "omega_xy", "body_joint_vel"],
             "standing": ["err_vx", "err_vy", "err_yaw", "act_legs_rad", "jacc_legs", "orient_dev"]}   # no roll/pitch rate: 2 columns x 3 rows on one page (owner, 2026-10-15)
 # f_chain_sim_walking is split over two pages (owner, 2026-10-15): two floats of one figure number, in 2 columns.
 # Part a: energy, gait clock, then the velocity errors; part b: smoothness and posture.
 CHAIN_SIM_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "err_vx", "err_vy"]),
-                   ("b", ["act_legs_rad", "jacc_legs", "orient_dev", "omega_xy"]))
+                   ("b", ["act_legs_rad", "jacc_legs", "orient_dev", "omega_xy", "body_joint_vel"]))
 CHAIN_CLEAN_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad", "jacc_legs"]),
-                     ("b", ["orient_dev", "omega_xy"]))     # the robot figure, split like f_chain_sim_walking
+                     ("b", ["orient_dev", "omega_xy", "body_joint_vel"]))     # the robot figure, split like f_chain_sim_walking
 CONTINUED = {"f_chain_sim_walking_b", "f_chain_clean_b"}     # emitted with \ContinuedFloat: "Figure N (continued)"
 UPPER_VARIANTS = ("A0", "A1a", "A1a_DR")
 
@@ -273,6 +274,13 @@ def chain_points(kept, root, regime):
         if k == "stride_period_s":      # not a panel of ptf.fig_chain: the Run's realized period, from its regime json
           hw[k] = {t: [float(b.regimes[regime][k]) for b in kept if b.policy == t and regime in b.regimes
                        and np.isfinite(b.regimes[regime].get(k, np.nan))] for t in CHAIN_TAGS}
+          continue
+        if k == "body_joint_vel":       # not in the robot regime jsons (scored before the key existed): the scorer's rows
+          def body_vel(b):
+            F = bfr.read_flight(b.flight, None, None, b.run.get("entry"))
+            rows = F["walk_rows"] if regime == "walking" else ~F["walk_rows"]
+            return float(np.abs(F["df"][[f"meas_dq{j}" for j in range(27)]].to_numpy(float)[rows]).mean())
+          hw[k] = {t: [body_vel(b) for b in kept if b.policy == t and regime in b.regimes] for t in CHAIN_TAGS}
           continue
         d = pd.read_csv(Path(tmp) / f"chain_{k}.csv")
         d = d[(d["stage"] == "hardware") & d["value"].notna()]
@@ -1239,7 +1247,8 @@ def write_latex(out, facts):
       + " the IMU's. Leg joint acceleration is the second "
       "difference of measured joint position at the control rate."
       + (" Cost of transport is the undirected, diagnostic form. Stride period is the realized interval "
-         "between the same foot's steps, recovered from the dominant period of the knee joint." if regime == "walking" else "")
+         "between the same foot's steps, recovered from the dominant period of the knee joint. Joint speed is the "
+         "mean absolute measured joint velocity over all 27 joints." if regime == "walking" else "")
       + " " + cseeds + " " + CHAIN_LOSS_NOTE)
     cap_all = cap + rest
     if regime == "standing":
@@ -1265,9 +1274,10 @@ def write_latex(out, facts):
     "times its policy median on six of eight metrics). Cost of transport is the undirected, diagnostic form; "
     "its distance is the simulator's true velocity in simulation and motion capture or the onboard estimate "
     "on the robot. Leg joint acceleration is the second difference of measured joint position at the control "
-    "rate at all three stages. " + CHAIN_LOSS_NOTE_ROBOT)
+    "rate at all three stages. Joint speed is the mean absolute measured joint velocity over all 27 joints; on "
+    "the robot it also follows the operator's walking speed, which is not matched across policies. " + CHAIN_LOSS_NOTE_ROBOT)
   figs.append(("f_chain_clean_a", "fig:chain", cap))
-  figs.append(("f_chain_clean_b", None, "Orientation deviation and roll/pitch rate; rows and markers as in the "
+  figs.append(("f_chain_clean_b", None, "Orientation deviation, roll/pitch rate and joint speed; rows and markers as in the "
                "first part." + rest))
   n = facts["upper_n"]
   figs.append(("f_upper_3pol", "fig:upper",
