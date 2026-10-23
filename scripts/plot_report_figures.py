@@ -1216,9 +1216,9 @@ def write_latex(out, facts):
       "decision window, not a velocity: on the robot its velocity state is the IMU increment since its last "
       "decision, zero at each decision, so the green trace is read against zero, not against the command. "
       "The yaw-rate target is absolute. "
-      f"Bottom: the HL's signed action $g$, the velocity change divided by the goal scale "
+      f"Bottom: the HL's signed action $\\mathbf{{g}}$, the velocity change divided by the goal scale "
       f"fixed at training ({x['gs'][0]:.2f} m/s sagittal, {x['gs'][1]:.2f} m/s lateral); $\\pm 1$ (dotted lines) is the largest "
-      f"change it can request in one decision, in either direction. $|g|$ is at that limit in {x['sat']['vx']:.0f}\\,\\% (sagittal) "
+      f"change it can request in one decision, in either direction. Each component of $\\mathbf{{g}}$ is at that limit in {x['sat']['vx']:.0f}\\,\\% (sagittal) "
       f"and {x['sat']['vy']:.0f}\\,\\% (lateral) of walking steps. "
       f"{zoom_note(x['window'])}"))
   def units(regime):
