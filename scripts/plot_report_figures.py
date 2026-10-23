@@ -37,6 +37,7 @@ import bench_flight_recorder as bfr  # noqa: E402
 
 plt = ptf.plt
 from matplotlib.lines import Line2D  # noqa: E402
+from matplotlib.patches import Patch  # noqa: E402
 
 # Report style (SCIFIG rubric, owner's calls 2026-09-29): sans-serif for readability, nothing below
 # 8 pt, no grid lines or top/right box. `\sffamily` is what the pgf backend emits for sans-serif, so
@@ -811,24 +812,29 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
     fig, (ax, bx) = plt.subplots(1, 2, figsize=(ptf.FIG_W, 3.0), gridspec_kw={"width_ratios": [3, 2]})
   ax.axhline(0, color="0.6", linewidth=0.6, zorder=0)
   panel, facts = [], {}
+  seed_look = {"42": "standing", "123": "walking"}   # f_upper's two looks (solid / hatched) carry the two seeds here
+  w = 0.38
   for x, (v, on, _) in enumerate(LEAN_CATS):
     col = ptf.CHAIN_COLOR[v]
     for k, seed in enumerate(("42", "123")):
       cell = [r for r in rows if r["variant"] == v and r["offset"] == on and r["seed"] == seed
               and not np.isnan(r["pitch_deg"])]
-      x0 = x + (k - 0.5) * 0.36
-      jit = np.linspace(-0.08, 0.08, len(cell)) if len(cell) > 1 else [0.0]
+      if not cell:
+        continue
+      x0 = x + (k - 0.5) * w
+      m = float(np.mean([r["pitch_deg"] for r in cell]))
+      ax.bar(x0, m, width=w * 0.92, color=col, alpha=ptf.REGIME_ALPHA[seed_look[seed]], edgecolor=col,
+             linewidth=0.6, hatch=ptf.REGIME_HATCH[seed_look[seed]], zorder=1)
+      jit = np.linspace(-0.11, 0.11, len(cell)) if len(cell) > 1 else [0.0]
       for dx, r in zip(jit, cell):
-        ax.plot(x0 + dx, r["pitch_deg"], marker="o" if seed == "42" else "^", markersize=3.6, linestyle="",
-                color=col, zorder=3)
+        ax.plot(x0 + dx, r["pitch_deg"], marker="o", markersize=3.2, linestyle="", markeredgecolor="white",
+                markerfacecolor="0.15", markeredgewidth=0.5, zorder=3)   # a white rim keeps a dot readable on a dark bar
         panel.append({**r, "x": round(x0 + dx, 3)})
-      if cell:
-        m = float(np.mean([r["pitch_deg"] for r in cell]))
-        ax.plot([x0 - 0.14, x0 + 0.14], [m, m], color=col, linewidth=1.4, zorder=2)
-        facts[v, on, seed] = (m, len(cell))
+      facts[v, on, seed] = (m, len(cell))
   ax.set_xticks(range(len(LEAN_CATS)))
   ax.set_xticklabels([c[2] for c in LEAN_CATS], rotation=30, ha="right", rotation_mode="anchor")
   ax.set_xlim(-0.6, len(LEAN_CATS) - 0.4)
+  ax.margins(y=0.14)   # a Run point on the axis edge reads as clipped
   ax.set_ylabel("quiet-stand torso pitch (deg)\n(negative = leaning back)")
   ptf.write_panel_csv(out, name_, "pitch", ["variant", "seed", "run", "offset", "pitch_deg", "still_pct", "n_rows",
                                             "x"], panel)
@@ -846,11 +852,10 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
     bx.set_xlabel("biased encoder(s)")
     bx.set_ylabel("simulated pitch per\nencoder bias (rad/rad)")
     ptf.write_panel_csv(out, name_, "slope", ["variant", "group", "slope_rad_per_rad"], srows)
-  handles = [Line2D([], [], color=ptf.CHAIN_COLOR[v], marker="s", linestyle="", markersize=4, label=NAMES[v])
-             for v in ("A0", "A1a", "A1a_DR")]
-  handles += [Line2D([], [], color="0.3", marker=m, linestyle="", markersize=3.4, label=f"seed {s}")
-              for m, s in (("o", 42), ("^", 123))]
-  ptf.bottom_legend(fig, handles, ncol=5, height=0.14)
+  handles = [Patch(facecolor="0.55", edgecolor="0.3", alpha=ptf.REGIME_ALPHA[seed_look[sd]],
+                   hatch=ptf.REGIME_HATCH[seed_look[sd]], label=f"seed {sd}") for sd in ("42", "123")]
+  handles.append(Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="", label="one run"))
+  ptf.bottom_legend(fig, handles, ncol=3, height=0.12)
   ptf.save_pgf(fig, out, name_)
   return facts
 
@@ -1385,7 +1390,7 @@ def write_latex(out, facts):
   figs.append(("f_lean", "fig:lean",
     "Standing upright needs a hand calibration for the flat policy and none for the hierarchy. Left: torso "
     "pitch on the robot at zero command (IMU, still rows only: no leg joint faster than 0.1\\,rad/s), every "
-    "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed. Number of runs per seed (42 / 123): "
+    "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed (solid: seed 42, hatched: seed 123), dots are single runs. Number of runs per seed (42 / 123): "
     f"Flat with offset {nl('A0', True)}, without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, "
     f"Hierarchical + DR {nl('A1a_DR', False)}. Right: simulated standing pitch per unit of encoder bias on "
     "one sagittal leg joint or all three (slope over $\\pm0.032$\\,rad, seed 42, 64 environments); flat "
@@ -1393,7 +1398,7 @@ def write_latex(out, facts):
   figs.append(("f_lean_left", "fig:lean_left",
     "Standing upright needs a hand calibration for the flat policy and none for the hierarchy. Torso "
     "pitch on the robot at zero command (IMU, still rows only: no leg joint faster than 0.1\\,rad/s), every "
-    "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed. Number of runs per seed (42 / 123): "
+    "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed (solid: seed 42, hatched: seed 123), dots are single runs. Number of runs per seed (42 / 123): "
     f"Flat with offset {nl('A0', True)}, without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, "
     f"Hierarchical + DR {nl('A1a_DR', False)}."))
   c, srow = facts["share"]["cell"], facts["share"]["rows"]
