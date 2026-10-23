@@ -860,6 +860,40 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
   return facts
 
 
+def fig_lean_panels(rows, out, name_="f_lean_left_alt"):
+  """The quiet-stand pitch as four panels, one per policy variant, so no tick sits between the two seed bars: the
+  x axis names the seed (seed 123 hatched, as in f_upper's second look), the y numbers are on the left only, and
+  each panel carries a letter the caption explains."""
+  fig, axes = plt.subplots(1, len(LEAN_CATS), figsize=(ptf.FIG_W, 2.7), sharey=True)
+  fig.subplots_adjust(wspace=0.3)
+  look = {"42": "standing", "123": "walking"}
+  panel = []
+  for i, (ax, (v, on, _)) in enumerate(zip(axes, LEAN_CATS)):
+    ax.axhline(0, color="0.6", linewidth=0.6, zorder=0)
+    for k, seed in enumerate(("42", "123")):
+      cell = [r for r in rows if r["variant"] == v and r["offset"] == on and r["seed"] == seed
+              and not np.isnan(r["pitch_deg"])]
+      if not cell:
+        continue
+      col = ptf.CHAIN_COLOR[v]
+      ax.bar(k, np.mean([r["pitch_deg"] for r in cell]), width=0.8, color=col, alpha=ptf.REGIME_ALPHA[look[seed]],
+             edgecolor=col, linewidth=0.6, hatch=ptf.REGIME_HATCH[look[seed]], zorder=1)
+      ax.plot(k + (np.linspace(-0.22, 0.22, len(cell)) if len(cell) > 1 else np.zeros(1)), [r["pitch_deg"] for r in cell],
+              marker="o", markersize=3.2, linestyle="", markeredgecolor="white", markerfacecolor="0.15",
+              markeredgewidth=0.5, zorder=3)
+      panel += cell
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(["42", "123"])
+    ax.set_xlim(-0.6, 1.6)
+    ax.set_xlabel(f"seed\n({'abcd'[i]})")
+    ax.margins(y=0.14)
+  axes[0].set_ylabel("quiet-stand torso pitch (deg)\n(negative = leaning back)")
+  ptf.write_panel_csv(out, name_, "pitch", ["variant", "seed", "run", "offset", "pitch_deg", "still_pct", "n_rows"], panel)
+  ptf.bottom_legend(fig, [Line2D([], [], color="0.15", marker="o", markersize=2.8, linestyle="", label="one run")],
+                    ncol=1, height=0.1)
+  ptf.save_pgf(fig, out, name_)
+
+
 # ----------------------------------------------------------------------- training ----
 # Survival during training, every run on one machine (IAMS-ROS01, RTX 5070, 4096 envs, 10000 iterations)
 # so wall-clock compares. The deployed keeper trained on the cluster, so its exact-config replicates
@@ -1401,6 +1435,13 @@ def write_latex(out, facts):
     "unloaded run of 2026-09-16 and -23; bars are the mean per policy and seed (solid: seed 42, hatched: seed 123), dots are single runs. Number of runs per seed (42 / 123): "
     f"Flat with offset {nl('A0', True)}, without {nl('A0', False)}, Hierarchical {nl('A1a', False)}, "
     f"Hierarchical + DR {nl('A1a_DR', False)}."))
+  figs.append(("f_lean_left_alt", "fig:lean_left_alt",
+    "Standing upright needs a hand calibration for the flat policy and none for the hierarchy. Torso pitch "
+    "on the robot at zero command (IMU, still rows only: no leg joint faster than 0.1\\,rad/s), every unloaded "
+    "run of 2026-09-16 and -23. (a) Flat policy with the hand-calibrated joint offset, (b) Flat policy without "
+    "it, (c) Hierarchical, (d) Hierarchical + DR. In each panel one bar per seed (42 solid, 123 hatched) is the "
+    f"mean of that seed's runs and each dot is one run; runs per seed (42 / 123): (a) {nl('A0', True)}, (b) {nl('A0', False)}, "
+    f"(c) {nl('A1a', False)}, (d) {nl('A1a_DR', False)}. Negative pitch is leaning backwards."))
   c, srow = facts["share"]["cell"], facts["share"]["rows"]
   lo, mid = min(r["rse"] for r in srow), sorted({r["rse"] for r in srow})[1]
   tds = [r["td_per_foot"] for r in srow if r["variant"] == "A1a" and r["rse"] == lo]
@@ -1602,6 +1643,7 @@ def main() -> int:
   lrow, lsl = lean_points(root), lean_slopes(root)
   facts["lean"] = {"cell": fig_lean(lrow, lsl, out), "slope": lsl, "n": len(lrow)}
   fig_lean(lrow, lsl, out, "f_lean_left", left_only=True)
+  fig_lean_panels(lrow, out)
   srow = share_points(root)
   facts["share"] = {"cell": fig_standing_share(srow, out), "rows": srow}
   prow = payload_points(root)
