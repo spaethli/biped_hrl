@@ -75,9 +75,9 @@ CHAIN_EXCLUDE = {"2026_09_16-_10_07_A1a_s42"}
 CHAIN_VARIANTS = ("A0", "A1a", "A1a_DR")      # cotcap removed from the report (owner, 2026-09-29)
 CHAIN_LABEL = {
   "cot": "cost of transport (-)",
-  "mech_power_w": "mechanical power (W)",
+  "mech_power_w": "mean abs. joint power (W)",
   "stride_period_s": "stride period (s)",
-  "act_legs_rad": "leg action rate (rad)",
+  "act_legs_rad": "leg action rate (rad/step)",
   "jacc_legs": "leg joint accel. (rad/s\\textsuperscript{2})",
   "err_yaw": "yaw-rate error (rad/s)",
   "orient_dev": "orientation deviation (-)",
@@ -610,7 +610,7 @@ PAYLOAD_SCORES = "data/2026-10-05-payload"
 PAYLOAD_VARIANTS = ("A1a", "A1a_DR")
 PAYLOAD_TRAIN_MAX = 12.0     # PAYLOAD_DR_RANGE, config/h1_2/env_cfgs.py
 ROBOT_KG = 75.0              # bench_flight_recorder.MASS_G's mass; cot here is re-normalised by robot + payload
-PAYLOAD_PANELS = (("standing", "act_legs_rad", "standing leg\naction rate (rad)"),
+PAYLOAD_PANELS = (("standing", "act_legs_rad", "standing leg\naction rate (rad/step)"),
                   ("standing", "err_vx_est", "standing sagittal\nvelocity error (m/s)"),
                   ("walking", "cot", "walking cost\nof transport (-)"))
 
@@ -692,7 +692,7 @@ def fig_payload(rows, out, name_="f_payload"):
 SHARE_SRC = (("data/2026-09-21-rse-crossed", "*__stand_pay0*.log"), ("data/2026-10-09-rse-s7", "*_s7__stand_pay0*.log"))
 SHARE_MARKER = {"42": "o", "123": "^", "7": "D"}
 SHARE_EVAL_S = 600 * 0.02    # eval_steps x step_dt of the stand_pay0 cell
-SHARE_PANELS = (("act_legs_rad", "standing leg\naction rate (rad)"),
+SHARE_PANELS = (("act_legs_rad", "standing leg\naction rate (rad/step)"),
                 ("td_per_foot", "touchdowns per foot\nin a 12 s stand (-)"))
 
 
@@ -1457,14 +1457,14 @@ def write_latex(out, facts):
     "architectures trained at 5, 12 and 20\\,\\% standing environments, otherwise unchanged. Bench at zero "
     "command, 64 environments, 600 steps (12\\,s), two rollout seeds. With "
     f"{100 * lo:g}\\,\\% the hierarchical policy marches in place: standing leg action rate "
-    f"{c['act_legs_rad', 'A1a', lo][0]:.3f} rad against the flat policy's {c['act_legs_rad', 'A0', lo][0]:.4f} "
+    f"{c['act_legs_rad', 'A1a', lo][0]:.3f} rad/step against the flat policy's {c['act_legs_rad', 'A0', lo][0]:.4f} "
     f"({c['act_legs_rad', 'A1a', lo][0] / c['act_legs_rad', 'A0', lo][0]:.0f} times), and "
     f"{min(tds):.0f} to {max(tds):.0f} touchdowns per foot where a still stand gives 1 (the floor). At "
-    f"{100 * mid:g}\\,\\% it depends on the checkpoint: {span(hier(mid), 'act_legs_rad', '{:.4f}')} rad and "
+    f"{100 * mid:g}\\,\\% it depends on the checkpoint: {span(hier(mid), 'act_legs_rad', '{:.4f}')} rad/step and "
     f"{span(hier(mid), 'td_per_foot', '{:.2f}')} touchdowns per foot across its {len(hier(mid))} checkpoints, the "
-    f"seed-{worst['seed']} one standing with extra steps ({worst['act_legs_rad']:.4f} rad, "
+    f"seed-{worst['seed']} one standing with extra steps ({worst['act_legs_rad']:.4f} rad/step, "
     f"{worst['td_per_foot']:.2f} touchdowns per foot). At {100 * hi:g}\\,\\% its {len(hier(hi))} checkpoints "
-    f"stand at {span(hier(hi), 'act_legs_rad', '{:.4f}')} rad and {span(hier(hi), 'td_per_foot', '{:.2f}')} "
+    f"stand at {span(hier(hi), 'act_legs_rad', '{:.4f}')} rad/step and {span(hier(hi), 'td_per_foot', '{:.2f}')} "
     "touchdowns per foot. The flat policy never steps at any share and "
     f"moves within {min(flat):.4f} to {max(flat):.4f} rad, against {min(rep):.4f} to {max(rep):.4f} rad across "
     f"its {len(rep)} checkpoints at {100 * mid:g}\\,\\% alone. Touchdowns per foot = 12\\,s / the training plant's stride period. "
@@ -1484,7 +1484,7 @@ def write_latex(out, facts):
     "The robot carrying a backpack payload (runs of 2026-09-23). Both policies run the same frozen low level "
     "and differ only in the seed-42 high level, trained without (Hierarchical) or with (Hierarchical + DR) "
     f"payload randomisation over 0 to {PAYLOAD_TRAIN_MAX:g}\\,kg. At {top:g}\\,kg, beyond that range, the high "
-    f"level trained without randomisation loses the stand: standing leg action rate {a:.3f} against {b:.3f} rad "
+    f"level trained without randomisation loses the stand: standing leg action rate {a:.3f} against {b:.3f} rad/step "
     f"({a / b:.1f} times) and sagittal velocity error {e:.2f} against {g:.2f} m/s at zero sagittal command. It "
     "could not be commanded to walk (n/a), and both its runs were stopped after less than 13\\,s to avoid a "
     "fall, so its values understate the failure. The operator log records that both Hierarchical + DR runs "

@@ -140,7 +140,7 @@ HIERRUNS_SIZE = (11.0, 8.2)      # four panels
 # relatives and both as distinct from A0 (owner's call 2026-09-25, over Okabe-Ito). The
 # seed rides on the marker (`chain_style`). Keyed on the variant, a `_s<seed>` tag nobody has
 # listed yet is still coloured -- keyed on the full tag it silently fell back to grey.
-CHAIN_COLOR = {"A0": "#7B4F7A", "A0_DR": "#B393B1", "A1a": "#1F4E79", "A1a_DR": "#5B8FC0",
+CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": "#B393B1", "A1a": "#1F4E79", "A1a_DR": "#5B8FC0",
                "A1a_DR_cotcap": "#8FA3B5"}
 POLICY_ORDER = list(CHAIN_COLOR)
 # Display-name hooks, empty/symbolic by default so the thesis figures are unchanged; the report
@@ -835,8 +835,8 @@ def fig_smooth(bundles, out_dir, name="f_smooth", downsample=True, window_s=60.0
                      "t_s": round(float(x), 4), key: round(float(y), 6)}
                     for x, y in zip(tt, yy)]
     print(f"[PLOT] f_smooth: {p} = {b.tag} ({b.dir.name}), {len(steps)} policy steps")
-  axes[0].set_ylabel(tex("act_legs_rad") + " (rad)")
-  axes[0].set_title("commanded leg action rate (legs only, radians)")
+  axes[0].set_ylabel(tex("act_legs_rad") + " (rad/step)")
+  axes[0].set_title("commanded leg action rate (legs only, rad per step)")
   axes[1].set_ylabel(tex("jacc_legs_ctrl") + " (rad/s$^2$)")
   axes[1].set_title("measured leg joint acceleration (control rate)")
   axes[1].set_xlabel("time since run start (s)"
@@ -1464,7 +1464,7 @@ STAGES = ["training bench", "bridge sim", "hardware"]
 CHAIN_METRICS = [
   ("cot", "cot (diagnostic)"),
   ("mech_power_w", "mech\\_power\\_w (W)"),
-  ("act_legs_rad", "act\\_legs\\_rad (rad)"),
+  ("act_legs_rad", "act\\_legs\\_rad (rad/step)"),
   ("jacc_legs", "jacc\\_legs (rad/s$^2$)"),
   ("err_yaw", "err\\_yaw (rad/s)"),
   ("orient_dev", "orient\\_dev (-)"),

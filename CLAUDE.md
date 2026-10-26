@@ -159,7 +159,7 @@ scale & resolution, units & labels, colors, emphasis, ink:content, accessibility
   (different command profiles and instruments per stage; a line implies a trend). Seeds in a line plot ride on LINE STYLE (solid 42, dashed 123, dotted 7), never on markers: markers mean the deploy stage in the dumbbells (owner, 2026-10-06). Report names: A0 = **Flat**,
   A1a = **Hierarchical**, A1a_DR = **Hierarchical + DR**; code tags stay in CSVs.
 - **Palette (owner's call 2026-09-25, over Okabe-Ito: muted, hue = family, lightness = variant):**
-  A0 `#7B4F7A`, A0_DR `#B393B1`, A1a `#1F4E79`, A1a_DR `#5B8FC0`, A1a_DR_cotcap `#8FA3B5`; seed rides on the
+  A0 `#CC79A7`, A0_DR `#B393B1`, A1a `#1F4E79`, A1a_DR `#5B8FC0`, A1a_DR_cotcap `#8FA3B5`; seed rides on the
   marker. **Time-series signal roles (default for new figures, 2026-09-30,
   `TRACK_STYLE`):** command = DASHED dark grey `0.3` (piecewise constant, so dashes stay legible), HL target
   = dark green `#2E6B45`, onboard estimate = light ochre `#DDA15E`, ground truth = thin black on top. Never a
