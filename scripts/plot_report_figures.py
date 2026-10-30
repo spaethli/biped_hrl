@@ -265,27 +265,26 @@ def chain_points(kept, root, regime):
   replay units (ptf.chain_seq_units). The robot's Runs keep their own assembly (ptf.fig_chain: the
   regime jsons and the hardware jacc recomputation) and are read back from its panel CSVs."""
   hw = {}
-  if regime == "walking":
-    with tempfile.TemporaryDirectory() as tmp:
-      save_pdf, ptf.SAVE_PDF = ptf.SAVE_PDF, False
-      ptf.fig_chain(kept, Path(tmp), name="chain", with_notes=False)
-      ptf.SAVE_PDF = save_pdf
-      import pandas as pd
-      for k in CHAIN_KEYS:
-        if k == "stride_period_s":      # not a panel of ptf.fig_chain: the Run's realized period, from its regime json
-          hw[k] = {t: [float(b.regimes[regime][k]) for b in kept if b.policy == t and regime in b.regimes
-                       and np.isfinite(b.regimes[regime].get(k, np.nan))] for t in CHAIN_TAGS}
-          continue
-        if k == "body_joint_vel":       # not in the robot regime jsons (scored before the key existed): the scorer's rows
-          def body_vel(b):
-            F = bfr.read_flight(b.flight, None, None, b.run.get("entry"))
-            rows = F["walk_rows"] if regime == "walking" else ~F["walk_rows"]
-            return float(np.abs(F["df"][[f"meas_dq{j}" for j in range(27)]].to_numpy(float)[rows]).mean())
-          hw[k] = {t: [body_vel(b) for b in kept if b.policy == t and regime in b.regimes] for t in CHAIN_TAGS}
-          continue
-        d = pd.read_csv(Path(tmp) / f"chain_{k}.csv")
-        d = d[(d["stage"] == "hardware") & d["value"].notna()]
-        hw[k] = {t: d[d.policy == t]["value"].astype(float).tolist() for t in CHAIN_TAGS}
+  with tempfile.TemporaryDirectory() as tmp:
+    save_pdf, ptf.SAVE_PDF = ptf.SAVE_PDF, False
+    ptf.fig_chain(kept, Path(tmp), name="chain", regime=regime, with_notes=False)
+    ptf.SAVE_PDF = save_pdf
+    import pandas as pd
+    for k in CHAIN_KEYS if regime == "walking" else SIM_KEYS["standing"]:
+      if k in ("stride_period_s", "err_vx", "err_vy"):      # not panels of ptf.fig_chain: the Run's regime json (the velocity errors only where motion capture scored them)
+        hw[k] = {t: [float(b.regimes[regime][k]) for b in kept if b.policy == t and regime in b.regimes
+                     and np.isfinite(b.regimes[regime].get(k, np.nan))] for t in CHAIN_TAGS}
+        continue
+      if k == "body_joint_vel":       # not in the robot regime jsons (scored before the key existed): the scorer's rows
+        def body_vel(b):
+          F = bfr.read_flight(b.flight, None, None, b.run.get("entry"))
+          rows = F["walk_rows"] if regime == "walking" else ~F["walk_rows"]
+          return float(np.abs(F["df"][[f"meas_dq{j}" for j in range(27)]].to_numpy(float)[rows]).mean())
+        hw[k] = {t: [body_vel(b) for b in kept if b.policy == t and regime in b.regimes] for t in CHAIN_TAGS}
+        continue
+      d = pd.read_csv(Path(tmp) / f"chain_{k}.csv")
+      d = d[(d["stage"] == "hardware") & d["value"].notna()]
+      hw[k] = {t: d[d.policy == t]["value"].astype(float).tolist() for t in CHAIN_TAGS}
   units, counts = {}, {}
   for t in CHAIN_SEED_TAGS:
     for st in ("bench", "bridge"):
@@ -1318,6 +1317,14 @@ def write_latex(out, facts):
   figs.append(("f_chain_clean_a", "fig:chain", cap))
   figs.append(("f_chain_clean_b", None, "Orientation deviation, roll/pitch rate and joint speed; rows and markers as in the "
                "first part." + rest))
+  nb, nr, fell = units("standing")
+  figs.append(("f_chain_clean_standing", "fig:chain_standing",
+    "Standing metrics at three deploy stages. Stages, markers and grey numbers as in "
+    f"Fig.~\\ref{{fig:chain}} ({nb} environments at the training plant and {nr} at the deployment plant per seed). "
+    f"{fell} Robot: standing segments of the runs of 2026-09-16 (diamond: mean of the runs), seeds 42 and 123 only. "
+    "Robot velocity errors are against motion capture, so runs without capture are absent from those two panels. "
+    "Leg joint acceleration is the second difference of measured joint position at the control "
+    "rate at all three stages. " + cseeds + " " + CHAIN_LOSS_NOTE_ROBOT))
   n = facts["upper_n"]
   figs.append(("f_upper_3pol", "fig:upper",
     "Upper-body joint speed and pose deviation on the robot, standing and walking. Bars: mean over all "
@@ -1595,6 +1602,7 @@ def main() -> int:
   for part, keys in CHAIN_SIM_PARTS:
     fig_chain_seq(rows_w, keys, STAGE_KEYS[:2], out, f"f_chain_sim_walking_{part}", ncol=2)
   fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS[:2], out, "f_chain_sim_standing", ncol=2)
+  fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS, out, "f_chain_clean_standing", ncol=2)
   facts["chain"] = {"walking": n_w, "standing": n_s}
   # Largest deployment-plant run-to-run spread, (max - min) / mean over the runs of one policy, over every
   # metric of the simulation figure: the number that justifies not drawing single deployment-plant runs.
