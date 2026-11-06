@@ -163,7 +163,7 @@ def merge_seeds(rows):
   return list(merged.values()), detail
 
 
-def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_note=None, vs="bridge"):
+def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_note=None, vs="bridge", signed=False):
   """rows: [(label, colour, {stage: [values]})], top to bottom. One marker per stage at the stage
   mean and a light bar over the row's range of means; the bench's many envs also get a 5th-95th
   percentile whisker. Single Runs are not drawn (owner, 2026-10-03): bridge Runs agree to <1% and sat
@@ -175,7 +175,8 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
   `vs` ("bridge" | "hardware"; the robot where the figure plots it), (vs - bench) / |bench| in %, signed so that positive is always worse (the sign flips
   for a higher-is-better metric). Absolute values are not comparable between policies; this is.
   A row with a bench value and NO value at `vs` prints `none_note` in the same column ("fell"), so a
-  missing number is not read as a zero loss."""
+  missing number is not read as a zero loss. `signed` (presentation figures) prints the plain relative change
+  (vs - bench) / |bench| instead, so a lower return reads negative."""
   out = []
   detail = None
   if rows and len(rows[0]) == 4:      # seed rows: merge to one row per policy, no whisker
@@ -189,7 +190,7 @@ def dumbbell(ax, rows, xlabel, show_labels=True, nticks=4, better=None, none_not
                 alpha=0.3, zorder=1)
     loss = None
     if better and "bench" in means and vs in means and means["bench"]:
-      loss = 100 * (means[vs] - means["bench"]) / abs(means["bench"]) * (1 if better == "lower" else -1)
+      loss = 100 * (means[vs] - means["bench"]) / abs(means["bench"]) * (1 if better == "lower" or signed else -1)
       r = round(loss)
       ax.text(1.03, y, "0 %" if r == 0 else f"{'+' if r > 0 else '$-$'}{abs(r):d} %", color=LOSS_GREY,
               transform=ax.get_yaxis_transform(), ha="left", va="center")
@@ -314,7 +315,13 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   spare = axes[len(keys):]
   for ax in spare:
     ax.set_axis_off()
-  fig.subplots_adjust(hspace=0.55, wspace=0.8)   # room for the grey loss column
+  # hspace is a fraction of the panel height. Keep the row gap the three-policy figures have in inches, so the two-line
+  # x label stays clear when fewer policy rows make the panels shorter (default margins leave 0.77 of the height)
+  base = 0.95 if ncol == 3 else 0.65
+  h3 = 0.77 * ((base + 0.9) * nrow + extra) / (nrow + (nrow - 1) * 0.55)     # panel height with three policies, in
+  gap = 0.55 * h3                                                           # which the row gap is 0.55 panel heights
+  hs = gap / ((0.77 * fig.get_figheight() - (nrow - 1) * gap) / nrow)
+  fig.subplots_adjust(hspace=hs, wspace=0.8)   # room for the grey loss column
   if spare:     # the empty grid cell carries the legend instead of a band under the figure
     # anchored right of the cell's left edge: the previous panel's grey numbers hang into the cell's left margin
     spare[0].legend(handles=stage_handles(stages, seeds=True), loc="center left", bbox_to_anchor=(0.28, 0.5),
@@ -545,7 +552,7 @@ def fig_ll_reward(pts, out, stages=STAGE_KEYS, sfx=""):
   ptf.save_pgf(fig, out, f"f_ll_reward{sfx}")
 
 
-def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
+def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx="", signed=False):
   """On W&B's scale: return = per-step reward x episode length. Simulated stages only: every policy on
   all 16 active environment terms, hierarchies also on their high-level reward. With the robot: the 7
   terms reproducible at all three stages (Flat also all 16 at the bench and bridge), hierarchies on the
@@ -567,7 +574,7 @@ def fig_reward_return(points, hl, out, stages=STAGE_KEYS, sfx=""):
       dr += [(f"{name(t)}, 7 terms", ptf.policy_color(t), seven, t),
              (f"{name(t)}, all 16", ptf.policy_color(t), full, t)]
     r = dumbbell(ax, dr, f"return: per-step mean $\\times$ {EPISODE_S:g} s (-)", show_labels=(i == 0), better="higher",
-                 none_note="fell", vs=loss_vs(stages))
+                 none_note="fell", vs=loss_vs(stages), signed=signed)
     rows += [{**x, "regime": regime} for x in r]
     ax.set_title(regime.capitalize())
   write_rows(out, f"f_reward_return{sfx}_all", rows)
@@ -804,7 +811,7 @@ def lean_slopes(root):
   return out
 
 
-def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
+def fig_lean(rows, slopes, out, name_="f_lean", left_only=False, cats=LEAN_CATS):
   if left_only:
     fig, ax = plt.subplots(figsize=(ptf.FIG_W, 3.0))
   else:
@@ -813,7 +820,7 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
   panel, facts = [], {}
   seed_look = {"42": "standing", "123": "walking"}   # f_upper's two looks (solid / hatched) carry the two seeds here
   w = 0.38
-  for x, (v, on, _) in enumerate(LEAN_CATS):
+  for x, (v, on, _) in enumerate(cats):
     col = ptf.CHAIN_COLOR[v]
     for k, seed in enumerate(("42", "123")):
       cell = [r for r in rows if r["variant"] == v and r["offset"] == on and r["seed"] == seed
@@ -830,9 +837,9 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
                 markerfacecolor="0.15", markeredgewidth=0.5, zorder=3)   # a white rim keeps a dot readable on a dark bar
         panel.append({**r, "x": round(x0 + dx, 3)})
       facts[v, on, seed] = (m, len(cell))
-  ax.set_xticks(range(len(LEAN_CATS)))
-  ax.set_xticklabels([c[2] for c in LEAN_CATS], rotation=30, ha="right", rotation_mode="anchor")
-  ax.set_xlim(-0.6, len(LEAN_CATS) - 0.4)
+  ax.set_xticks(range(len(cats)))
+  ax.set_xticklabels([c[2] for c in cats], rotation=30, ha="right", rotation_mode="anchor")
+  ax.set_xlim(-0.6, len(cats) - 0.4)
   ax.margins(y=0.14)   # a Run point on the axis edge reads as clipped
   ax.set_ylabel("quiet-stand torso pitch (deg)\n(negative = leaning back)")
   ptf.write_panel_csv(out, name_, "pitch", ["variant", "seed", "run", "offset", "pitch_deg", "still_pct", "n_rows",
@@ -859,15 +866,15 @@ def fig_lean(rows, slopes, out, name_="f_lean", left_only=False):
   return facts
 
 
-def fig_lean_panels(rows, out, name_="f_lean_left_alt"):
+def fig_lean_panels(rows, out, name_="f_lean_left_alt", cats=LEAN_CATS):
   """The quiet-stand pitch as four panels, one per policy variant, so no tick sits between the two seed bars: the
   x axis names the seed (seed 123 hatched, as in f_upper's second look), the y numbers are on the left only, and
   each panel carries a letter the caption explains."""
-  fig, axes = plt.subplots(1, len(LEAN_CATS), figsize=(ptf.FIG_W, 2.7), sharey=True)
+  fig, axes = plt.subplots(1, len(cats), figsize=(ptf.FIG_W, 2.7), sharey=True)
   fig.subplots_adjust(wspace=0.3)
   look = {"42": "standing", "123": "walking"}
   panel = []
-  for i, (ax, (v, on, _)) in enumerate(zip(axes, LEAN_CATS)):
+  for i, (ax, (v, on, _)) in enumerate(zip(axes, cats)):
     ax.axhline(0, color="0.6", linewidth=0.6, zorder=0)
     for k, seed in enumerate(("42", "123")):
       cell = [r for r in rows if r["variant"] == v and r["offset"] == on and r["seed"] == seed
@@ -1603,6 +1610,10 @@ def main() -> int:
     fig_chain_seq(rows_w, keys, STAGE_KEYS[:2], out, f"f_chain_sim_walking_{part}", ncol=2)
   fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS[:2], out, "f_chain_sim_standing", ncol=2)
   fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS, out, "f_chain_clean_standing", ncol=2)
+  # presentation versions (owner, 2026-11-06): without Hierarchical + DR, the robot walking chain figure
+  no_dr = lambda key, stages: [r for r in rows_w(key, stages) if not r[3].startswith("A1a_DR")]
+  for part, keys in CHAIN_CLEAN_PARTS:
+    fig_chain_seq(no_dr, keys, STAGE_KEYS, out, f"f_chain_clean_{part}_presentation", ncol=2)
   facts["chain"] = {"walking": n_w, "standing": n_s}
   # Largest deployment-plant run-to-run spread, (max - min) / mean over the runs of one policy, over every
   # metric of the simulation figure: the number that justifies not drawing single deployment-plant runs.
@@ -1625,6 +1636,7 @@ def main() -> int:
   print(f"[REPORT] upper: runs per policy {n}")
   facts["upper_n"] = n
   ptf.fig_upper(pooled, out, name="f_upper_3pol")
+  ptf.fig_upper([b for b in pooled if b.policy != "A1a_DR"], out, name="f_upper_2pol_presentation", swap=True)
 
   points = load_reward_points(root)
   hlp = hl_points(root)
@@ -1634,6 +1646,8 @@ def main() -> int:
     fig_reward_return(points, hlp, out, stages, sfx)
     for regime in ("walking", "standing"):
       fig_reward_terms(points, out, regime, stages, sfx)
+  fig_reward_return({t: p for t, p in points.items() if not t.startswith("A1a_DR")},
+                    {t: p for t, p in hlp.items() if not t.startswith("A1a_DR")}, out, STAGE_KEYS, "_presentation", signed=True)
   facts["reward_seed"] = seed_facts(points, hlp, root)
   llp = ll_points(kept, root)
   for stages, sfx in ((STAGE_KEYS, ""), (STAGE_KEYS[:2], "_sim")):
@@ -1652,6 +1666,9 @@ def main() -> int:
   facts["lean"] = {"cell": fig_lean(lrow, lsl, out), "slope": lsl, "n": len(lrow)}
   fig_lean(lrow, lsl, out, "f_lean_left", left_only=True)
   fig_lean_panels(lrow, out)
+  no_dr_cats = (LEAN_CATS[1], LEAN_CATS[0], LEAN_CATS[2])     # presentation: no offset, offset fixed, Hierarchical
+  fig_lean(lrow, lsl, out, "f_lean_left_presentation", left_only=True, cats=no_dr_cats)
+  fig_lean_panels(lrow, out, "f_lean_left_alt_presentation", cats=no_dr_cats)
   srow = share_points(root)
   facts["share"] = {"cell": fig_standing_share(srow, out), "rows": srow}
   prow = payload_points(root)

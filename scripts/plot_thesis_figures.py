@@ -719,7 +719,7 @@ def fig_settle(bundles, cad_rows, out_dir, name="f_settle"):
 
 # ================================================================= f_upper ====
 
-def fig_upper(bundles, out_dir, name="f_upper", title=None):
+def fig_upper(bundles, out_dir, name="f_upper", title=None, swap=False):
   """The upper-body cost of the hierarchy, from the already-scored regime jsons.
 
   Bars are the per-policy mean, but every _Run_ is drawn over its bar: A1a's standing
@@ -729,6 +729,8 @@ def fig_upper(bundles, out_dir, name="f_upper", title=None):
   policies = policies_present(bundles)
   metrics = [("ub_arm_vel", "upper-body joint speed (rad/s)"),
              ("ub_pose_dev", "upper-body pose deviation (rad\\textsuperscript{2})")]
+  if swap:     # pose deviation left, joint speed right (presentation)
+    metrics.reverse()
   fig, axes = plt.subplots(1, 2, figsize=(FIG_W, 2.9))
   regimes = ("standing", "walking")
   width = 0.38
