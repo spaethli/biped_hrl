@@ -362,6 +362,14 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   invariant, so without the hip anchor from-scratch LLs walk with a ~20° hip twist (A0
   pins the same joints via its tightest ``variable_posture`` stds). ~No-op for aligned
   warm-started policies (deviation ≈ 0). 0 disables."""
+  ll_pose_mode: str = "hier"
+  """``"hier"`` (default, the A1a keeper): the hand-rolled clamped weighted-L2 posture
+  penalty (``ll_posture_coef``/``ll_posture_weights``). ``"a0"``: A0's own
+  ``variable_posture`` (exp reward, speed-scheduled per-joint stds copied from the env's
+  ``pose`` term) as a registry term, and the hand-rolled penalty is skipped."""
+  ll_pose_coef: float = 1.0
+  """Weight on the ``variable_posture`` reward when ``ll_pose_mode="a0"`` (A0's is 1.0).
+  Uncalibrated for the LL; inert in ``"hier"`` mode."""
   ll_posture_weights: dict[str, float] | None = field(
     default_factory=lambda: {
       r".*shoulder.*": 16.0,

@@ -53,9 +53,15 @@ _ROLLOVER_GEOM_IDS = [[0, 1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12, 13]]
 _ROLLOVER_BODY_IDS = [14, 15]
 
 
-def _stub(hl_cadence: bool) -> SimpleNamespace:
+_POSE_PARAMS = dict(command_name="twist", std_standing={".*": 0.05})
+
+
+def _stub(hl_cadence: bool, ll_pose_mode: str = "hier") -> SimpleNamespace:
   return SimpleNamespace(
     hl_cadence=hl_cadence,
+    ll_pose_mode=ll_pose_mode,
+    ll_pose_coef=0.31,
+    _pose_params=_POSE_PARAMS if ll_pose_mode == "a0" else None,
     **_COEFS,
     ll_pitchref_theta_hs=-0.253,
     ll_pitchref_theta_to=-0.275,
@@ -209,3 +215,12 @@ def test_ll_reward_manager_constructed_with_scale_by_dt_false():
   call_args = m.group(1)
   assert "scale_by_dt=False" in call_args
   assert "scale_by_dt=True" not in call_args
+
+
+def test_ll_reward_registry_pose_term_only_in_a0_mode():
+  assert "pose" not in HierarchicalRunner._build_ll_reward_terms(_stub(hl_cadence=True))
+  stub = _stub(hl_cadence=True, ll_pose_mode="a0")
+  pose = HierarchicalRunner._build_ll_reward_terms(stub)["pose"]
+  assert pose.func is mdp_rewards.variable_posture
+  assert pose.weight == stub.ll_pose_coef  # a reward: positive, unlike the cost terms
+  assert pose.params is _POSE_PARAMS

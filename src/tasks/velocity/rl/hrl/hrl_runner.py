@@ -105,6 +105,13 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     # behind the back and twist. Resolve the arms+waist joint ids once (0 coef -> no-op).
     self.ll_action_rate_coef: float = train_cfg.get("ll_action_rate_coef", 0.0)
     self.ll_posture_coef: float = train_cfg.get("ll_posture_coef", 0.0)
+    # "a0": A0's own variable_posture (registry term, stds copied from the env's `pose`)
+    # replaces the hand-rolled weighted-L2 posture penalty below. "hier" = the keeper's.
+    self.ll_pose_mode: str = train_cfg.get("ll_pose_mode", "hier")
+    assert self.ll_pose_mode in ("hier", "a0"), self.ll_pose_mode
+    self.ll_pose_coef: float = train_cfg.get("ll_pose_coef", 1.0)
+    self._pose_params = (dict(env.unwrapped.cfg.rewards["pose"].params)
+                         if self.ll_pose_mode == "a0" else None)
     # WL-D (2026-07-17): stand-still + A0-term-mirror LL-intrinsic levers, all 0 = off.
     self.ll_stand_still_coef: float = train_cfg.get("ll_stand_still_coef", 0.0)
     self.ll_angmom_coef: float = train_cfg.get("ll_angmom_coef", 0.0)
@@ -399,6 +406,12 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         params={"asset_cfg": self._torso_asset_cfg},
       ),
     }
+
+    if self.ll_pose_mode == "a0":
+      # A reward (exp, in [0,1]) like A0's own `pose`, so the weight is NOT negated.
+      terms["pose"] = RewardTermCfg(
+        func=mdp_rewards.variable_posture, weight=self.ll_pose_coef, params=self._pose_params,
+      )
 
     if self.hl_cadence:
       terms["cadence"] = RewardTermCfg(
@@ -878,7 +891,7 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
           goal_sum += r_goal.mean().item()
           # Upper-body deploy-hygiene penalties (ADR-0002): keep arms+waist near default
           # and low-jitter so the deployed LL stops drifting/twisting the arms.
-          if self.ll_posture_coef != 0.0:
+          if self.ll_posture_coef != 0.0 and self.ll_pose_mode == "hier":
             rd = uenv.scene["robot"].data
             dev = (rd.joint_pos[:, self._ub_joint_ids]
                    - rd.default_joint_pos[:, self._ub_joint_ids]).square()
@@ -1053,6 +1066,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
         **self._vel_err_log(vel_err_stats),
         **{f"hl/{k}": v for k, v in hl_losses.items()},
       }
+      if self.ll_pose_mode == "a0":
+        loss_dict["ll/pose_rew"] = ll_term_sums["pose"] / n_steps
       if self.hl_cadence:
         loss_dict["ll/cadence_rew"] = ll_term_sums["cadence"] / n_steps
         loss_dict["ll/pitchref_rew"] = ll_term_sums["pitchref"] / n_steps
