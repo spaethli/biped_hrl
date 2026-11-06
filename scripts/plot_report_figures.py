@@ -1612,8 +1612,9 @@ def main() -> int:
   fig_chain_seq(rows_s, SIM_KEYS["standing"], STAGE_KEYS, out, "f_chain_clean_standing", ncol=2)
   # presentation versions (owner, 2026-11-06): without Hierarchical + DR, the robot walking chain figure
   no_dr = lambda key, stages: [r for r in rows_w(key, stages) if not r[3].startswith("A1a_DR")]
+  swap = {"act_legs_rad": "body_joint_vel", "body_joint_vel": "act_legs_rad"}     # leg action rate <-> joint speed
   for part, keys in CHAIN_CLEAN_PARTS:
-    fig_chain_seq(no_dr, keys, STAGE_KEYS, out, f"f_chain_clean_{part}_presentation", ncol=2)
+    fig_chain_seq(no_dr, [swap.get(k, k) for k in keys], STAGE_KEYS, out, f"f_chain_clean_{part}_presentation", ncol=2)
   facts["chain"] = {"walking": n_w, "standing": n_s}
   # Largest deployment-plant run-to-run spread, (max - min) / mean over the runs of one policy, over every
   # metric of the simulation figure: the number that justifies not drawing single deployment-plant runs.
