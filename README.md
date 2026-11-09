@@ -160,7 +160,10 @@ cd deploy/robots/h1_2 && mkdir -p build && cd build && cmake .. && make
 ```
 
 The flat policy's ONNX goes in `config/policy/velocity/v0/exported/`, the hierarchy's two nets
-(`high_level.onnx`, `low_level.onnx`) in `config/policy/velocity_hrl/v0/exported/`. Before a
+(`high_level.onnx`, `low_level.onnx`) in `config/policy/velocity_hrl/v0/exported/`. The nine
+thesis policies (Flat, Hierarchical, Hierarchical + DR at seeds 42, 123, 7) ship ready to copy in,
+one folder each with a manifest, in
+[`config/policy/thesis_policies/`](deploy/robots/h1_2/config/policy/thesis_policies/). Before a
 hardware session, run the one-command readiness gate and check what is actually deployed:
 
 ```bash
