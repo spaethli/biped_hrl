@@ -51,7 +51,8 @@ plt.rcParams.update({
   "axes.grid": False, "axes.spines.top": False, "axes.spines.right": False,
   "savefig.bbox": "tight", "savefig.pad_inches": 0,   # crop to the ink, no margin: the figure is the plot
 })
-NAMES = {"A0": "Flat", "A1a": "Hierarchical", "A1a_DR": "Hierarchical + DR"}
+NAMES = {"A0": "Flat", "A1a": "Hierarchical", "A1a_DR": "Hierarchical + DR",
+         "A1a_pose": "Hierarchical + A0 pose", "A1a_DR_pose": "Hierarchical + DR, A0 pose"}
 ptf.DISPLAY_NAME.update(NAMES)
 ptf.FIT_W = ptf.FIG_W
 ptf.AXIS_LABEL.update({"vx": "sagittal", "vy": "lateral", "wz": "yaw rate"})
@@ -109,6 +110,9 @@ CHAIN_SIM_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "
 CHAIN_CLEAN_PARTS = (("a", ["cot", "mech_power_w", "stride_period_s", "err_yaw", "act_legs_rad", "jacc_legs"]),
                      ("b", ["orient_dev", "omega_xy", "body_joint_vel"]))     # the robot figure, split like f_chain_sim_walking
 CONTINUED = {"f_chain_sim_walking_b", "f_chain_clean_b"}     # emitted with \ContinuedFloat: "Figure N (continued)"
+# The A0-pose ablation (2026-11-06): the A1a recipe with A0's variable_posture in the low level (ll_pose_mode=a0),
+# without and with payload DR. Simulation stages only; the robot never flew these.
+POSE_TAGS = tuple(f"{v}_s{sd}" for v in ("A0", "A1a", "A1a_pose", "A1a_DR", "A1a_DR_pose") for sd in ("42", "123", "7"))
 UPPER_VARIANTS = ("A0", "A1a", "A1a_DR")
 
 REWARD_SEQ = "data/2026-10-02-chain-seq/env_reward_seq.json"   # score_env_reward.py: robot + schedule-replay bridge Runs
@@ -286,8 +290,15 @@ def chain_points(kept, root, regime):
       d = pd.read_csv(Path(tmp) / f"chain_{k}.csv")
       d = d[(d["stage"] == "hardware") & d["value"].notna()]
       hw[k] = {t: d[d.policy == t]["value"].astype(float).tolist() for t in CHAIN_TAGS}
+  return chain_sim_rows(root, CHAIN_SEED_TAGS, regime, hw)
+
+
+def chain_sim_rows(root, tags, regime, hw=None):
+  """-> (rows(key, stages), {(tag, stage): (n scored, n fell)}) for `tags` from the schedule-replay units alone;
+  `hw` ({key: {tag: [values]}}) adds the robot stage."""
+  hw = hw or {}
   units, counts = {}, {}
-  for t in CHAIN_SEED_TAGS:
+  for t in tags:
     for st in ("bench", "bridge"):
       units[t, st], n, fell = ptf.chain_seq_units(root, t, st, regime)
       counts[t, st] = (n, fell)
@@ -296,7 +307,7 @@ def chain_points(kept, root, regime):
     return [(name(t), ptf.policy_color(t),
              {st: hw.get(key, {}).get(t, []) if st == "hardware" else
                   [float(u[key]) for u in units[t, st] if u.get(key) is not None and np.isfinite(u[key])]
-              for st in stages}, t) for t in CHAIN_SEED_TAGS]     # 4-tuples: dumbbell averages the seeds
+              for st in stages}, t) for t in tags]     # 4-tuples: dumbbell averages the seeds
   return rows, counts
 
 
@@ -329,6 +340,18 @@ def fig_chain_seq(rows, keys, stages, out, fname, ncol=3):
   else:
     one_row_legend(fig, stage_handles(stages, seeds=True), 0.11 + extra / fig.get_figheight())
   ptf.save_pgf(fig, out, fname)
+
+
+def fig_chain_pose(root, out):
+  """f_chain_pose_{walking_a,walking_b,standing}: the simulation chain (training plant, deployment plant) of the
+  A0-pose ablation next to Flat, Hierarchical and Hierarchical + DR. Same panels, scorer and rows as f_chain_sim_*."""
+  counts = {}
+  for regime, parts in (("walking", CHAIN_SIM_PARTS), ("standing", (("", SIM_KEYS["standing"]),))):
+    rows, counts[regime] = chain_sim_rows(root, POSE_TAGS, regime)
+    for part, keys in parts:
+      fig_chain_seq(rows, keys, STAGE_KEYS[:2], out, f"f_chain_pose_{regime}" + (f"_{part}" if part and regime == "walking" else ""), ncol=2)
+  fell = {t: k for c in counts.values() for t, k in ((f"{name(t, True)} {st}", k) for (t, st), (_, k) in c.items()) if k}
+  print(f"[REPORT] chain_pose: units that fell {fell or 'none'}")
 
 
 # ------------------------------------------------------------------------ rewards ----
@@ -1546,8 +1569,13 @@ def write_latex(out, facts):
 def main() -> int:
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
   ap.add_argument("--out", default=str(ptf.REPO / "figures/report_figures"))
-  out = Path(ap.parse_args().out)
+  ap.add_argument("--only-pose", action="store_true", help="only the simulation chain of the A0-pose ablation")
+  args = ap.parse_args()
+  out = Path(args.out)
   ptf.SAVE_PDF = True
+  if args.only_pose:
+    fig_chain_pose(ptf.REPO, out)
+    return 0
   ptf.set_decimation(10000)   # 2500 envelope buckets: 1000 turned stride-rate bursts into solid bands
   root = ptf.REPO
   day = ptf.load_bundles(root, ["logs/robot_logs/2026_09_16-*/"])

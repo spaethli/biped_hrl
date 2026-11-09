@@ -141,7 +141,9 @@ HIERRUNS_SIZE = (11.0, 8.2)      # four panels
 # seed rides on the marker (`chain_style`). Keyed on the variant, a `_s<seed>` tag nobody has
 # listed yet is still coloured -- keyed on the full tag it silently fell back to grey.
 CHAIN_COLOR = {"A0": "#CC79A7", "A0_DR": "#B393B1", "A1a": "#1F4E79", "A1a_DR": "#5B8FC0",
-               "A1a_DR_cotcap": "#8FA3B5"}
+               "A1a_DR_cotcap": "#8FA3B5",
+               # A0-pose ablation (2026-11-06, provisional): teal = hierarchical recipe with another low-level pose reward
+               "A1a_pose": "#2A7F7A", "A1a_DR_pose": "#74B3AE"}
 POLICY_ORDER = list(CHAIN_COLOR)
 # Display-name hooks, empty/symbolic by default so the thesis figures are unchanged; the report
 # (plot_report_figures.py) sets plain names: A0 -> "Flat", vx -> "sagittal", ...
