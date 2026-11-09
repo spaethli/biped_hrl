@@ -1,0 +1,15 @@
+{
+ "policy": "Hierarchical",
+ "code_tag": "A1a_s123",
+ "seed": 123,
+ "train_task": "Unitree-H1_2-Flat-A1",
+ "source_run": "2026-09-05_17-59-38_a1a_fullmirror_cot5_standing12_s123",
+ "checkpoint": "model_10000.pt",
+ "deploy_into": "deploy/robots/h1_2/config/policy/velocity_hrl/v0/exported/",
+ "deploy_cfg": "deploy_est.yaml",
+ "md5": {
+  "high_level.onnx": "37ed78dd6bc53b54af15c444d92d107a",
+  "low_level.onnx": "fff198a9d51a8c938d20f97fde951f9c"
+ },
+ "provenance": "The run directory's own export, i.e. exactly what deploy_provenance.py --stage copied for the bridge and robot Runs. Weights verified identical to model_10000.pt by a fresh re-export (2026-11-09)."
+}
