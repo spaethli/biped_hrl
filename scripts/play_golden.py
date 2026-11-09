@@ -37,6 +37,7 @@ V2, A1 = "logs/rsl_rl/h1_2_velocity_v2", "logs/rsl_rl/h1_2_velocity_a1_v2"
 A1A = f"{A1}/2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42/model_10000.pt"
 A0 = f"{V2}/2026-09-14_16-33-58_a0_standing12_s42/model_10000.pt"
 HADAPT = f"{A1}/2026-09-08_07-48-18_a1a_hadapt_e_cot5_keeperLL_standing12_s42/model_10000.pt"
+LEGACY = f"{A1}/2026-07-14_16-03-57_a1_td3_pose0p5shw16-4_ar0p02_cadhl_cot0p2_kl0p01_rs20_s42/model_10000.pt"
 T_A1, T_A0 = "Unitree-H1_2-Flat-A1", "Unitree-H1_2-Flat"
 PHI = ["--hl-obs-e-source", "phi", "--phi-dir", "data/2026-09-08-wp5-phase2-keeper/models"]
 
@@ -70,6 +71,9 @@ MATRIX["a1a_lean_grav"] = (T_A1, A1A, ["--eval-cmd-vx", "0", "--probe-lean", "40
 MATRIX["a1a_payload"] = (T_A1 + "-Payload", A1A, ["--eval-steps", "600", "--eval-payload-kg", "7.5"],
                          "tags")
 MATRIX["hadapt_phi"] = (T_A1, HADAPT, ["--eval-steps", "600", *PHI], "tags")
+# A pre-2026-07-16 checkpoint: no baked goal_scale and an absence-shimmed agent.yaml key, so the
+# [SHIM] fix-up path runs (every other row carries a baked scale).
+MATRIX["legacy_bench"] = (T_A1, LEGACY, ["--eval-steps", "600"], "tags")
 
 SKIP_TAGS = {"INFO", "WARN"}   # human-facing, carry paths and timings; no parser reads them
 TAG_RE = re.compile(r"^\s*\[([A-Z_]+)\]\s?(.*)$")

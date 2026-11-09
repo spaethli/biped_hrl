@@ -1293,8 +1293,8 @@ class HierarchicalRunner(VelocityOnPolicyRunner):
     if hl_state:
       self.hl.load_state_dict(hl_state)
     # Pin the baked goal scale so inference decodes g exactly as trained; learn() restores
-    # the live path for resumed training. Absent on pre-2026-07-16 checkpoints -> play.py's
-    # absence shim supplies the training value (same pattern as the hl_obs_vel shim).
+    # the live path for resumed training. Absent on pre-2026-07-16 checkpoints -> the replay
+    # scripts pin the training value via checkpoint_structure.pin_trained_goal_scale.
     goal_scale = saved.get("goal_scale")
     if goal_scale is not None:
       self.goal_space.freeze_scale(goal_scale.to(self.device))

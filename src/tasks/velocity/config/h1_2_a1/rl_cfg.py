@@ -602,7 +602,7 @@ class HrlRunnerCfg(RslRlOnPolicyRunnerCfg):
   (the "no entrainment" reads were the structure_keys eval bug); v3 widened to (0.35..1.0);
   v5/v6 tried (0.35..1.3) for the d(T) slow band and both LOST entrainment (band is a
   curriculum variable — the unfollowable 1.0–1.3 slice diluted the signal); v7 stages back to
-  (0.35..1.0). Old runs restore their own saved range via play.py structure_keys.
+  (0.35..1.0). Old runs restore their own saved range via checkpoint_structure's structure_keys.
 
   **CLI-settable, with Python syntax only** (re-verified 2026-08-25): pass
   ``--agent.cadence-period-range "(0.625,0.625)"``. The space-separated form

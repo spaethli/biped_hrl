@@ -51,6 +51,7 @@ SSA = REPO / "scripts/score_stand_attitude.py"
 DRDY = REPO / "scripts/deploy_readiness.py"
 EVR = REPO / "src/tasks/velocity/eval/rollout.py"
 BEN = REPO / "src/tasks/velocity/eval/probes/bench.py"
+CS = REPO / "src/tasks/velocity/rl/hrl/checkpoint_structure.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -468,6 +469,24 @@ MUTATIONS = [
   ("a bench key dropped from SEED_KEYS without the recorded [BENCH] contract", BEN,
    '"stance_w_td", ', "",
    "test_seed_keys_match_the_recorded_bench_seed_line"),
+
+  # Checkpoint structure (2026-11-09): onnx_parity's hand copy of the restore dropped
+  # `hl_obs_e` and crashed on every H-adapt checkpoint ([256, 99] vs [256, 94]); one copy now.
+  ("structure keys drop hl_obs_e (onnx_parity's drifted copy)", CS,
+   '"hl_obs_vel", "hl_obs_e",', '"hl_obs_vel",',
+   "test_restores_every_structure_key_including_hl_obs_e"),
+  ("absent hl_obs_vel keeps the True default (every pre-velobs TD3 mis-builds 94 vs 92)", CS,
+   '    restored["hl_obs_vel"] = False', "    pass",
+   "test_absent_flags_restore_false_where_the_default_flipped"),
+  ("a partial nested cfg replaces its defaults instead of merging over them", CS,
+   "v = _deep_merge(asdict(cur), v)", "v = v",
+   "test_a_partial_nested_cfg_merges_over_its_defaults"),
+  ("goal-scale shim ignores the twist curriculum (pins the base range, not the trained one)", CS,
+   "          setattr(train_ranges, axis, stage[axis])", "          pass",
+   "test_goal_scale_shim_pins_the_trained_scale_and_restores_the_live_ranges"),
+  ("goal-scale shim leaves the TRAINING ranges on the live replay env", CS,
+   "  live.lin_vel_x, live.lin_vel_y, live.ang_vel_z = live_ranges\n", "",
+   "test_goal_scale_shim_pins_the_trained_scale_and_restores_the_live_ranges"),
 
   # bench_flight_recorder pairing/alignment (2026-09-14): the 2026-09-07 A1a session broke
   # both assumptions the tool had inherited from how the 2026-08-27 runs were operated.

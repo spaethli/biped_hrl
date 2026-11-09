@@ -1,7 +1,8 @@
 """Checkpoint-agnostic ONNX-vs-PyTorch parity check for exported deploy policies.
 
-Rebuilds the run structure exactly like ``scripts/play.py`` (restoring the
-structure-determining keys from ``params/agent.yaml``), builds the torch policy/
+Rebuilds the run structure exactly like ``scripts/play.py`` (the shared
+``checkpoint_structure`` module: the structure-determining keys from ``params/agent.yaml``,
+then the trained goal scale), builds the torch policy/
 policies in eval mode, exports ONNX to a temp dir via the runner's own export
 function (``export_hierarchy_to_onnx`` for A1, else ``export_policy_to_onnx``), then
 feeds ``--num-samples`` random obs vectors through both the torch inference path and
@@ -28,57 +29,14 @@ import numpy as np
 import onnx
 import onnxruntime
 import torch
-import yaml
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.rl.exporter_utils import list_to_csv_str
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
-
-
-def _deep_merge(default: dict, override: dict) -> dict:
-  """Nested dict merge (mirrors scripts/play.py's ``_deep_merge``)."""
-  out = dict(default)
-  for k, v in override.items():
-    if isinstance(v, dict) and isinstance(out.get(k), dict):
-      out[k] = _deep_merge(out[k], v)
-    else:
-      out[k] = v
-  return out
-
-
-def _restore_structure(agent_cfg, env_cfg, resume_path: Path) -> None:
-  """Mirrors scripts/play.py's TRAINED_MODE structure-restore block: rebuild the run
-  the checkpoint was trained with (goal space, hl_algorithm, ...), not the current
-  task defaults, or the torch net gets built with the wrong dims."""
-  params_yaml = resume_path.parent / "params" / "agent.yaml"
-  if not params_yaml.exists():
-    return
-  saved = yaml.full_load(params_yaml.read_text())
-  structure_keys = ("c", "goal_components", "goal_weights", "hl_algorithm",
-                    "hl_ppo", "hl_td3", "relabeling", "gamma_hi", "hl_target_mode",
-                    "hl_obs_vel", "hl_cadence", "cadence_period_range", "ll_cadence_coef",
-                    "hl_cot_coef", "hl_cadence_source", "cadence_swing_time",
-                    "cadence_duty_range", "hl_velocity_goals_only")
-  restored = {k: saved[k] for k in structure_keys
-              if k in saved and hasattr(agent_cfg, k)}
-  if "hl_velocity_goals_only" not in saved and hasattr(agent_cfg, "hl_velocity_goals_only"):
-    restored["hl_velocity_goals_only"] = False
-  if "hl_obs_vel" not in saved and hasattr(agent_cfg, "hl_obs_vel"):
-    restored["hl_obs_vel"] = False
-  for k, v in restored.items():
-    cur = getattr(agent_cfg, k)
-    if isinstance(v, dict) and cur is not None and not isinstance(cur, dict):
-      v = _deep_merge(asdict(cur), v)
-    setattr(agent_cfg, k, v)
-  if "goal_components" in restored and "goal" in env_cfg.observations:
-    from src.tasks.velocity.rl.hrl.goal_space import goal_dim
-    env_cfg.observations["goal"].terms["goal"].params["dim"] = goal_dim(
-      tuple(restored["goal_components"])
-    )
-  if restored:
-    print(f"[INFO] Restored run structure from {params_yaml.name}: {list(restored)}")
+from src.tasks.velocity.rl.hrl.checkpoint_structure import (
+  pin_trained_goal_scale, restore_run_structure)
 
 
 def _mlp_forward(model, x: torch.Tensor) -> torch.Tensor:
@@ -150,7 +108,7 @@ def main():
 
   env_cfg = load_env_cfg(args.task, play=True)
   agent_cfg = load_rl_cfg(args.task)
-  _restore_structure(agent_cfg, env_cfg, resume_path)
+  restore_run_structure(agent_cfg, env_cfg, resume_path)
   env_cfg.scene.num_envs = 1
 
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
@@ -159,6 +117,8 @@ def main():
   runner_cls = load_runner_cls(args.task) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
   runner.load(str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device)
+  # Export what play.py --export-onnx exports: on a pre-2026-07-16 checkpoint, the trained scale.
+  pin_trained_goal_scale(runner, env, lambda: load_env_cfg(args.task))
   runner.alg.eval_mode()
   if hasattr(runner, "hl"):
     runner.hl.eval_mode()
