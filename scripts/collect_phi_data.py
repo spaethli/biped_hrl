@@ -36,8 +36,9 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
-from play import restore_run_structure
 from src.tasks.velocity.mdp.observations import E_NAMES, env_latent_e
+from src.tasks.velocity.rl.hrl.checkpoint_structure import (
+  pin_trained_goal_scale, restore_run_structure)
 from src.tasks.velocity.mdp.payload_inertia import (
   MOUNT_D_MEAN,
   MOUNT_D_RANGES,
@@ -157,6 +158,9 @@ def main() -> None:
   runner.load(
     str(ckpt_path), load_cfg={"actor": True}, strict=True, map_location=device
   )
+  # Pre-2026-07-16 checkpoints carry no baked goal_scale: pin the TRAINED one, or the goal
+  # channel goes inert in this rollout (no-op on a baked scale).
+  pin_trained_goal_scale(runner, env, lambda: load_env_cfg(TASK_ID))
   if args.hl_obs_e_source == "phi":
     if args.phi_dir is None:
       raise SystemExit("--hl-obs-e-source phi requires --phi-dir")
