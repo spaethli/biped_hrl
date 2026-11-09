@@ -22,7 +22,7 @@ further A1a tuning is closed for now, and open ideas are parked in the backlog
 | Run | `logs/rsl_rl/h1_2_velocity_a1_v2/2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42` |
 | Checkpoint | `model_10000.pt` |
 | Deployed ONNX | `high_level.onnx` md5 `a38240fbe332`, `low_level.onnx` md5 `5f6fa925a1f0` (dims 94 / 96, `goal_scale` baked) |
-| Selected by | **hardware**, not the sim bench |
+| Selected by | **hardware**, not the sim bench. Post-hoc bridge check (2026-10-09, schedule A, 5 Runs): falls 2/5 vs 5/5 for its 12 % s123 sibling and 5/5 / 3/5 for the 20 % s42 / s123 arms; pooled by share 7/10 vs 8/10, so it supports the checkpoint, not the share → `data/2026-10-09-rse-s7/bridge_falls_rse.md` |
 
 Config that defines it (read from the run's own `params/`, not from the run name):
 
