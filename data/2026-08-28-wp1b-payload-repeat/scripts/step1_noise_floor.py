@@ -23,7 +23,7 @@ import sys
 import time
 from pathlib import Path
 
-REPO = Path("/home/iams/ramlab_ws/src/unitree_rl_mjlab")
+REPO = Path(__file__).resolve().parents[3]
 CKPT = (REPO / "logs/rsl_rl/h1_2_velocity_a1_v2/"
         "2026-08-26_10-02-56_a1a_fullmirror_jacc1e-7_standing15_s42/model_10000.pt")
 LOG_DIR = Path(os.environ["CLAUDE_JOB_DIR"]) / "tmp/wp1b/logs"

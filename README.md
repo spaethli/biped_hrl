@@ -1,205 +1,275 @@
-# biped_hrl — Hierarchical RL for Unitree H1-2 Locomotion
+# biped_hrl: Hierarchical RL for Unitree H1-2 Locomotion
 
-Master's thesis project: five hierarchical reinforcement-learning architectures
-(**A0–A4**) for velocity-tracking bipedal locomotion on the Unitree H1-2, compared for
-training stability, tracking accuracy, energy efficiency, and sim-to-real transfer.
+A framework for training, benchmarking and deploying velocity-tracking locomotion policies on the
+Unitree H1-2 humanoid, built for a master's thesis that compares a flat PPO policy against
+hierarchical reinforcement learning (HRL) architectures for sim-to-real transfer. The thesis is
+submitted; the code is kept usable as a starting point for follow-up projects.
 
-This repo is forked from
-[unitreerobotics/unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab),
-which provides the [mjlab](https://github.com/mujocolab/mjlab.git) training scaffold
-(Isaac-Lab-style API on MuJoCo/MuJoCo-Warp physics), PPO via
-[rsl_rl](https://github.com/leggedrobotics/rsl_rl.git), and a C++ sim2real deploy
-pipeline for several Unitree robots. Everything below the flat PPO baseline — the
-hierarchical architectures, the H1-2 actuator/gain retuning that got a policy onto real
-hardware, the goal-conditioned HRL runner, and the extended deploy/telemetry stack — is
-this project's own work, built on top of that scaffold.
+Forked from [unitreerobotics/unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab),
+which provides the [mjlab](https://github.com/mujocolab/mjlab.git) training scaffold (Isaac-Lab-style
+API on MuJoCo / MuJoCo-Warp), PPO via [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git) and a
+C++ sim2real deploy pipeline. Everything H1-2-specific beyond the upstream flat baseline (the
+retuned actuator model, the hierarchy, the evaluation probes, the deploy and telemetry stack) is
+this project's work.
 
 <div align="center">
 
-| MuJoCo | Physical H1-2 |
-|---|---|
-| <img src="doc/gif/h1_2-velocity.gif" width="320"/> | <img src="doc/gif/h1_2-velocity-real.gif" width="320"/> |
+| Flat (A0) | Hierarchical (A1a) | Hierarchical + DR |
+|---|---|---|
+| <img src="doc/gif/h1_2-flat.gif" width="240"/> | <img src="doc/gif/h1_2-hierarchical.gif" width="240"/> | <img src="doc/gif/h1_2-hierarchical-dr.gif" width="240"/> |
+
+The three report policies walking at 0.5 m/s in the MuJoCo deployment simulator, 5 s from the
+same stage of the bridge command schedule.
 
 </div>
 
-## What this fork adds
-
-- **HRL architectures A0–A4** (`Unitree-H1_2-Flat*` task family): a flat PPO baseline
-  (A0) plus a HIRO-style two-timescale hierarchy (A1: PPO low-level + TD3 high-level +
-  hindsight relabeling) that a goal-conditioned low-level policy is trained against.
-  A2 (RMA-style extrinsics adaptation on top of A1) is specced; A3/A4 are planned. See
-  the status dashboard in [`doc/hrl/HRL_plan.md`](doc/hrl/HRL_plan.md).
-- **A retuned, hardware-validated H1-2 actuator model.** The stock H1-2 config in
-  upstream never made it onto real hardware from this project's testing; this fork's PD
-  gain restructuring, derived action scaling, and added passive joint damping did.
-  Every deviation from upstream is catalogued and ranked by causal weight in
-  [`doc/hrl/A0_model_delta_vs_upstream.md`](doc/hrl/A0_model_delta_vs_upstream.md).
-- **A goal-conditioned HRL training stack** (`src/tasks/velocity/rl/hrl/`): a TD3
-  high-level policy (`high_level.py`, `td3.py`) issuing velocity/gait goals to a PPO
-  low-level policy, off-policy replay + HIRO goal relabeling (`storage.py`), a
-  configurable goal space (`goal_space.py`) with an inference-time-frozen goal scale
-  baked into the checkpoint, and estimator-noise domain randomization
-  (`state_noise.py`) for the sim-to-real gap.
-- **An extended C++ deploy pipeline for the H1-2** (`deploy/robots/h1_2/`): a second
-  runtime state, `State_RLHRL`, alongside upstream's flat-policy `State_RLBase`, running
-  the two-ONNX (high-level + low-level) hierarchy on hardware at its own cadence; a
-  runtime joint-limit safety filter; and a real-hardware DDS bridge/session toolkit
-  (`scripts/bridge_session.py`, `scripts/bridge_replica.py`) for scripted keyboard-driven
-  hardware trials with flight-recorder telemetry.
-- **A benchmark/probe toolset** (`scripts/play.py --checkpoint-file ... --eval-seeds ...`)
-  for judging policies deterministically (tracking error, fall rate, cost of transport,
-  action smoothness) instead of relying on training-time reward curves, plus an HRL
-  goal-achievability probe (`--diagnose-goals`) that decomposes tracking error into
-  high-level goal-setting error vs low-level goal-reaching error. `scripts/plot_radar.py`
-  turns a batch of `[BENCH]` captures into a normalized comparison chart, and
-  `scripts/summarize_runs.py` does the same for batches of bridge/readiness CSVs
-  (`deploy_gate_analyzer.py` scores one; this scores many and orders their triggers).
-- Design docs and architecture decisions under [`doc/hrl/`](doc/hrl) and
-  [`docs/adr/`](docs/adr), kept to current status and how the working solution is
-  implemented (the full experimental narrative — what was tried, what failed, why —
-  lives in a private research knowledge base outside this repo, since it isn't meant
-  for publication).
-
-Everything else — the multi-robot task registry (Go2, G1, A2, R1, H1_2, H2, As2), the
-generic mjlab training/play/motion-imitation workflow, and deploy for the other robots —
-is inherited from upstream and works as documented there; this README focuses on the
-H1-2 HRL work.
-
-## Architecture status
+## Status
 
 | Arch | Task ID | Idea | Status |
 |---|---|---|---|
-| **A0** | `Unitree-H1_2-Flat` | Flat PPO baseline | ✅ trained, deployed on real hardware |
-| **A1** | `Unitree-H1_2-Flat-A1` | HIRO: PPO low-level + TD3 high-level + goal relabeling | ✅ tracking at A0 parity, energy gap remains; deployed in sim, hardware deploy in progress |
-| **A2** | — | A1 + RMA-style privileged-extrinsics adaptation | ⬜ spec ready ([`doc/hrl/A2_ARMA.md`](doc/hrl/A2_ARMA.md)) |
-| **A3** | — | Offline gait library + RL residual | ⬜ planned |
-| **A4** | — | Trajectory + MPC | ⏸ likely out of scope |
+| **A0** | `Unitree-H1_2-Flat` | Flat PPO baseline | Trained, runs on the real robot |
+| **A1 / A1a** | `Unitree-H1_2-Flat-A1` | HIRO hierarchy: PPO low level, TD3 high level emitting velocity goals and a stride period every `c = 8` steps, rewarded on tracking minus cost of transport | Trained, runs on the real robot; **A1a is the deployed policy** |
+| H-adapt | `Unitree-H1_2-Flat-A1-Payload` + `hl_obs_e` | A1a whose high level reads environment extrinsics, estimated on the robot by an adaptation encoder | Built and exported; did not meet its payload bar ([ADR-0011](docs/adr/0011-record-bar-b-as-failed.md)) |
+| A2 | not registered | A1 + RMA-style latent adaptation on the low level | Spec only ([`doc/hrl/A2_ARMA.md`](doc/hrl/A2_ARMA.md)) |
+| A3 / A4 | not registered | Gait library + residual / trajectory + MPC | Not started |
 
-Full status, numbers, and open questions: [`doc/hrl/HRL_plan.md`](doc/hrl/HRL_plan.md)
-(start here), architecture-specific docs linked from it.
+Policy names used in the docs: **A0** (flat), **A1a** (the frozen hierarchical keeper,
+`logs/rsl_rl/h1_2_velocity_a1_v2/2026-09-02_12-57-09_a1a_fullmirror_cot5_standing12_s42/model_10000.pt`),
+**A0_DR / A1a_DR** (the same with coupled payload domain randomization). The full dashboard is
+[`doc/hrl/HRL_plan.md`](doc/hrl/HRL_plan.md); why A1a stays the deploy policy is
+[ADR-0013](docs/adr/0013-keep-a1a-as-the-deploy-policy.md).
 
-## Installation
+## Quick start
 
-See [`doc/setup_en.md`](doc/setup_en.md) (conda environment, mjlab/MuJoCo-Warp,
-dependencies).
-
-Conda env used throughout this project: `unitree_mjlab_h1_2_rl`.
-
-## Training
-
-Flat baseline (A0):
+Install the conda environment and mjlab / MuJoCo-Warp following [`doc/setup_en.md`](doc/setup_en.md).
+The environment used throughout is `unitree_mjlab_h1_2_rl`.
 
 ```bash
 conda activate unitree_mjlab_h1_2_rl
-python scripts/train.py Unitree-H1_2-Flat --env.scene.num-envs 4096 \
-    --agent.max-iterations 5001 --agent.run-name a0_baseline
+
+# train (launch with python directly, not `conda run`: it buffers stdout and breaks live W&B)
+python scripts/train.py Unitree-H1_2-Flat    --env.scene.num-envs 4096 --agent.max-iterations 10001 --agent.run-name a0
+python scripts/train.py Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096 --agent.max-iterations 10001 --agent.run-name a1a
+
+# watch a policy
+python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file <run>/model_10000.pt --num-envs 1
+
+# benchmark it (the canonical comparison)
+python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file <run>/model_10000.pt \
+    --num-envs 64 --eval-steps 600 --eval-seeds 2
+
+# export ONNX for deployment
+python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file <run>/model_10000.pt --export-onnx
 ```
 
-Hierarchical (A1), optionally warm-started from a converged A0 checkpoint:
+- Ask for `N+1` iterations (`10001`): checkpoints are named after the last iteration index, so
+  `10000` ends at `model_9999.pt`.
+- Resume with `--agent.resume True --agent.load-run <dir> --agent.load-checkpoint model_<it>.pt`;
+  `--agent.max-iterations` then counts additional iterations.
+- The bare A1 task trains the full A1a structure (TD3 high level, tracking reward, cadence
+  channel). Set `--agent.hl-algorithm oracle` for a fixed high level that isolates the low level.
+- Logs go to `logs/rsl_rl/<experiment>/<date>_<run-name>/`, W&B project `biped_hrl`.
+
+## Task IDs (H1-2)
+
+| Task ID | What it adds |
+|---|---|
+| `Unitree-H1_2-Flat` | A0, the flat baseline |
+| `Unitree-H1_2-Flat-A1` | The hierarchy (runner `HierarchicalRunner`) |
+| `Unitree-H1_2-Flat-Payload`, `-Flat-A1-Payload` | Coupled payload-mount DR: mass, CoM shift and inertia derived from one sampled backpack ([ADR-0010](docs/adr/0010-coupled-payload-mount-randomization.md)) |
+| `Unitree-H1_2-Rough` | Rough terrain with a blind actor (the height scan is critic-only, so the export stays deployable). Train with `--env.sim.mujoco.ccd-iterations 200` on a 12 GB GPU |
+| `-Flat-Lean`, `-Flat-A1-Lean` | Reduced reward shaping, for hierarchy-benefit ablations |
+| `-Flat-ExplicitPD`, `-Flat-WideDR`, `-Flat-CorrNoise` | Transfer-audit variants: explicit torque PD, a wider perturbation DR bundle, correlated observation noise |
+
+The other robots of the upstream registry (Go2, G1, A2, R1, H2, As2) are inherited unchanged.
+
+## Repository layout
+
+```
+src/tasks/velocity/
+  config/h1_2/, config/h1_2_a1/   env + agent configs, task registration (A0, A1 families)
+  mdp/                            rewards, observations, commands, payload inertia
+  rl/hrl/                         the hierarchy: HierarchicalRunner (co-training loop, save/load,
+                                  ONNX export), goal_space, td3, high_level, storage (relabeling),
+                                  checkpoint_structure (rebuild a checkpoint's trained structure),
+                                  leg_odom / base_estimators (Python twins of the C++ estimators)
+  eval/                           play.py's probes: rollout skeleton, add-ons, one module per probe
+scripts/                          train, play, deploy gates, hardware/bridge log scoring, figures
+deploy/robots/h1_2/               C++ controller: State_RLBase (flat), State_RLHRL (two ONNX nets)
+tests/                            CPU-only pytest suite (no GPU, no MuJoCo rollout, ~12 s)
+doc/hrl/, docs/adr/, CONTEXT.md   current design and status, architecture decisions, glossary
+.claude/docs/                     deep technical notes (HRL machinery, deployment, codebase map)
+```
+
+## Evaluating policies
+
+`scripts/play.py` loads a checkpoint, rebuilds the structure it was trained with
+(`rl/hrl/checkpoint_structure.py`) and runs one **probe**. Each probe prints one `[TAG] {json}`
+line; that line, not the table above it, is what downstream scripts parse, so its tag and keys
+are a contract.
+
+| Flag | Tag | Measures |
+|---|---|---|
+| `--eval-steps N` | `[BENCH]`, `[BENCH_SEED]` | The benchmark: tracking error, fall rate, smoothness (action jitter, joint acceleration), cost of transport, stance width, gait match |
+| `--eval-steps N --eval-cmd-vx 0.5` | `[BENCH]` | A held command: steady-state error (`ss_err_vx`) and rise time (`t90_s`) |
+| `--diagnose-goals N` | `[GOALDIAG]`, `[HOLDDIAG]`, `[PERIODDIAG]` | Hierarchy only: tracking error split into high-level goal error and low-level reach error |
+| `--diagnose-cadence N` | `[CADDIAG]` | The commanded stride period at every high-level fire |
+| `--diagnose-action-rate N` | `[ARDIAG]` | Action rate by step within the high-level window and by joint group |
+| `--diagnose-symmetry N` | `[SYMDIAG]` | Left/right gait symmetry and double-taps |
+| `--check-vel-increment N` | `[VELINC]` | IMU velocity-increment reconstruction (deploy feasibility) |
+| `--check-leg-odometry N` | `[LEGODOM]` | Leg-odometry velocity estimate vs ground truth |
+| `--probe-lean N` | `[LEANPROBE]` | Standing pitch under swept encoder bias or gravity-observation noise |
+
+Add-ons ride along inside a rollout probe: `--check-joint-limits True` (`[LIMITS]`, commanded
+targets vs the hardware limits), `--reward-terms True` (`[REWARD]`, every env reward term by
+regime), `--eval-cmd-seq default` (replay the bridge's command schedule) and
+`--eval-trace <path>` (per-step arrays in flight-recorder form). `--eval-payload-kg m` loads
+the backpack rig to `m` kg. `--out <file.json>` writes any probe's result together with the
+checkpoint md5, git commit and flags, so a number keeps its run.
+
+To compare policies on the same scorer the robot uses, replay the schedule and score the trace:
 
 ```bash
-python scripts/train.py Unitree-H1_2-Flat-A1 --env.scene.num-envs 4096 \
-    --agent.max-iterations 5001 --agent.run-name a1_td3_pose0p5_ar0p02 \
-    --agent.warm-start-path logs/rsl_rl/h1_2_velocity/<A0 run>/model_<it>.pt
+python scripts/play.py <task> --checkpoint-file <pt> --num-envs 64 --eval-seeds 1 \
+    --eval-cmd-seq default --eval-trace out/trace
+python scripts/bench_flight_recorder.py --sim --trace out/trace_s42.npz --out-dir out/
 ```
 
-> [!NOTE]
-> Launch with the activated conda env + `python` directly, not `conda run` — the
-> latter buffers stdout and breaks live W&B streaming.
->
-> `--agent.max-iterations` counts *additional* iterations on top of any resume, and the
-> checkpoint is named after the last iteration index, so ask for `N+1` (e.g. `5001`) to
-> land on the round number `model_5000.pt`.
+Rules that keep benchmark numbers meaningful:
 
-Training logs to `logs/rsl_rl/h1_2_velocity(_a1)/<date_time>/`; W&B project `biped_hrl`.
+- Use 64 envs (the default for every probe). One env is a single command draw and swings about
+  26 % between repeats.
+- Report walking and standing separately (the commanded speed above or below 0.1 m/s). The pooled
+  number is about 88 % walking and hides standing defects.
+- Train at least two seeds, and compare a lever against the spread of the same recipe across
+  seeds. Standing behaviour varies most (4x at identical config and seed).
+- Use `fall_rate`, not episode length, for survival, and sweep the commanded speed before calling
+  a tracking win.
+- No sim metric has predicted which policy the robot prefers. Treat the bench as a filter, not a
+  verdict ([ADR-0009](docs/adr/0009-revert-model-v3-action-clip.md), [ADR-0013](docs/adr/0013-keep-a1a-as-the-deploy-policy.md)).
 
-## Evaluation
+## Deploying to the H1-2
 
-Replay a policy in MuJoCo:
+Build the controller (needs [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git) and
+[unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2.git)):
 
 ```bash
-python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file <path to model_N.pt> --num-envs 1
+cd deploy/robots/h1_2 && mkdir -p build && cd build && cmake .. && make
+./h1_2_ctrl --network=lo        # against unitree_mujoco (sim first)
+./h1_2_ctrl --network=<iface>   # real robot
 ```
 
-Deterministic benchmark (the canonical way to compare policies — use `fall_rate`, not
-episode length, for survival):
+The flat policy's ONNX goes in `config/policy/velocity/v0/exported/`, the hierarchy's two nets
+(`high_level.onnx`, `low_level.onnx`) in `config/policy/velocity_hrl/v0/exported/`. Before a
+hardware session, run the one-command readiness gate and check what is actually deployed:
 
 ```bash
-python scripts/play.py <TaskID> --checkpoint-file <ckpt> --num-envs 64 \
-    --eval-steps 600 --eval-seeds 2
+python scripts/deploy_provenance.py --check --checkpoint-file <pt>     # md5-identifies the deployed ONNX
+python scripts/deploy_readiness.py <task> --checkpoint-file <pt> --tag <name>
+# exit 0 GO, 3 CAVEAT, 1 NO-GO, 2 INFRA (fail-closed); ~15-25 min
 ```
 
-Sustained-command hold diagnostic (batch-averaged metrics can hide bimodal failure
-modes at a fixed commanded speed):
+It runs provenance, the sim probes and a bridge session of the C++ controller in simulation (with a
+flat-policy control arm), then scores them. The step-by-step manual with every gate is
+[`doc/hrl/A1a_deploy_plan.md`](doc/hrl/A1a_deploy_plan.md) ("HOW TO RUN THE GATES"); deployment
+internals (ONNX metadata, the baked goal scale, the observation-dimension check, the safety
+filter) are in [`.claude/docs/deployment.md`](.claude/docs/deployment.md). Hardware runs are
+scored with `scripts/bench_flight_recorder.py` (flight-recorder CSVs into the same schema as the
+sim bench) and `scripts/mocap_align.py` (motion-capture ground truth).
+
+## Testing
 
 ```bash
-python scripts/play.py <TaskID> --checkpoint-file <ckpt> --eval-cmd-vx 0.5
+python -m pytest -q                              # CPU-only regression suite, ~12 s
+python scripts/check_test_sensitivity.py [file]  # re-introduces past defects; each must be caught
 ```
 
-A1-specific high-level-vs-low-level error decomposition:
+The suite guards the goal decode, reward terms, warm start, checkpoint restore, deploy/training
+config parity, the probe rollout order and the `[BENCH]` key contract. About 165 past defects are
+re-introduced by `check_test_sensitivity.py`, each of which must turn a named test red: a test
+that restates the logic it guards cannot fail, and this proves the suite can (pass a file
+basename to run a subset). Never run pytest while the mutation harness is running: it edits sources in place.
+
+Changes to `play.py` or a probe are gated on GPU rollouts, because no CPU test can show a rollout
+still produces the same numbers. `scripts/play_golden.py` runs a fixed matrix of 36 probe
+invocations and judges a candidate against three baseline runs of the original code:
 
 ```bash
-python scripts/play.py Unitree-H1_2-Flat-A1 --checkpoint-file <ckpt> \
-    --diagnose-goals 600 --eval-seeds 2 --num-envs 64
+python scripts/play_golden.py capture --out data/2026-11-09-play-golden --rep mychange   # ~25 min
+python scripts/play_golden.py compare --out data/2026-11-09-play-golden --baseline a,b,c --candidate mychange
 ```
 
-Export to ONNX for deployment with `--export-onnx` (also done automatically during
-training).
+A row passes when exit code, keys and strings match exactly and its failing-field fraction stays
+within 1.5x of the baselines' own disagreement. Re-baseline after a deliberate metric change.
 
-## Sim-to-real deployment (H1-2)
+## Extending the framework
 
-Requires [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git) and
-[unitree_sdk2](https://github.com/unitreerobotics/unitree_sdk2.git).
+**A new architecture.** Register a task in `src/tasks/velocity/config/<name>/__init__.py` (env cfg,
+agent cfg, runner class), reusing the A1 pieces where they fit: `HierarchicalRunner` for any
+two-timescale design, `goal_space.py` for the goal channel (`goal_components` in the agent cfg is
+the single source of truth for the goal dimension), `checkpoint_structure.py` so replay scripts
+rebuild your structure. Read [`.claude/docs/hrl-infra.md`](.claude/docs/hrl-infra.md) first; it
+lists the shared machinery and the gotchas A2/A3 are meant to inherit. Keep the flat baseline's
+reward and environment identical unless the comparison is the point, and record the decision in
+`docs/adr/`.
 
-```bash
-cd deploy/robots/h1_2
-mkdir build && cd build
-cmake .. && make
-```
+**A new probe.** Add a module to `src/tasks/velocity/eval/probes/` with `run(ctx) -> dict` that
+prints one `[TAG] {json}` line, add its flag to `PlayConfig` in `scripts/play.py` and an entry to
+`PROBES` in `probes/__init__.py`. Use `rollout()` from `eval/rollout.py` with an `Observer`
+subclass unless the probe has to drive the policy itself. Add a row to `play_golden.py`'s matrix
+and capture its baselines.
 
-Place the exported flat-policy ONNX under
-`deploy/robots/h1_2/config/policy/velocity/v0/exported/` (`State_RLBase`, A0), or the
-paired high-level/low-level HRL ONNX pair under
-`deploy/robots/h1_2/config/policy/velocity_hrl/v0/exported/` (`State_RLHRL`, A1).
+**Replaying a checkpoint in a new script.** Call `restore_run_structure` before building the env
+and runner, then `pin_trained_goal_scale` after `runner.load()`. A hierarchical checkpoint
+carries its goal scale; never re-derive it from the replay env's command ranges.
 
-```bash
-./h1_2_ctrl --network=lo        # simulation deployment (unitree_mujoco), or
-./h1_2_ctrl --network=<iface>   # real robot, e.g. enp5s0
-```
+**Conventions.** 2-space indent, inline one-off fixes rather than helpers, reuse before adding.
+Non-trivial changes go analysis, feature definition, implementation, testing, with a test plan
+defined up front. Domain terms are defined in [`CONTEXT.md`](CONTEXT.md).
 
-Sim-first deployment via [unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)
-is strongly recommended before touching real hardware. For scripted, repeatable
-hardware trials (keyboard-command sequences with flight-recorder telemetry logging),
-see `scripts/bridge_session.py`.
+## Lessons that generalize
 
-Deployment details, ONNX metadata (baked HRL goal scale), and the runtime safety filter
-are documented in `.claude/docs/deployment.md`.
+- **The actuator model decided transfer.** The PD-gain restructure, derived action scale and arm
+  hold gains got a policy walking on the robot where reward shaping and DR did not
+  ([`doc/hrl/A0_model_delta_vs_upstream.md`](doc/hrl/A0_model_delta_vs_upstream.md), ADR-0005).
+- **A reward coefficient is calibrated against a reward, not a task.** Reformulating a term
+  invalidates every weight tuned against it (the CoT coefficient flipped sign after its
+  denominator changed). A normalized reward whose denominator the agent controls invites it to
+  inflate that denominator.
+- **A penalty is not a clip.** An L1 penalty on joint-limit excess pushed the policy about 1.8
+  action sigmas inside the bound and shrank the commanded ankle roll range 2.1-2.4x; the bench
+  saw only improvements (ADR-0008, ADR-0009).
+- **Policy properties travel with the policy.** The goal scale and the adaptation encoder's
+  layout are baked into the checkpoint and ONNX metadata, never re-derived at inference.
+- **Fail closed at load, latch at run time.** The C++ controller checks every ONNX input width
+  when it loads; a run-time mismatch latches to a passive state rather than throwing on the
+  policy thread.
+- **Match the control on the axis you claim.** A flat baseline trained with a different standing
+  fraction confounded every standing comparison for months.
 
-## Key findings so far
+## Documentation map
 
-- A1's HIRO hierarchy matches A0's tracking accuracy (err_vx/vy/yaw ≈ 0.10) at zero
-  additional fall rate; the remaining gap is energy efficiency (cost of transport), not
-  stability or tracking.
-- The H1-2 actuator retuning (PD gains, derived action scale, passive damping) — not
-  domain randomization or reward shaping — is what separated a policy that only worked
-  in simulation from one that walked on real hardware.
-- Full experiment history, ablations, and dead ends live in a private research
-  knowledge base outside this repo; [`doc/hrl/`](doc/hrl) and
-  [`doc/hrl/worklines.md`](doc/hrl/worklines.md) here track only current status and
-  who owns what.
+| Where | What |
+|---|---|
+| [`doc/hrl/HRL_plan.md`](doc/hrl/HRL_plan.md) | Start here: A0-A4 status and links |
+| [`doc/hrl/A1_HIRO.md`](doc/hrl/A1_HIRO.md), [`A1a_plan.md`](doc/hrl/A1a_plan.md) | The hierarchy as built, and the A1a line |
+| [`doc/hrl/A1a_deploy_plan.md`](doc/hrl/A1a_deploy_plan.md) | Deploy gates, step by step |
+| [`doc/hrl/h1_2_kinematics.md`](doc/hrl/h1_2_kinematics.md), [`h1_2_ekf_design.md`](doc/hrl/h1_2_ekf_design.md) | Frames, IMU placement, base-velocity estimation |
+| [`docs/adr/`](docs/adr) | Architecture decisions (do not re-litigate without new evidence) |
+| [`CONTEXT.md`](CONTEXT.md) | Glossary |
+| [`.claude/docs/`](.claude/docs) | HRL machinery, deployment, codebase map, experiment design, cluster |
+
+The exploratory history (what was tried, what failed and why) is kept in a separate research
+knowledge base, not in this repository.
 
 ## License
 
-Apache License 2.0 — see [`LICENCE`](LICENCE), inherited unchanged from upstream.
+Apache License 2.0, see [`LICENCE`](LICENCE), inherited unchanged from upstream.
 
 ## Acknowledgements
 
-Built on top of:
-
-- [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab): the base
-  RL/deploy framework this project is forked from
-- [mjlab](https://github.com/mujocolab/mjlab.git): training and execution framework
-- [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git): PPO implementation
-- [mujoco_warp](https://github.com/google-deepmind/mujoco_warp.git): GPU-accelerated simulation
-- [mujoco](https://github.com/google-deepmind/mujoco.git): rigid-body physics engine
-- [whole_body_tracking](https://github.com/HybridRobotics/whole_body_tracking.git): motion tracking reference
+Built on [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab),
+[mjlab](https://github.com/mujocolab/mjlab.git), [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git),
+[mujoco_warp](https://github.com/google-deepmind/mujoco_warp.git),
+[mujoco](https://github.com/google-deepmind/mujoco.git) and
+[whole_body_tracking](https://github.com/HybridRobotics/whole_body_tracking.git).

@@ -152,7 +152,7 @@ STEP 6 -- OBJECTIVE COMPARISON  (report only, no recommendation)
     vx=0.6: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
     vx=0.7: interior T* resolvable in 0/4 payloads (any real structure 0/4) | only 0/4 payloads give a resolvable interior T* -> inconclusive
 
-CSVs -> /home/iams/ramlab_ws/src/unitree_rl_mjlab/data/2026-08-28-wp1b-payload-repeat/
+CSVs -> data/2026-08-28-wp1b-payload-repeat/
 wrote wp1b_cot_vs_T.png
 wrote wp1b_cot_copper_k0p3_vs_T.png
 wrote wp1b_cot_copper_k1p0_vs_T.png

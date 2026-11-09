@@ -150,7 +150,7 @@ in §4 is load-bearing — without it your entry is invisible to the compile ste
 
 `wiki/thesis/report-inbox.md` is not a fourth destination — it's a derived index over
 (1) the repo and (2) the journal that mirrors `raw/latex/main.tex`'s own section
-headers, so Liam can find what's new without re-reading either. Whenever this session
+headers, so the owner can find what's new without re-reading either. Whenever this session
 routed a fact that changes what's ready to go into the thesis — a solved/closed
 milestone, a new architecture result, a formula that no longer matches the current
 code, a hardware finding, a paper that grounds one of the above — check whether the

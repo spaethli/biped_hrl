@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-REPO = Path("/home/iams/ramlab_ws/src/unitree_rl_mjlab")
+REPO = Path(__file__).resolve().parents[3]
 OUT_DIR = REPO / "data/2026-08-28-wp1b-payload-repeat"
 
 T_GRID = np.array([0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70])

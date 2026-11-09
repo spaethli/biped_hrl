@@ -17,7 +17,7 @@ Guard: aborts on [SHIM]/structure-restore, on a nonzero exit, or if play.py's
 import csv, hashlib, json, os, subprocess, sys, time
 from pathlib import Path
 
-REPO = Path("/home/iams/ramlab_ws/src/unitree_rl_mjlab")            # for the checkpoint + data dir
+REPO = Path(__file__).resolve().parents[3]            # for the checkpoint + data dir
 WT = Path(os.environ["CLAUDE_JOB_DIR"]) / "tmp/wt_v3"                # cwd for play.py (d077902)
 CKPT = (REPO / "logs/rsl_rl/h1_2_velocity_a1_v2/"
         "2026-08-26_10-02-56_a1a_fullmirror_jacc1e-7_standing15_s42/model_10000.pt")

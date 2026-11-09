@@ -19,3 +19,6 @@ simulate/build__pycache_/
 __pycache__/
 *.pyc
 .claude/jobs/
+
+# editor settings (machine-local paths)
+.vscode/

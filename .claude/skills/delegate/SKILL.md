@@ -54,4 +54,4 @@ Every prompt must contain, in this order:
 - The prompt names a MODEL recommendation explicitly, with one clause of why.
 - Trainings and benchmarks belong in the executor chat, not the planning chat.
 - If the task's pass criterion cannot be stated objectively, it is not ready to
-  delegate - grill it first (/grill-with-docs).
+  delegate - grill it first (/grilling).

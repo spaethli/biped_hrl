@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-REPO = Path("/home/iams/ramlab_ws/src/unitree_rl_mjlab")
+REPO = Path(__file__).resolve().parents[3]
 OUT = REPO / "data/2026-08-28-wp1b-payload-repeat"
 df = pd.read_csv(OUT / "wp1b_sweep.csv")
 for k in (0.1, 0.3, 1.0):
