@@ -340,10 +340,8 @@ def test_every_bench_key_is_emitted_renamed_or_documented_as_omitted():
     }
     renamed = {"err_vx", "err_vy"}  # -> err_vx_est / err_vy_est when the reference is an estimate
     bench_schema = emitted | renamed | set(bfr.OMITTED)
-    play = (REPO / "scripts/play.py").read_text()
-    block = play.split("seed_results.append({", 1)[1].split("})", 1)[0]
-    import re
-    keys = set(re.findall(r'^\s*"([a-z0-9_]+)":', block, re.M))
+    from src.tasks.velocity.eval.probes.bench import SEED_KEYS
+    keys = set(SEED_KEYS)
     assert keys - bench_schema == set(), f"unclassified BENCH key(s): {sorted(keys - bench_schema)}"
     assert emitted & set(bfr.OMITTED) == set(), "a key is both emitted and documented as omitted"
 

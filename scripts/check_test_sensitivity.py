@@ -49,6 +49,8 @@ IOCH = REPO / "deploy/robots/h1_2/include/obs_contract.h"
 ACS = REPO / "scripts/analyze_cadence_settling.py"
 SSA = REPO / "scripts/score_stand_attitude.py"
 DRDY = REPO / "scripts/deploy_readiness.py"
+EVR = REPO / "src/tasks/velocity/eval/rollout.py"
+BEN = REPO / "src/tasks/velocity/eval/probes/bench.py"
 
 # (label, file, old, new, test that must fail)
 MUTATIONS = [
@@ -449,6 +451,23 @@ MUTATIONS = [
    '    "height_dev": "body_height is in the dead sportmodestate block (identically zero)",\n',
    "",
    "test_every_bench_key_is_emitted_renamed_or_documented_as_omitted"),
+
+  # play.py probe refactor (2026-11-09): the shared rollout skeleton's ORDER is part of every
+  # bench number (golden baseline data/2026-11-09-play-golden). A shifted seed, a phi history
+  # carried across seeds, or a different seed aggregate all stay inside the GPU noise floor
+  # of one run, so only these CPU tests can see them.
+  ("rollout seeds 43+i, not the 42+i every bench number was measured at", EVR,
+   "seed = 42 + seed_idx", "seed = 43 + seed_idx",
+   "test_rollout_seeds_each_seed_before_its_hooks_and_orders_every_step"),
+  ("the phi done mask starts all-False, so seed 1 starts on seed 0's history", EVR,
+   "dones = torch.ones(env.unwrapped.num_envs", "dones = torch.zeros(env.unwrapped.num_envs",
+   "test_only_pass_dones_hands_the_policy_the_done_mask_starting_all_true"),
+  ("[BENCH] seed aggregate by median, not mean", EVR,
+   "means = {k: vals[k].mean().item()", "means = {k: vals[k].median().item()",
+   "test_mean_std_aggregates_over_seeds_in_key_order"),
+  ("a bench key dropped from SEED_KEYS without the recorded [BENCH] contract", BEN,
+   '"stance_w_td", ', "",
+   "test_seed_keys_match_the_recorded_bench_seed_line"),
 
   # bench_flight_recorder pairing/alignment (2026-09-14): the 2026-09-07 A1a session broke
   # both assumptions the tool had inherited from how the 2026-08-27 runs were operated.
