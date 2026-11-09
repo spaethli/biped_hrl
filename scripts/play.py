@@ -174,6 +174,10 @@ class PlayConfig:
   step per env in the flight recorder's quantities and DEPLOY slot order (command, commanded
   target, measured q/dq, actuator torque, IMU-body attitude and gyro, true base velocity, the
   observed gait phase, first-fall step; with ``--reward-terms`` also the per-term env reward)."""
+  out: str = ""
+  """Any probe: also write its `[TAG]` result to this JSON file, with what identifies the run:
+  the checkpoint's md5, the git commit (and whether the tree was dirty), the task and every flag.
+  The `[TAG]` line alone lives in terminal scrollback, which is how a number loses its run."""
   eval_payload_kg: float | None = None
   """WP1 payload pilot (2026-08-27): pin an exact torso payload mass (kg, added at the COM)
   for the whole eval rollout, instead of the training-time sampled range. Reuses the existing
@@ -616,10 +620,21 @@ def run_play(task_id: str, cfg: PlayConfig):
     runner = None
   probe = probes.select(cfg)
   if probe is not None:
-    probe.run(ProbeContext(
+    result = probe.run(ProbeContext(
       cfg=cfg, env=env, runner=runner, policy=policy, policy_wants_dones=policy_wants_dones,
       resume_path=resume_path, agent_cfg=agent_cfg, device=device, dummy=DUMMY_MODE,
       seq_cmds=seq_cmds, cf_cols=tuple(_cf_cols), cf_vals=tuple(_cf_vals)))
+    if cfg.out:
+      import hashlib, json, subprocess
+      git = lambda *a: subprocess.run(["git", *a], capture_output=True, text=True).stdout.strip()  # noqa: E731
+      Path(cfg.out).parent.mkdir(parents=True, exist_ok=True)
+      Path(cfg.out).write_text(json.dumps({
+        "probe": probe.__name__.rsplit(".", 1)[-1], "result": result, "task": task_id,
+        "checkpoint": str(resume_path) if resume_path else None,
+        "checkpoint_md5": hashlib.md5(resume_path.read_bytes()).hexdigest() if resume_path else None,
+        "git_sha": git("rev-parse", "HEAD"), "git_dirty": bool(git("status", "--porcelain")),
+        "flags": asdict(cfg)}, indent=1, default=str))
+      print(f"[INFO] Wrote {cfg.out}")
     env.close()
     return
 

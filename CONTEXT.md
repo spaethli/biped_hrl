@@ -374,3 +374,24 @@ the two are never silently mixed in one column.
 _Avoid_: "the Vicon data" (the raw capture is not this; the alignment and lever correction
 are what make it a pelvis twist); "validated" for a Run that has no capture; aligning on `t`
 (a tick counter: slow and bent against real time).
+
+**Probe**:
+One `play.py` measurement mode, selected by its flag (`--eval-steps` is the benchmark,
+`--check-vel-increment`, `--diagnose-goals`, ...), that rolls a checkpoint out in simulation and
+emits one `[TAG] {json}` line (`[BENCH]`, `[VELINC]`, `[GOALDIAG]`, ...). The `[TAG]` line, not the
+human-readable table above it, is the interface: about ten scripts and the deploy-readiness gate
+parse it, so its name and keys are a contract. Each probe is a module in
+`src/tasks/velocity/eval/probes/`; an *add-on* (`--check-joint-limits`, `--reward-terms`,
+`--eval-trace`, `--eval-cmd-seq`) rides along inside another probe's rollout.
+_Avoid_: "eval" or "benchmark" for any probe (the benchmark is one probe); "diagnostic" as a
+category (the deploy gates read some of them).
+
+**Golden baseline**:
+The full probe matrix run several times on frozen code, so a code change can be judged against
+the run-to-run noise of the ORIGINAL rather than against one number. Repeat runs of identical
+code differ (GPU non-determinism), and the noise is heavy-tailed per field, so the verdict is per
+matrix row: no contract mismatch, and a failing-field fraction no worse than the baselines' own
+leave-one-out fraction allows. `scripts/play_golden.py`; the 2026-11-09 set, taken on tag
+`thesis-results`, is `data/2026-11-09-play-golden/`.
+_Avoid_: "regression test" (it needs a GPU and ~25 min a run, and never runs in pytest);
+"byte-identical" for anything but the ONNX export (no rollout reproduces bit for bit).
